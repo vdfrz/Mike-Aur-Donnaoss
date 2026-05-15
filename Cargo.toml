@@ -1,0 +1,259 @@
+[workspace]
+members = [".", "src-tauri"]
+resolver = "2"
+
+[package]
+name = "mike"
+version = "0.1.0"
+edition = "2024"
+description = "Mike local — sovereign AI document assistant"
+
+# ------------------------------------------------------------------
+# Web framework
+# ------------------------------------------------------------------
+[dependencies]
+axum = { version = "0.8", features = ["multipart", "macros"] }
+axum-extra = { version = "0.10", features = ["typed-header"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+tokio = { version = "1", features = ["full"] }
+
+# ------------------------------------------------------------------
+# Database — SQLite via sqlx (zero setup, single file)
+# ------------------------------------------------------------------
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate", "uuid", "chrono"] }
+
+# ------------------------------------------------------------------
+# Auth — PIN (Argon2id) + biometric + opaque session tokens
+# ------------------------------------------------------------------
+argon2 = "0.5"
+# rand_core 0.6 with getrandom — needed to get OsRng compatible with password-hash 0.5
+rand_core_06 = { package = "rand_core", version = "0.6", features = ["getrandom"] }
+# Session tokens are opaque UUIDs stored in SQLite — no JWT needed for local use
+
+# .mikeprj export envelope: AES-256-GCM with key derived from recipient
+# email via Argon2id. Sha2 needed to fingerprint the email (we only ship
+# the hash, not the email itself).
+aes-gcm = "0.10"
+sha2 = "0.10"
+
+# ------------------------------------------------------------------
+# RAG: embeddings + vector store (sqlite-vec) + folder watcher
+# ------------------------------------------------------------------
+# fastembed wraps ort (ONNX Runtime) and downloads/caches models from
+# HuggingFace on first use. We default to the multilingual-e5-base
+# variant (768 dims, 512 max tokens) which works well for IT/EN legal
+# text. Optional feature gate so devs without ort/onnxruntime libs can
+# still build the rest of MikeRust.
+fastembed = { version = "5", optional = true }
+# Direct dep on the same ort version fastembed pulls transitively, so
+# we can configure execution providers (DirectML on Windows GPUs, QNN
+# on Qualcomm Snapdragon NPUs) without forking fastembed. Cargo
+# deduplicates: there's still a single ort 2.0.0-rc.12 in the build,
+# our features just merge into fastembed's existing feature set.
+ort = { version = "=2.0.0-rc.12", optional = true, default-features = false }
+# Vector store via the sqlite-vec extension. Same SQLite file as the
+# rest of MikeRust (mike.db) — atomic transactions, single backup,
+# no extra daemon, no protoc. Brute-force cosine in C with SIMD;
+# fast up to ~500k vectors which is well above any single-firm needs.
+sqlite-vec = { version = "0.1", optional = true }
+# Needed only to call `sqlite3_auto_extension` so sqlx's pool picks
+# up the vec0 extension on every new connection. The version is kept
+# in sync with sqlx's own libsqlite3-sys via cargo's dedup.
+libsqlite3-sys = { version = "0.30", optional = true, features = ["bundled"] }
+# Pack/unpack f32 vectors as little-endian bytes for the embedding BLOB.
+zerocopy = { version = "0.7", optional = true, features = ["derive"] }
+# Folder scan: depth-first traversal of the user-configured directory
+# tree, with `.gitignore`/`.mikesyncignore` honored.
+walkdir = { version = "2", optional = true }
+ignore  = { version = "0.4", optional = true }
+
+# ------------------------------------------------------------------
+# Storage — local filesystem + optional S3/R2 fallback
+# ------------------------------------------------------------------
+aws-sdk-s3 = { version = "1", optional = true }
+aws-config = { version = "1", optional = true }
+
+# ------------------------------------------------------------------
+# PDF extraction — pdfium-render (bundled dll in libs/pdfium/)
+# Pass 1: native text extraction; Pass 2: Tesseract OCR fallback
+# ------------------------------------------------------------------
+pdfium-render = { version = "0.8", features = ["thread_safe", "image"], optional = true }
+# Tesseract OCR binding — requires `brew install tesseract` on macOS.
+# Feature-gated behind the `tesseract` feature so the native C lib
+# dependency is optional.
+leptess = { version = "0.14", optional = true }
+# image used for: PDF page rendering (under "pdf" feature) AND TIFF→JPEG conversion (always).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# Multi-page TIFF reading — image alone gives only the first frame.
+tiff = "0.9"
+
+# ------------------------------------------------------------------
+# DOCX parsing — pure Rust ZIP+XML (no external process)
+# ------------------------------------------------------------------
+zip = "2"
+quick-xml = { version = "0.37", features = ["serialize"] }
+pulldown-cmark = { version = "0.12", default-features = false }
+# HTML scraping for the EUR-Lex adapter — strips the rendered legal-
+# content page down to the article body so we can chunk + embed it.
+# pure-Rust, ~1MB of compile-time cost; no native deps.
+scraper = "0.20"
+# Parquet reader for the italian-legal-corpus HuggingFace bulk import.
+# We download the dataset's published shards, project only the
+# metadata columns we need (no `text` body — that stays remote and is
+# fetched on demand), and stream them into our local SQLite FTS5
+# index. Used by `src/corpora/italian_legal.rs`.
+parquet = { version = "53", default-features = false, features = ["arrow", "snap", "zstd"] }
+arrow-array = "53"
+arrow-schema = "53"
+
+# ------------------------------------------------------------------
+# RTF — pure-Rust text extraction via rtf-parser (26k recent
+# downloads, no native deps). Used by the sync scanner + the
+# read_document builtin tool. We only need the plain text after
+# stripping control words, fonts, pictures, and field codes.
+# ------------------------------------------------------------------
+rtf-parser = "0.4"
+
+# ------------------------------------------------------------------
+# XLSX parsing — calamine (pure Rust, supports xlsx, xls, xlsb, ods)
+# ------------------------------------------------------------------
+calamine = "0.26"
+
+# ------------------------------------------------------------------
+# HTTP client — LLM API calls + MCP client + SSE streaming
+# ------------------------------------------------------------------
+reqwest = { version = "0.12", features = ["json", "stream"] }
+url = "2"
+futures-util = "0.3"
+tokio-stream = "0.1"
+bytes = "1"
+
+# ------------------------------------------------------------------
+# MCP client — protocol wire types (no official Rust SDK yet)
+# ------------------------------------------------------------------
+# Uses reqwest + serde_json for Streamable HTTP and SSE transports
+
+# ------------------------------------------------------------------
+# Serialization / misc
+# ------------------------------------------------------------------
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+dotenvy = "0.15"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+base64 = "0.22"
+rand = "0.9"
+async-trait = "0.1"
+
+# ------------------------------------------------------------------
+# Optional features
+# ------------------------------------------------------------------
+[features]
+default = ["local-storage", "rag", "pdf", "tesseract"]
+local-storage = []
+s3-storage = ["dep:aws-sdk-s3", "dep:aws-config"]
+pdf = ["dep:pdfium-render"]
+# Tesseract OCR for scanned PDFs — requires `brew install tesseract`
+tesseract = ["dep:leptess"]
+# Embeddings + vector DB + folder scanner. Pulled in by default so the
+# UI's "Sincronizza cartella" panel is functional out of the box, but
+# can be disabled (`--no-default-features`) for slim CI builds since
+# fastembed transitively depends on `ort` + native onnxruntime libs.
+rag = [
+    "dep:fastembed",
+    "dep:ort",
+    "dep:sqlite-vec",
+    "dep:libsqlite3-sys",
+    "dep:zerocopy",
+    "dep:walkdir",
+    "dep:ignore",
+]
+# Hardware-accelerated embedding inference via ONNX Runtime execution
+# providers. Strictly opt-in — the default `rag` build uses CPU only,
+# which is portable but slower on batch indexing.
+#
+#   --features rag-directml  Windows GPU (Adreno X1, Iris, Radeon, …)
+#                            via DirectML 1.x. Works on any DX12 device,
+#                            no extra SDK needed beyond what Windows
+#                            already ships.
+#
+#   --features rag-qnn       Qualcomm Snapdragon NPU (Hexagon) on
+#                            Snapdragon X Elite / 8 Gen 3 / etc. via
+#                            QNN HTP backend. REQUIRES the Qualcomm AI
+#                            Engine Direct SDK installed and the
+#                            backend DLL on PATH (`QnnHtp.dll` on
+#                            Windows ARM64). Without the SDK the
+#                            provider falls back to CPU at runtime.
+#
+# Both can be enabled together — the service tries them in this order:
+# QNN → DirectML → CPU, and ort silently skips any provider whose DLLs
+# aren't loadable on the current machine.
+rag-directml = ["dep:ort", "ort/directml"]
+rag-qnn = ["dep:ort", "ort/qnn"]
+
+# ------------------------------------------------------------------
+# pdfium DLL path — bundled alongside the binary
+# ------------------------------------------------------------------
+[package.metadata.pdfium]
+# Place pdfium.dll (Windows) / libpdfium.so (Linux) / libpdfium.dylib (macOS)
+# in libs/pdfium/ — the binary looks there at runtime via PDFIUM_DYNAMIC_LIB_PATH
+bindings = "libs/pdfium"
+
+# ------------------------------------------------------------------
+# Biometric auth — platform-specific
+# ------------------------------------------------------------------
+[target.'cfg(target_os = "windows")'.dependencies]
+# Windows Hello: KeyCredentialManager + UserConsentVerifier;
+# Win32_System_Threading: SetThreadPriority for the embedding work
+# so a long indexing run can't peg the laptop into unresponsiveness.
+windows = { version = "0.61", features = [
+    "Win32_System_Threading",
+    "Security_Credentials",
+    "Security_Credentials_UI",
+    "Foundation",
+] }
+
+# [target.'cfg(target_os = "macos")'.dependencies]
+# TODO: macOS Touch ID via LocalAuthentication framework
+# objc2-local-authentication = "0.3"
+
+[profile.dev]
+# Workaround for MSVC LNK1140 on Windows ARM64.
+debug = "line-tables-only"
+# opt-level 1 gives 3-5x faster runtime vs 0, with much shorter compile
+# times than 3. Critical for tauri dev where the Rust backend runs
+# in-process and must stream LLM responses at wire speed.
+opt-level = 1
+
+# Give the I/O-critical dependencies full optimization even in dev builds
+# so SSE streaming from DeepSeek is as fast as in a release build.
+[profile.dev.package.reqwest]
+opt-level = 3
+[profile.dev.package.tokio]
+opt-level = 3
+[profile.dev.package.hyper]
+opt-level = 3
+[profile.dev.package.h2]
+opt-level = 3
+[profile.dev.package.rustls]
+opt-level = 3
+[profile.dev.package.serde_json]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+# ------------------------------------------------------------------
+# Test-only dependencies — kept out of the production binary.
+# ------------------------------------------------------------------
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }

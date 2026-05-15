@@ -1,0 +1,12 @@
+# Files Tauri's dev watcher should NOT trigger a rebuild for. Without
+# this, anything written to src-tauri/ during dev (SQLite WAL/SHM, logs,
+# stray .db files) restarts the whole app — see the rebuild loop bug.
+# Keep this in sync with `.env` STORAGE_PATH so user data never lives
+# inside the watched directory.
+
+*.db
+*.db-shm
+*.db-wal
+*.log
+data/
+storage/

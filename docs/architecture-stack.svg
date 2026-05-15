@@ -1,0 +1,193 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 700"
+     font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
+     font-size="13" role="img"
+     aria-label="MikeRust architectural stack: a Next.js frontend in a Tauri webview talks to a Rust axum backend over local HTTP and SSE. The backend orchestrates three engine groups — SQLite with sqlite-vec for storage and vector search, ONNX runtime for embeddings, and a stack of pure-Rust extractors (pdfium, quick-xml, rtf-parser, calamine) for documents. Below a sovereign boundary, optional outbound connections to remote LLM providers and remote MCP servers are shown as dashed channels.">
+  <title>MikeRust architectural stack</title>
+
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5"
+            markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#3f3f46"/>
+    </marker>
+    <marker id="arrow-dashed" viewBox="0 0 10 10" refX="9" refY="5"
+            markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#9ca3af"/>
+    </marker>
+  </defs>
+
+  <!-- ─── Tier labels in the left margin ────────────────────────── -->
+  <g font-size="10" fill="#9ca3af" text-anchor="start" letter-spacing="1">
+    <text x="20" y="22"  font-weight="600">PRESENTATION</text>
+    <text x="20" y="172" font-weight="600">ORCHESTRATION</text>
+    <text x="20" y="312" font-weight="600">ENGINES &amp; DATA</text>
+    <text x="20" y="552" font-weight="600">OUTBOUND · OPT-IN</text>
+  </g>
+
+  <!-- ─── Tier 1: Frontend (Next.js in Tauri webview) ───────────── -->
+  <g transform="translate(160, 30)">
+    <rect width="640" height="100" rx="6"
+          fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.5"/>
+    <text x="320" y="32" text-anchor="middle"
+          font-weight="600" fill="#1e3a8a" font-size="17">Next.js frontend</text>
+    <text x="320" y="52" text-anchor="middle"
+          fill="#1e40af" font-size="12">Tauri webview · HMR-friendly</text>
+    <text x="320" y="78" text-anchor="middle"
+          fill="#3730a3" font-size="11">
+      chat panel · doc viewer · citations · settings · MCP discovery UI
+    </text>
+  </g>
+
+  <!-- Arrow Frontend → Backend with protocol label -->
+  <path d="M 480 130 L 480 180" fill="none"
+        stroke="#3f3f46" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="500" y="158" text-anchor="start"
+        font-style="italic" font-size="11" fill="#52525b">
+    HTTP + SSE  ·  127.0.0.1:3001
+  </text>
+
+  <!-- ─── Tier 2: Backend (axum) ────────────────────────────────── -->
+  <g transform="translate(160, 180)">
+    <rect width="640" height="100" rx="6"
+          fill="#cfe1f8" stroke="#1e3a5f" stroke-width="1.5"/>
+    <text x="320" y="32" text-anchor="middle"
+          font-weight="600" fill="#1e3a5f" font-size="17">axum backend</text>
+    <text x="320" y="52" text-anchor="middle"
+          fill="#3c5a87" font-size="12">Rust · async / tokio · single binary</text>
+    <text x="320" y="78" text-anchor="middle"
+          fill="#1e3a5f" font-size="11">
+      auth · routes · chat handler · corpora adapters · MCP client · embeddings service
+    </text>
+  </g>
+
+  <!-- Arrows Backend → 3 engine groups -->
+  <path d="M 320 280 L 200 320" fill="none"
+        stroke="#3f3f46" stroke-width="1.3" marker-end="url(#arrow)"/>
+  <path d="M 480 280 L 480 320" fill="none"
+        stroke="#3f3f46" stroke-width="1.3" marker-end="url(#arrow)"/>
+  <path d="M 640 280 L 760 320" fill="none"
+        stroke="#3f3f46" stroke-width="1.3" marker-end="url(#arrow)"/>
+
+  <!-- ─── Tier 3: Engines & data (3 columns) ────────────────────── -->
+  <!-- Storage column -->
+  <g transform="translate(60, 320)">
+    <rect width="280" height="160" rx="5"
+          fill="#f1f5f9" stroke="#475569" stroke-width="1.2"/>
+    <text x="140" y="28" text-anchor="middle"
+          font-weight="600" fill="#0f172a" font-size="14">Storage</text>
+    <line x1="20" y1="42" x2="260" y2="42" stroke="#cbd5e1" stroke-width="1"/>
+    <g font-size="12" fill="#1e293b">
+      <text x="20" y="62" font-weight="500">SQLite (WAL)</text>
+      <text x="20" y="80" font-size="11" fill="#475569">single-file embedded DB</text>
+      <text x="20" y="103" font-weight="500">sqlite-vec</text>
+      <text x="20" y="121" font-size="11" fill="#475569">vec0 virtual table · 768-dim partitioned</text>
+      <text x="20" y="144" font-weight="500" font-size="11">Local file system</text>
+    </g>
+    <text x="140" y="174" text-anchor="middle"
+          font-style="italic" font-size="10" fill="#64748b">
+      data/db/mike.db  ·  data/storage/
+    </text>
+  </g>
+
+  <!-- Inference column -->
+  <g transform="translate(360, 320)">
+    <rect width="240" height="160" rx="5"
+          fill="#f1f5f9" stroke="#475569" stroke-width="1.2"/>
+    <text x="120" y="28" text-anchor="middle"
+          font-weight="600" fill="#0f172a" font-size="14">Inference</text>
+    <line x1="20" y1="42" x2="220" y2="42" stroke="#cbd5e1" stroke-width="1"/>
+    <g font-size="12" fill="#1e293b">
+      <text x="20" y="62" font-weight="500">ONNX runtime (ort)</text>
+      <text x="20" y="80" font-size="11" fill="#475569">via fastembed</text>
+      <text x="20" y="103" font-weight="500">multilingual-e5-base</text>
+      <text x="20" y="121" font-size="11" fill="#475569">passages + queries (E5 prefixes)</text>
+      <text x="20" y="144" font-weight="500" font-size="11">CPU · DirectML · QNN</text>
+    </g>
+    <text x="120" y="174" text-anchor="middle"
+          font-style="italic" font-size="10" fill="#64748b">
+      ~/mikerust-data/fastembed/
+    </text>
+  </g>
+
+  <!-- Document extraction column -->
+  <g transform="translate(620, 320)">
+    <rect width="280" height="160" rx="5"
+          fill="#f1f5f9" stroke="#475569" stroke-width="1.2"/>
+    <text x="140" y="28" text-anchor="middle"
+          font-weight="600" fill="#0f172a" font-size="14">Document extraction</text>
+    <line x1="20" y1="42" x2="260" y2="42" stroke="#cbd5e1" stroke-width="1"/>
+    <g font-size="12" fill="#1e293b">
+      <text x="20" y="62" font-weight="500">pdfium-render</text>
+      <text x="20" y="80" font-size="11" fill="#475569">PDF text + page render (vision)</text>
+      <text x="20" y="103" font-weight="500">quick-xml + zip</text>
+      <text x="20" y="121" font-size="11" fill="#475569">DOCX with tracked-changes detection</text>
+      <text x="20" y="144" font-weight="500" font-size="11">rtf-parser  ·  calamine</text>
+    </g>
+    <text x="140" y="174" text-anchor="middle"
+          font-style="italic" font-size="10" fill="#64748b">
+      libs/pdfium/  ·  pure Rust
+    </text>
+  </g>
+
+  <!-- ─── Sovereign boundary line ───────────────────────────────── -->
+  <line x1="40" y1="525" x2="920" y2="525"
+        stroke="#94a3b8" stroke-width="1" stroke-dasharray="6 4"/>
+  <rect x="380" y="513" width="200" height="24" rx="3"
+        fill="#ffffff" stroke="none"/>
+  <text x="480" y="530" text-anchor="middle"
+        font-style="italic" font-size="13" fill="#475569">
+    Sovereign boundary
+  </text>
+
+  <!-- ─── Tier 4: Outbound (dashed, opt-in) ─────────────────────── -->
+  <!-- Dashed channel arrow from backend area down to remote -->
+  <path d="M 200 280 Q 200 540, 200 565" fill="none"
+        stroke="#9ca3af" stroke-width="1.2"
+        stroke-dasharray="5 3" marker-end="url(#arrow-dashed)"/>
+  <path d="M 760 280 Q 760 540, 760 565" fill="none"
+        stroke="#9ca3af" stroke-width="1.2"
+        stroke-dasharray="5 3" marker-end="url(#arrow-dashed)"/>
+
+  <text x="218" y="500" text-anchor="start"
+        font-style="italic" font-size="11" fill="#6b7280">
+    BYOK · explicit
+  </text>
+  <text x="742" y="500" text-anchor="end"
+        font-style="italic" font-size="11" fill="#6b7280">
+    HTTP / SSE · per-server config
+  </text>
+
+  <!-- Remote LLM (left) -->
+  <g transform="translate(60, 565)">
+    <rect width="280" height="100" rx="5"
+          fill="#ffffff" stroke="#9ca3af" stroke-width="1"
+          stroke-dasharray="4 3"/>
+    <text x="140" y="28" text-anchor="middle"
+          font-weight="600" fill="#3f3f46" font-size="14">Remote LLM providers</text>
+    <line x1="20" y1="42" x2="260" y2="42" stroke="#e5e7eb" stroke-width="1"/>
+    <text x="140" y="62" text-anchor="middle"
+          fill="#52525b" font-size="11">Anthropic · Gemini · OpenAI</text>
+    <text x="140" y="80" text-anchor="middle"
+          fill="#52525b" font-size="11">vLLM / Ollama (LAN)</text>
+  </g>
+
+  <!-- Remote MCP servers (right) -->
+  <g transform="translate(620, 565)">
+    <rect width="280" height="100" rx="5"
+          fill="#ffffff" stroke="#9ca3af" stroke-width="1"
+          stroke-dasharray="4 3"/>
+    <text x="140" y="28" text-anchor="middle"
+          font-weight="600" fill="#3f3f46" font-size="14">Remote MCP servers</text>
+    <line x1="20" y1="42" x2="260" y2="42" stroke="#e5e7eb" stroke-width="1"/>
+    <text x="140" y="62" text-anchor="middle"
+          fill="#52525b" font-size="11">DMS · pseudonymisation · corpora</text>
+    <text x="140" y="80" text-anchor="middle"
+          fill="#52525b" font-size="11">any HTTP / SSE MCP endpoint</text>
+  </g>
+
+  <!-- ─── Caption ───────────────────────────────────────────────── -->
+  <text x="480" y="688" text-anchor="middle"
+        font-style="italic" font-size="13" fill="#52525b">
+    Local stack runs entirely on the user's machine · remote tier is opt-in, per-connection, BYOK.
+  </text>
+</svg>
