@@ -1,0 +1,2 @@
+ALTER TABLE documents ADD COLUMN page_count INTEGER;
+ALTER TABLE documents ADD COLUMN needs_ocr INTEGER DEFAULT 0;

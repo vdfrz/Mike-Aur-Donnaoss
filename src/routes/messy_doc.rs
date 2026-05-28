@@ -17,7 +17,7 @@ use axum::{
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-use crate::{auth::middleware::AuthUser, AppState};
+use crate::{auth::middleware::AuthUser, pii, AppState};
 use crate::llm::{self, types::{LocalConfig, Message, StreamParams}};
 use crate::routes::user::fetch_llm_settings;
 
@@ -40,6 +40,7 @@ async fn clean(
     let mut file_ext = String::from("docx");
     let mut file_original_name = String::from("document");
     let mut instructions = String::new();
+    let mut redact_pii = false;
 
     while let Some(field) = multipart.next_field().await.map_err(|e| {
         err(StatusCode::BAD_REQUEST, &format!("multipart error: {e}"))
@@ -69,6 +70,10 @@ async fn clean(
                     err(StatusCode::BAD_REQUEST, &format!("instructions error: {e}"))
                 })?;
                 instructions = text;
+            }
+            "redact_pii" => {
+                let text = field.text().await.unwrap_or_default();
+                redact_pii = text == "true" || text == "1";
             }
             _ => {}
         }
@@ -133,12 +138,23 @@ async fn clean(
     let (model, local_config) = resolve_model(&user_settings);
 
     // Step 3: Send to LLM with the user's instructions
-    let system_prompt = "You are a professional legal document formatter. \
-        Your task is to take messy, poorly-formatted text and produce a clean, \
-        well-structured version following the user's specific instructions. \
-        Output ONLY valid Markdown — no preamble, no explanation, no commentary. \
-        Use headings (## / ###), bullet points, and proper paragraph breaks where appropriate. \
-        Preserve all substantive content. Do not add new information.";
+    let system_prompt = "\
+Your output goes directly to a client as-is. Every word is the deliverable. \
+Do NOT include any preamble, commentary, meta-text, or sign-off. \
+Do NOT say things like 'Here is your cleaned document' or 'I have prepared'. \
+Output ONLY the cleaned Markdown content, starting with the first heading.\n\n\
+You are a professional legal document formatter. Take the messy, poorly-formatted text below \
+and produce a clean, well-structured version following the user's specific instructions.\n\n\
+FORMATTING RULES:\n\
+- Use ## for major section headings (e.g., ## PRAYER, ## VERIFICATION)\n\
+- Use ### for sub-section headings\n\
+- Use **bold** for key legal terms, party names, and emphasis\n\
+- Use bullet lists (- item) for enumerations\n\
+- Use numbered lists (1. item) for sequential steps or numbered clauses\n\
+- Use | Col1 | Col2 | for tabular data (schedules, annexures with columns)\n\
+- Separate paragraphs with blank lines\n\
+- Preserve all substantive content verbatim. Do not add, remove, or rephrase legal text.\n\
+- Do not add new information or legal analysis.";
 
     let user_message = format!(
         "INSTRUCTIONS FROM USER:\n{}\n\n\
@@ -147,29 +163,59 @@ async fn clean(
         raw_text.trim()
     );
 
-    let params = StreamParams {
+    let make_params = |sys: &str| StreamParams {
         model: model.clone(),
-        system_prompt: system_prompt.to_string(),
-        messages: vec![Message::user(user_message)],
+        system_prompt: sys.to_string(),
+        system_volatile: String::new(),
+        messages: vec![Message::user(user_message.clone())],
         tools: vec![],
         max_iterations: 1,
         enable_thinking: false,
-        local_config,
+        local_config: local_config.clone(),
         claude_api_key: user_settings.as_ref().and_then(|s| s.claude_api_key.clone()),
         gemini_api_key: user_settings.as_ref().and_then(|s| s.gemini_api_key.clone()),
         gemini_region: user_settings.as_ref().and_then(|s| s.gemini_region.clone()),
     };
 
-    let cleaned_markdown = match llm::provider_for_model(&model) {
-        llm::Provider::Claude => llm::claude::complete(params).await,
-        llm::Provider::OpenAI => llm::local::complete(params).await,
-        llm::Provider::Gemini => llm::gemini::complete(params).await,
-    }
-    .map_err(|e| err(StatusCode::BAD_GATEWAY, &format!("LLM error: {e}")))?;
+    let call_llm = |params: StreamParams| async {
+        match llm::provider_for_model(&params.model) {
+            llm::Provider::Claude => llm::claude::complete(params).await,
+            llm::Provider::OpenAI => llm::local::complete(params).await,
+            llm::Provider::Gemini => llm::gemini::complete(params).await,
+        }
+    };
 
-    // Step 4: Convert cleaned Markdown → .docx
+    let raw_md = call_llm(make_params(system_prompt)).await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, &format!("LLM error: {e}")))?;
+
+    let cleaned_markdown = if validate_cleaned_md(&raw_md) {
+        raw_md
+    } else {
+        let retry_prompt = format!(
+            "{system_prompt}\n\nCRITICAL: Your previous output was rejected because it \
+             contained process text or lacked structure. Start DIRECTLY with a Markdown \
+             heading (# or ##). No preamble. No commentary. Just the cleaned document."
+        );
+        let retry_md = call_llm(make_params(&retry_prompt)).await
+            .map_err(|e| err(StatusCode::BAD_GATEWAY, &format!("LLM retry error: {e}")))?;
+        if validate_cleaned_md(&retry_md) {
+            retry_md
+        } else {
+            strip_process_text(&retry_md)
+        }
+    };
+
+    // Step 4: Optional PII redaction
+    let (final_markdown, pii_counts) = if redact_pii {
+        let result = pii::scrub_pii(&cleaned_markdown);
+        (result.scrubbed_text, Some(result.counts))
+    } else {
+        (cleaned_markdown, None)
+    };
+
+    // Step 5: Convert cleaned Markdown → .docx
     let doc_title = format!("{file_original_name} (cleaned)");
-    let docx_bytes = crate::pdf::docx_writer::markdown_to_docx(&doc_title, &cleaned_markdown)
+    let docx_bytes = crate::pdf::docx_writer::markdown_to_docx(&doc_title, &final_markdown)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &format!("docx build: {e}")))?;
 
     // Step 5: Persist as a document so it can be downloaded
@@ -216,6 +262,8 @@ async fn clean(
         "doc_id": doc_id,
         "filename": filename,
         "size_bytes": size,
+        "redacted_pii": redact_pii,
+        "pii_counts": pii_counts,
     })))
 }
 
@@ -281,4 +329,30 @@ fn resolve_model(
     }
 
     ("gemini-2.0-flash".to_string(), None)
+}
+
+const PROCESS_PREFIXES: &[&str] = &[
+    "here is", "here's", "i have", "below is", "certainly",
+    "sure,", "sure!", "of course", "the following",
+];
+
+fn validate_cleaned_md(md: &str) -> bool {
+    let trimmed = md.trim();
+    if trimmed.is_empty() { return false; }
+    if !trimmed.contains('#') { return false; }
+    let lower = trimmed.to_lowercase();
+    for prefix in PROCESS_PREFIXES {
+        if lower.starts_with(prefix) { return false; }
+    }
+    true
+}
+
+fn strip_process_text(md: &str) -> String {
+    let trimmed = md.trim();
+    for (i, line) in trimmed.lines().enumerate() {
+        if line.trim_start().starts_with('#') {
+            return trimmed.lines().skip(i).collect::<Vec<_>>().join("\n");
+        }
+    }
+    trimmed.to_string()
 }

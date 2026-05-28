@@ -1,3 +1,4 @@
+pub mod agents;
 pub mod auth;
 pub mod corpora;
 pub mod db;
@@ -6,6 +7,8 @@ pub mod llm;
 pub mod mcp;
 pub mod mikeprj;
 pub mod pdf;
+pub mod pii;
+pub mod preferences;
 pub mod routes;
 pub mod storage;
 pub mod sync;
@@ -140,7 +143,10 @@ pub async fn run_server_with_bio_tx(
         .nest("/sync",     routes::sync::router())
         .nest("/eurlex",   routes::eurlex::router())
         .nest("/indian-kanoon", routes::indian_kanoon::router())
+        .nest("/ecourts-verify", routes::ecourts::router())
+        .nest("/cases", routes::cases::router())
         .nest("/messy-doc", routes::messy_doc::router())
+        .merge(routes::personalization::router())
         .nest("/desktop",  routes::desktop::router())
         .layer(cors)
         .with_state(state);

@@ -34,7 +34,11 @@ pub fn run() {
     });
 
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![open_external_url, open_file_in_word])
+        .invoke_handler(tauri::generate_handler![
+            open_external_url,
+            open_file_in_word,
+            open_ecourts_verify_window
+        ])
         .setup(move |app| {
             #[cfg(debug_assertions)]
             app.get_webview_window("main")
@@ -175,4 +179,43 @@ fn open_file_in_word(path: String) -> Result<(), String> {
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     return Err("Opening files in Word is only supported on macOS and Windows".into());
     Ok(())
+}
+
+#[tauri::command]
+async fn open_ecourts_verify_window(
+    app: tauri::AppHandle,
+    url: String,
+    window_title: String,
+    init_script: String,
+) -> Result<(), String> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    if !url.starts_with("https://judgments.ecourts.gov.in/")
+        && !url.starts_with("https://ecourts.gov.in/")
+        && !url.starts_with("https://scr.sci.gov.in")
+    {
+        return Err(format!(
+            "rejected non-eCourts URL: {url} (this command is only for the official eCourts/SCR portal)"
+        ));
+    }
+
+    let parsed = url
+        .parse::<tauri::Url>()
+        .map_err(|e| format!("invalid URL: {e}"))?;
+
+    let label = format!(
+        "ecourts-verify-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    );
+
+    WebviewWindowBuilder::new(&app, &label, WebviewUrl::External(parsed))
+        .title(window_title)
+        .inner_size(1100.0, 800.0)
+        .initialization_script(&init_script)
+        .build()
+        .map(|_| ())
+        .map_err(|e| format!("WebviewWindow build failed: {e}"))
 }

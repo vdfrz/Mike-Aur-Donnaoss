@@ -82,6 +82,7 @@ struct Choice {
 #[derive(Deserialize, Default)]
 struct Delta {
     content: Option<String>,
+    #[serde(alias = "reasoning_content")]
     reasoning: Option<String>,
     tool_calls: Option<Vec<ToolCallDelta>>,
 }
@@ -149,11 +150,25 @@ fn to_wire_messages(system: &str, messages: &[Message]) -> Vec<serde_json::Value
                 obj.insert("content".into(), json!(m.content));
             }
             obj.insert("tool_calls".into(), json!(calls));
+            // DeepSeek v4 thinking mode requires reasoning_content to be
+            // passed back in subsequent requests if it was present in the
+            // assistant's response (including responses with tool_calls).
+            if let Some(rc) = &m.reasoning_content {
+                obj.insert("reasoning_content".into(), json!(rc));
+            }
             out.push(serde_json::Value::Object(obj));
             continue;
         }
         if m.images.is_empty() {
-            out.push(json!({ "role": role, "content": m.content }));
+            let mut obj = serde_json::Map::new();
+            obj.insert("role".into(), json!(role));
+            obj.insert("content".into(), json!(m.content));
+            if let Some(rc) = &m.reasoning_content {
+                if matches!(m.role, Role::Assistant) {
+                    obj.insert("reasoning_content".into(), json!(rc));
+                }
+            }
+            out.push(serde_json::Value::Object(obj));
         } else {
             // OpenAI vision content array: text + image_url parts.
             let mut parts: Vec<serde_json::Value> = Vec::new();
@@ -179,7 +194,7 @@ pub async fn stream(
     tracing::info!("[llm/local] stream → base={base}, model={model}, key_present={}", !api_key.is_empty() && api_key != "local");
     let client = reqwest::Client::new();
 
-    let messages = to_wire_messages(&params.system_prompt, &params.messages);
+    let messages = to_wire_messages(&params.full_system(), &params.messages);
     let tools = if params.tools.is_empty() {
         None
     } else {
@@ -193,7 +208,7 @@ pub async fn stream(
         stream: true,
         // Ollama defaults to num_predict: 128 — too short for real answers.
         // OpenAI-compatible servers ignore this if their own limit is lower.
-        max_tokens: Some(4096),
+        max_tokens: Some(8192),
     };
 
     let resp = client
@@ -379,7 +394,7 @@ pub async fn complete(params: StreamParams) -> Result<String> {
     tracing::info!("[llm/local] complete → base={base}, model={model}, key_present={}", !api_key.is_empty() && api_key != "local");
     let client = reqwest::Client::new();
 
-    let messages = to_wire_messages(&params.system_prompt, &params.messages);
+    let messages = to_wire_messages(&params.full_system(), &params.messages);
     let body = json!({
         "model": model,
         "messages": messages,

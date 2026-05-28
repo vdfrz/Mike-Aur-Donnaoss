@@ -10,6 +10,7 @@ import {
     Loader2,
     AlertCircle,
     CheckCircle2,
+    ShieldCheck,
     X,
     Wand2,
 } from "lucide-react";
@@ -45,6 +46,7 @@ export default function MessyDocxPage() {
     const [instructions, setInstructions] = useState("");
     const [isDragging, setIsDragging] = useState(false);
     const [cleaning, setCleaning] = useState(false);
+    const [redactPii, setRedactPii] = useState(false);
     const [result, setResult] = useState<{
         doc_id: string;
         filename: string;
@@ -95,6 +97,7 @@ export default function MessyDocxPage() {
             const formData = new FormData();
             formData.append("file", file);
             formData.append("instructions", instructions.trim());
+            if (redactPii) formData.append("redact_pii", "true");
 
             const res = await fetch(`${API_BASE}/messy-doc/clean`, {
                 method: "POST",
@@ -214,6 +217,32 @@ export default function MessyDocxPage() {
                     rows={4}
                     className="w-full rounded-xl border border-gray-200 px-4 py-3 text-sm text-gray-800 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent resize-none leading-relaxed transition-all"
                 />
+            </div>
+
+            {/* Redact PII toggle */}
+            <div className="flex items-center gap-3 group relative">
+                <button
+                    type="button"
+                    role="switch"
+                    aria-checked={redactPii}
+                    onClick={() => setRedactPii(!redactPii)}
+                    className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ${
+                        redactPii ? "bg-blue-600" : "bg-gray-200"
+                    }`}
+                >
+                    <span
+                        className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ${
+                            redactPii ? "translate-x-4" : "translate-x-0"
+                        }`}
+                    />
+                </button>
+                <span className="text-sm text-gray-600 flex items-center gap-1.5">
+                    <ShieldCheck className="h-4 w-4" />
+                    {t("redactPii")}
+                </span>
+                <div className="absolute bottom-full left-0 mb-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap z-50">
+                    {t("redactPiiTooltip")}
+                </div>
             </div>
 
             {/* Error */}

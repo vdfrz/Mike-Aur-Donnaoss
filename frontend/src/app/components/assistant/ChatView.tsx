@@ -5,12 +5,14 @@ import { ArrowDown } from "lucide-react";
 import { UserMessage } from "./UserMessage";
 import { AssistantMessage } from "./AssistantMessage";
 import { ChatInput } from "./ChatInput";
+import { useSelectedModel } from "@/app/hooks/useSelectedModel";
 import {
     AssistantSidePanel,
     type AssistantSidePanelTab,
 } from "./AssistantSidePanel";
 import { AssistantWorkflowModal } from "./AssistantWorkflowModal";
 import type {
+    AssistantEvent,
     MikeCitationAnnotation,
     MikeEditAnnotation,
     MikeMessage,
@@ -49,6 +51,7 @@ export function ChatView({
         () => new Set(),
     );
     const { setSidebarOpen } = useSidebar();
+    const [selectedModel] = useSelectedModel();
 
 
     const showPanel = useCallback(() => {
@@ -170,6 +173,20 @@ export function ChatView({
      */
     const openCitation = useCallback(
         (citation: MikeCitationAnnotation) => {
+            if (citation.source === "vanga" && citation.pdf_url) {
+                const tabId = `vanga-${citation.doc_id}`;
+                upsertTab({
+                    kind: "ik",
+                    id: tabId,
+                    documentId: tabId,
+                    filename: citation.filename || "Judgment",
+                    url: citation.pdf_url,
+                    query: citation.quote,
+                    versionId: null,
+                    versionNumber: null,
+                });
+                return;
+            }
             const isKb =
                 (citation.source === "kb" || citation.source === "tool") &&
                 !!citation.path;
@@ -177,8 +194,6 @@ export function ChatView({
                 upsertTab({
                     kind: "citation",
                     id: citation.path ?? citation.document_id,
-                    // For KB the documentId is just a stable React key;
-                    // network calls use kbPath instead.
                     documentId: citation.document_id,
                     filename: citation.filename,
                     versionId: null,
@@ -529,13 +544,13 @@ export function ChatView({
         if (!lastMsg || lastMsg.role !== "assistant") return;
 
         const docCreated = (lastMsg.events ?? []).find(
-            (e) =>
+            (e): e is Extract<AssistantEvent, { type: "doc_created" }> =>
                 e.type === "doc_created" &&
                 !e.isStreaming &&
-                typeof e.document_id === "string" &&
-                e.document_id.length > 0 &&
-                e.version_id !== undefined &&
-                e.version_id !== null,
+                typeof (e as any).document_id === "string" &&
+                (e as any).document_id.length > 0 &&
+                (e as any).version_id !== undefined &&
+                (e as any).version_id !== null,
         );
         if (!docCreated) return;
         if (lastAutoOpenedDocIdRef.current === docCreated.document_id) return;
@@ -651,6 +666,13 @@ export function ChatView({
                                                     resolvedEditStatuses
                                                 }
                                                 onIKLinkClick={openIKLink}
+                                                onSendMessage={(text) => {
+                                                    handleChat({
+                                                        role: "user",
+                                                        content: text,
+                                                        model: selectedModel,
+                                                    });
+                                                }}
                                             />
                                         )}
                                     </div>

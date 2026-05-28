@@ -44,6 +44,8 @@ async fn fresh_app() -> (axum::Router, Arc<AppState>) {
         sessions,
         biometric_tx: None,
         no_tools_models: Default::default(),
+        mcp_discovery_cache: Default::default(),
+        client_tool_tx: Default::default(),
         #[cfg(feature = "rag")]
         embeddings: None,
         #[cfg(feature = "rag")]

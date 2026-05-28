@@ -13,7 +13,6 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 pub mod eurlex;
-pub mod italian_legal;
 
 /// Search hit returned by a corpus adapter — enough to render in a UI
 /// list and round-trip back into `fetch()`.

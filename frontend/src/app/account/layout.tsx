@@ -43,6 +43,7 @@ export default function AccountLayout({
             heading: tAccount("groupConfig"),
             tabs: [
                 { id: "general", label: tAccount("generalLink"), href: "/account" },
+                { id: "personalization", label: tAccount("personalizationLink"), href: "/account/personalization" },
                 { id: "models", label: tAccount("modelsLink"), href: "/account/models" },
                 { id: "mcp", label: tAccount("mcpLink"), href: "/account/mcp" },
             ],
@@ -52,8 +53,8 @@ export default function AccountLayout({
             tabs: [
                 { id: "local-docs", label: tAccount("localDocsLink"), href: "/account/sync" },
                 { id: "eurlex", label: tAccount("eurlexLink"), href: "/account/eurlex" },
-                { id: "italia-legale", label: tAccount("italianLegalLink"), href: "/account/italia-legale" },
                 { id: "indian-kanoon", label: tAccount("indianKanoonLink"), href: "/account/indian-kanoon" },
+                { id: "case-search", label: tAccount("caseSearchLink"), href: "/account/case-search" },
             ],
         },
     ];

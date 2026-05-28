@@ -130,9 +130,6 @@ function highlightHtml(
     html: string,
     query: string,
 ): { html: string; snippet: string | null } {
-    const keywords = extractKeywords(query);
-    if (keywords.length === 0) return { html, snippet: null };
-
     const parser = new DOMParser();
     const doc = parser.parseFromString(`<div>${html}</div>`, "text/html");
 
@@ -142,20 +139,63 @@ function highlightHtml(
         doc.querySelectorAll("p, li, blockquote, td"),
     ).filter((el) => {
         const text = (el.textContent ?? "").trim();
-        return text.length > 60; // skip tiny snippets/captions
+        return text.length > 60;
     });
 
-    // Score each block: density = matches / sqrt(length).
-    // This favors paragraphs where keywords are concentrated rather
-    // than scattered across very long sections.
+    // Normalize for substring matching — collapse whitespace + curly
+    // quotes so Mike's chat quote survives minor typographic differences
+    // versus the Kanoon doc text.
+    function normalize(s: string): string {
+        return s
+            .toLowerCase()
+            .replace(/[“”]/g, '"')
+            .replace(/[‘’]/g, "'")
+            .replace(/\s+/g, " ")
+            .trim();
+    }
+    const normQuery = normalize(query);
     let best: { el: Element; score: number; matches: number } | null = null;
-    for (const el of candidates) {
-        const text = (el.textContent ?? "").toLowerCase();
-        const matches = keywords.filter((kw) => text.includes(kw)).length;
-        if (matches < 2) continue;
-        const score = matches / Math.sqrt(text.length);
-        if (!best || score > best.score) {
-            best = { el, score, matches };
+
+    // Strategy 1 (preferred): exact-substring phrase match. Try
+    // chunks from sliding offsets in the query so a preamble like
+    // "The Court held:" doesn't prevent matching the actual quote.
+    if (normQuery.length >= 30) {
+        for (const el of candidates) {
+            const text = normalize(el.textContent ?? "");
+            let maxOverlap = 0;
+            for (let start = 0; start <= normQuery.length - 30; start += 15) {
+                const remaining = normQuery.length - start;
+                for (let len = Math.min(remaining, 300); len >= 30; len -= 20) {
+                    const chunk = normQuery.slice(start, start + len);
+                    if (text.includes(chunk)) {
+                        if (len > maxOverlap) maxOverlap = len;
+                        break;
+                    }
+                }
+                if (maxOverlap >= 60) break;
+            }
+            if (maxOverlap >= 30) {
+                const score = maxOverlap / Math.sqrt(text.length);
+                if (!best || score > best.score) {
+                    best = { el, score, matches: maxOverlap };
+                }
+            }
+        }
+    }
+
+    // Strategy 2 (fallback): keyword density — the previous behavior.
+    // Only runs if substring matching found nothing.
+    if (!best) {
+        const keywords = extractKeywords(query);
+        if (keywords.length === 0) return { html, snippet: null };
+        for (const el of candidates) {
+            const text = (el.textContent ?? "").toLowerCase();
+            const matches = keywords.filter((kw) => text.includes(kw)).length;
+            if (matches < 2) continue;
+            const score = matches / Math.sqrt(text.length);
+            if (!best || score > best.score) {
+                best = { el, score, matches };
+            }
         }
     }
 

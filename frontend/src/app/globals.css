@@ -467,6 +467,20 @@
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
 }
 
+/* Force Times New Roman in docx-preview — the library injects inline
+   font-family on spans which overrides CSS classes. We use !important on
+   every possible element to ensure Times New Roman renders correctly. */
+.docx-view-container .docx-wrapper *,
+.docx-view-container .docx-wrapper span,
+.docx-view-container .docx-wrapper p,
+.docx-view-container .docx-wrapper div,
+.docx-view-container .docx-wrapper section,
+.docx-view-container .docx-wrapper table,
+.docx-view-container .docx-wrapper td,
+.docx-view-container .docx-wrapper th {
+    font-family: 'Times New Roman', Times, serif !important;
+}
+
 .docx-view-container .docx-edit-flash {
     animation: docxEditFlash 2s ease-out;
     border-radius: 2px;
@@ -485,6 +499,11 @@
     text-decoration: none !important;
 }
 
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
 @keyframes docxEditFlash {
     0%, 20% {
         background-color: rgba(59, 130, 246, 0.45);
@@ -494,4 +513,13 @@
         background-color: rgba(59, 130, 246, 0);
         box-shadow: 0 0 0 2px rgba(59, 130, 246, 0);
     }
+}
+
+@keyframes analysisSlideIn {
+    from { opacity: 0; transform: translateX(-12px); }
+    to { opacity: 1; transform: translateX(0); }
+}
+
+.analysis-feed-card {
+    animation: analysisSlideIn 0.3s ease-out;
 }

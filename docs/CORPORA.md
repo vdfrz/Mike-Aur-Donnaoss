@@ -81,69 +81,6 @@ Document-level metadata (CELEX, EuroVoc descriptors, ELI, date) stored once; ful
 - **License**: "Free use for personal / non-commercial". Commercial reuse requires permission — **red flag for SaaS**, OK for personal desktop use.
 - **Adapter shape**: scheduled bulk-pull of TOC → diff against local index → fetch new/changed ZIPs.
 
-### 6. Italy — Normattiva (direct: low-priority; via HF dataset: viable)
-- **Site**: https://www.normattiva.it
-- **API**: **none**. URN-based deep links (`urn:nir:stato:legge:2003-06-30;196` →
-  `https://www.normattiva.it/uri-res/N2Ls?urn:nir:stato:legge:2003-06-30;196`). Akoma Ntoso XML downloadable per act from the page UI but not via a documented API.
-- **Languages**: Italian.
-- **Search**: HTML form only.
-- **Formats**: Akoma Ntoso XML, HTML, PDF.
-- **License (direct)**: Normattiva ToS forbid systematic harvesting / republication — **legal red flag for direct ingestion**.
-- **Recommendation (direct path)**: ship a **manual import** only — let the user paste a Normattiva URN, fetch that one document, store it. No background sync.
-
-#### Italy via HuggingFace `dossier-legal/italian-legal-corpus` (recommended path)
-
-A third-party CC-BY-4.0 dataset on HuggingFace re-publishes a comprehensive Italian legal corpus that bypasses our Normattiva ToS exposure (the upstream dataset author handled redistribution; we consume a CC-BY-licensed derivative).
-
-- **URL**: https://huggingface.co/datasets/dossier-legal/italian-legal-corpus
-- **License**: CC-BY-4.0 — commercial use OK with attribution to the dataset.
-- **Size**: ~366 000 documents, 1.74 GB compressed (Parquet).
-- **Sources**:
-  - Normattiva — ~300K Italian national legislation acts
-  - Corte Costituzionale — ~18K constitutional-court decisions
-  - OpenGA — ~100K administrative-justice rulings
-  - EUR-Lex (Italian) — ~50K EU acts with Italian text (overlaps with our EUR-Lex V1)
-- **Schema** (per row): `id`, `source`, `doc_type`, `title`, `date`, `text` (cleaned full text), `authority`, `number`, `year`, `ecli`, `language` (`"it"`).
-- **Date range**: 1861 → present (spans Italian unification to 2026).
-- **Access**: ungated; downloadable as Parquet via HuggingFace CDN, no token required.
-
-##### Adapter design (planned)
-
-The dataset is too large to mirror in full into `sqlite-vec` (~5 GB of vectors at 768 dims × 5 chunks/doc), so the adapter would not bulk-embed. Instead:
-
-1. **Lazy bulk download** — first time the user enables the corpus, fetch the Parquet shards into `data/corpora/italian-legal/`. ~1.74 GB one-shot download, resumable.
-2. **Local FTS index** — build a SQLite FTS5 virtual table over `(title, number, year, authority, doc_type, text)` so search-by-number and search-by-keyword run locally without ever touching Normattiva. ~30 min build on first import.
-3. **Selective ingestion** — searches return hits; the user picks which ones to push into their personal RAG pool. This gives the same "find act → add to my index" UX as EUR-Lex V1 with no bulk-embedding overhead.
-4. **Reuse the chat-cache layout** — each ingested document goes through the same `cache/<sha256>.txt` flow used by EUR-Lex and chat-attached docs, so retrieval is uniform.
-
-##### Implementation status (V1, shipped)
-- ✅ Adapter `src/corpora/italian_legal.rs` — bulk Parquet importer + HF `/rows` fetcher.
-- ✅ Parquet reader via `parquet = "53"` + `arrow-array` with column projection (we pull metadata only — no `text` body — so the import stays at ~80 MB).
-- ✅ FTS5 virtual table on `(title, authority, number)` plus B-tree indexes on `source / doc_type / year`.
-- ✅ Migration `0016_italian_legal.sql` adds `italian_corpus`, `italian_corpus_fts`, `italian_corpus_meta`, `italian_corpus_settings`.
-- ✅ Routes `src/routes/italian_legal.rs`: config, import, import-status, search, fetch (single doc → cache + embed), documents list, delete, resync.
-- ✅ UI page `/account/italia-legale` with enable toggle, sources checklist, bulk import + progress bar, filtered FTS5 search, multi-select results → bulk-indicizza, indexed-docs list with the same status badges (`indicizzato` / `in sync N%` / `in attesa` / `interrotto`) and `Riavvia` recovery button as EUR-Lex.
-- ✅ Sources covered: **Normattiva** (~69K) + **Corte Costituzionale** (~22K) = ~91K rows.
-
-##### Sources NOT yet covered (V2 / V3 roadmap)
-
-These are the ones surfaced as "in arrivo" in the UI. Each row below is the concrete work item to make that source real.
-
-| Source | Status | Volume | What's needed |
-|---|---|---|---|
-| **OpenGA** (TAR + Consiglio di Stato) | 🟡 in dataset, opt-in mancante | ~125K | Quasi gratis: aggiungere `"openga"` a `DEFAULT_SOURCES` in `src/corpora/italian_legal.rs`, esporre la checkbox di import nella UI come opt-in (volumi grandi → import iniziale ~+150 MB). Doc types: `decision`, `order`, `decree`, `opinion`. `authority` = nome del TAR / Consiglio. |
-| **Cassazione** (civile + penale + sezioni unite) | 🔴 fuori dataset HF | sconosciuto, indicativamente >1M | Servirà un adapter dedicato. Sorgenti possibili: (a) snapshot annuali CSV/XML da italgiure.giustizia.it se accessibili sotto licenza (verificare ToS) — (b) dataset terzo eventualmente pubblicato su HuggingFace (es. cerca `cassazione` con filtro CC-BY) — (c) fetcher per ECLI singoli con politica di consumo controllato. Sotto la trait `LegalCorpusAdapter` il design è già pronto, manca la sorgente. |
-| **Aggiornamenti live Normattiva (post-2026-03-01)** | 🔴 placeholder | incrementale | Il dataset HF è frozen. Per atti pubblicati dopo lo snapshot serve un client che risolva URN (`urn:nir:stato:legge:YYYY;NNN`) → URL Normattiva → scraping del singolo atto in Akoma Ntoso. ToS Normattiva vieta harvesting sistematico ma consente fetch puntuale → uso ammesso solo come "single-URN import" su richiesta utente, non come crawler periodico. |
-| **Leggi regionali** | 🔴 placeholder | ~varia per regione | 20 sistemi diversi (BUR + sito Consiglio Regionale per ogni regione). Approccio realistico: adapter generico "Akoma Ntoso URL → import" che lascia all'utente la mappatura regione-per-regione (o un seed di URL preconfigurati per le 5-6 regioni più importanti: Lombardia, Lazio, Veneto, Emilia-Romagna, Toscana, Sicilia). |
-| **Gazzetta Ufficiale** (atti correnti) | 🔴 placeholder | ~daily diff | Sumario XML quotidiano: `https://www.boe.es/diario_boe/...` no, in Italia `https://www.gazzettaufficiale.it/`. Sovrappone ~80% con Normattiva live; utile come secondo canale per atti molto recenti che Normattiva consolida con qualche giorno di ritardo. |
-| **Decreti ministeriali / Circolari** | 🔴 fuori dataset | ~varia | Un sottoinsieme è in Normattiva; il resto sui siti dei singoli ministeri. Adapter per-ministero non realistico — meglio un "import da URL" che accetta una pagina ufficiale e ne scarica il PDF/HTML, lasciando la curatela all'utente. |
-
-##### Caveats note
-- Il dataset HF mostra qualche `year` futuro (es. 2026-10) per metadati di pubblicazione programmata. Filtriamo `year <= current_year` solo nella UI di ricerca, ma la riga resta nell'indice.
-- Bulk import ~80 MB / ~3 minuti — la UI lo dichiara prima di partire.
-- Attribuzione CC-BY-4.0 al dataset autore (`dossier-legal`) prevista nel footer di `Italia legale` (TODO se vuoi che la inserisca).
-- Il dataset è uno snapshot unico (commit pinned a `e503a93f...`). Per restare attuali serve la live-fetch row sopra.
-
 ### Out of scope
 
 - **CENDOJ** (Spanish case law) — ToS-blocked.
@@ -250,13 +187,5 @@ The user's RAG queries automatically include corpus docs in the global partition
 | Adapter: Légifrance (PISTE) | 🔲 planned |
 | Adapter: BOE | 🔲 planned |
 | Adapter: Gesetze im Internet | 🔲 personal-use disclaimer required |
-| Adapter: Normattiva | 🔲 manual-import only (ToS) |
-| Adapter: HuggingFace `dossier-legal/italian-legal-corpus` (Normattiva + Corte Cost) | ✅ shipped — see §Italy via HuggingFace |
-| Adapter: OpenGA (TAR + CdS) — opt-in del dataset HF | 🔲 ~30 min: aggiungere `openga` a `DEFAULT_SOURCES` + checkbox UI |
-| Adapter: Cassazione (civile + penale + sez. unite) | 🔲 V2 — sorgente da identificare (italgiure.giustizia.it / dataset terzo) |
-| Adapter: Live Normattiva (post-snapshot) | 🔲 V2 — client URN, single-fetch on user demand |
-| Adapter: Leggi regionali (20 BUR + Consigli) | 🔲 V3 — adapter generico Akoma Ntoso da URL |
-| Adapter: Gazzetta Ufficiale (sumario XML quotidiano) | 🔲 V3 — secondo canale per atti recentissimi |
-| Adapter: Decreti ministeriali / circolari (per-ministero) | 🔲 V3 — import da URL con curatela utente |
 
 EUR-Lex V1 ships using the public legal-content endpoint (no auth). The SOAP CWS for keyword search is V2 — see [EURLEX_REGISTRATION.md](EURLEX_REGISTRATION.md) for the registration path. Other adapters fit the same trait.

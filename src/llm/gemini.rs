@@ -107,10 +107,17 @@ fn to_wire_contents(messages: &[Message]) -> Vec<Value> {
 }
 
 fn build_body(params: &StreamParams) -> Value {
-    let mut body = json!({ "contents": to_wire_contents(&params.messages) });
-    if !params.system_prompt.is_empty() {
+    let mut body = json!({
+        "contents": to_wire_contents(&params.messages),
+        "generationConfig": {
+            "maxOutputTokens": 8192,
+            "temperature": 0.5,
+        },
+    });
+    let system = params.full_system();
+    if !system.is_empty() {
         body["systemInstruction"] = json!({
-            "parts": [{ "text": params.system_prompt }]
+            "parts": [{ "text": system }]
         });
     }
     if !params.tools.is_empty() {

@@ -22,6 +22,15 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
         parts: &mut Parts,
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
+        // Bypass auth entirely when MIKE_BYPASS_AUTH=true (used by word-addin).
+        // This is safe only on a local machine — do NOT set in production/Tauri builds.
+        if std::env::var("MIKE_BYPASS_AUTH").as_deref() == Ok("true") {
+            return Ok(AuthUser {
+                user_id: "local-user".into(),
+                username: "local-user".into(),
+            });
+        }
+
         let auth = parts
             .headers
             .get("authorization")

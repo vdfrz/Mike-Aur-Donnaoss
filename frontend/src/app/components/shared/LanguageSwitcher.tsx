@@ -52,6 +52,8 @@ export function LanguageSwitcher() {
 
     const labels: Record<Locale, string> = {
         en: t("languageEnglish"),
+        hi: "हिन्दी",
+        "hi-Latn": "Hinglish",
     };
 
     return (

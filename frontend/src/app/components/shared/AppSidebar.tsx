@@ -11,6 +11,8 @@ import {
     ChevronsUpDown,
     ChevronDown,
     FileEdit,
+    Briefcase,
+    Search,
 } from "lucide-react";
 import { useTranslations } from "next-intl";
 import { useAuth } from "@/contexts/AuthContext";
@@ -38,6 +40,8 @@ export function AppSidebar({ isOpen, onToggle }: AppSidebarProps) {
 
     const navItems = [
         { href: "/assistant", label: tSidebar("assistant"), icon: MessageSquare },
+        { href: "/cases", label: tSidebar("cases"), icon: Briefcase },
+        { href: "/case-search", label: tSidebar("caseSearch"), icon: Search },
         { href: "/projects", label: tSidebar("projects"), icon: FolderOpen },
         { href: "/tabular-reviews", label: tSidebar("tabularReviews"), icon: Table2 },
         { href: "/workflows", label: tSidebar("workflows"), icon: Library },

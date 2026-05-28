@@ -130,6 +130,9 @@ pub enum SearchScope<'a> {
     ProjectShared(&'a str),
     /// Project chats with `isolation_mode = 'strict'`: see only own.
     ProjectStrict(&'a str),
+    /// Case-scoped: retrieve from global pool but post-filter to only
+    /// chunks belonging to one of the given document IDs.
+    DocumentSet(&'a [String]),
 }
 
 impl EmbeddingService {
@@ -522,6 +525,36 @@ impl EmbeddingService {
                 combined.truncate(top_k);
                 combined
             }
+            SearchScope::DocumentSet(doc_ids) => {
+                if doc_ids.is_empty() {
+                    Vec::new()
+                } else {
+                    // Search the global pool with a generous top_k, then
+                    // post-filter to only chunks from the allowed docs.
+                    let over_fetch = (top_k * 4).max(20) as i64;
+                    let rows: Vec<Row> = sqlx::query_as(
+                        "SELECT document_id, source_path, text, chunk_index, page, distance \
+                         FROM doc_chunks \
+                         WHERE user_id = ? \
+                           AND project_id = ? \
+                           AND embedding MATCH ? \
+                           AND k = ? \
+                         ORDER BY distance",
+                    )
+                    .bind(user_id)
+                    .bind(GLOBAL_PARTITION)
+                    .bind(&qblob[..])
+                    .bind(over_fetch)
+                    .fetch_all(&self.db)
+                    .await?;
+                    let allowed: std::collections::HashSet<&str> =
+                        doc_ids.iter().map(|s| s.as_str()).collect();
+                    rows.into_iter()
+                        .filter(|r| allowed.contains(r.0.as_str()))
+                        .take(top_k)
+                        .collect()
+                }
+            }
         };
 
         Ok(rows
@@ -898,8 +931,11 @@ mod tests {
         // Sanity: the enum compiles and the project_id getter is the
         // only field we rely on at the SQL level. Pattern-match
         // ergonomics is what we're really testing here.
+        let docs = vec!["doc-a".to_string(), "doc-b".to_string()];
+        let ds = SearchScope::DocumentSet(&docs);
         match g { SearchScope::Global => {}, _ => panic!("global mismatch") }
         match s { SearchScope::ProjectShared(p) => assert_eq!(p, "proj-1"), _ => panic!() }
         match st { SearchScope::ProjectStrict(p) => assert_eq!(p, "proj-1"), _ => panic!() }
+        match ds { SearchScope::DocumentSet(d) => assert_eq!(d.len(), 2), _ => panic!() }
     }
 }

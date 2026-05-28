@@ -5,6 +5,9 @@
 
 import type {
     AssistantEvent,
+    CaseDetail,
+    CaseOutput,
+    MikeCase,
     MikeChat,
     MikeChatDetailOut,
     MikeCitationAnnotation,
@@ -447,6 +450,7 @@ export async function streamChat(payload: {
         content: string;
         files?: { filename: string; document_id?: string }[];
         workflow?: { id: string; title: string };
+        reasoning_content?: string;
     }[];
     chat_id?: string;
     project_id?: string;
@@ -472,6 +476,7 @@ type StreamChatMessage = {
     content: string;
     files?: { filename: string; document_id?: string }[];
     workflow?: { id: string; title: string };
+    reasoning_content?: string;
 };
 
 export async function streamProjectChat(payload: {
@@ -836,4 +841,165 @@ export async function deleteWorkflowShare(
     await apiRequest(`/workflows/${workflowId}/shares/${shareId}`, {
         method: "DELETE",
     });
+}
+
+// ---------------------------------------------------------------------------
+// Cases
+// ---------------------------------------------------------------------------
+
+export async function listCases(): Promise<MikeCase[]> {
+    const data = await apiRequest<{ cases: MikeCase[] } | MikeCase[]>("/cases");
+    return Array.isArray(data) ? data : (data as { cases: MikeCase[] }).cases ?? [];
+}
+
+export async function createCase(payload: {
+    title: string;
+    court?: string;
+    parties_json?: string;
+}): Promise<MikeCase> {
+    return apiRequest<MikeCase>("/cases", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+    });
+}
+
+export async function getCase(caseId: string): Promise<CaseDetail> {
+    return apiRequest<CaseDetail>(`/cases/${caseId}`);
+}
+
+export async function updateCase(
+    caseId: string,
+    payload: { title?: string; court?: string; parties_json?: string; status?: string },
+): Promise<MikeCase> {
+    return apiRequest<MikeCase>(`/cases/${caseId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+    });
+}
+
+export async function deleteCase(caseId: string): Promise<void> {
+    await apiRequest<void>(`/cases/${caseId}`, { method: "DELETE" });
+}
+
+export async function addCaseDocuments(
+    caseId: string,
+    documents: { document_id: string; document_type?: string }[],
+): Promise<void> {
+    const document_ids = documents.map((d) => d.document_id);
+    const document_types: Record<string, string> = {};
+    for (const d of documents) {
+        if (d.document_type) document_types[d.document_id] = d.document_type;
+    }
+    await apiRequest<void>(`/cases/${caseId}/documents`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            document_ids,
+            document_types: Object.keys(document_types).length > 0 ? document_types : undefined,
+        }),
+    });
+}
+
+export async function removeCaseDocument(
+    caseId: string,
+    documentId: string,
+): Promise<void> {
+    await apiRequest<void>(`/cases/${caseId}/documents/${documentId}`, {
+        method: "DELETE",
+    });
+}
+
+export async function analyzeCaseStream(
+    caseId: string,
+    redactPii?: boolean,
+    signal?: AbortSignal,
+): Promise<Response> {
+    const token =
+        typeof window !== "undefined"
+            ? localStorage.getItem("mike_auth_token")
+            : null;
+    return fetch(`${API_BASE}/cases/${caseId}/analyze`, {
+        method: "POST",
+        headers: {
+            Accept: "text/event-stream",
+            "Content-Type": "application/json",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ redact_pii: redactPii ?? false }),
+        signal,
+    });
+}
+
+export async function generateCaseOutput(
+    caseId: string,
+    outputType: string,
+    redactPii?: boolean,
+): Promise<CaseOutput> {
+    const typeToEndpoint: Record<string, string> = {
+        case_brief: "brief",
+        strategy_memo: "strategy-memo",
+        hearing_prep: "hearing-prep",
+    };
+    const endpoint = typeToEndpoint[outputType] ?? outputType;
+    return apiRequest<CaseOutput>(`/cases/${caseId}/outputs/${endpoint}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ redact_pii: redactPii ?? false }),
+    });
+}
+
+export async function streamCaseChat(payload: {
+    caseId: string;
+    messages: { role: string; content: string }[];
+    chat_id?: string;
+    model?: string;
+    signal?: AbortSignal;
+}): Promise<Response> {
+    const token =
+        typeof window !== "undefined"
+            ? localStorage.getItem("mike_auth_token")
+            : null;
+    return fetch(`${API_BASE}/cases/${payload.caseId}/chat`, {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+            Accept: "text/event-stream",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+            messages: payload.messages,
+            chat_id: payload.chat_id,
+            model: payload.model,
+        }),
+        signal: payload.signal,
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Personalization
+// ---------------------------------------------------------------------------
+
+export interface PersonalizationProfile {
+    profile_text: string;
+    updated_at: string | null;
+}
+
+export async function getPersonalization(): Promise<PersonalizationProfile> {
+    return apiRequest<PersonalizationProfile>("/personalization");
+}
+
+export async function putPersonalization(
+    profile_text: string,
+): Promise<PersonalizationProfile> {
+    return apiRequest<PersonalizationProfile>("/personalization", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ profile_text }),
+    });
+}
+
+export async function deletePersonalization(): Promise<void> {
+    await apiRequest("/personalization", { method: "DELETE" });
 }

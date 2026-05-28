@@ -169,18 +169,10 @@ Optional ingestion of public legal sources, configured per-corpus under the same
 | Corpus | API | Languages | Status |
 |---|---|---|---|
 | **EUR-Lex** (EU) | REST/SOAP + SPARQL + Cellar | 24 EU languages | ✅ V1 — CELEX fetch via public HTML, EN fallback |
-| **Italia legale** (HF dataset) | HF datasets-server `/rows` + Parquet bulk | Italian | ✅ V1 — Normattiva (~69K) + Corte Costituzionale (~22K) |
-| Italian: OpenGA (TAR + Consiglio di Stato) | Same dataset, source filter | Italian | 🔲 in dataset, opt-in mancante |
-| Italian: Cassazione (civile/penale/sez. unite) | da identificare | Italian | 🔲 V2 — sorgente fuori dataset HF |
-| Italian: Normattiva post-snapshot live | URN single-fetch | Italian | 🔲 V2 — atti dopo 2026-03-01 |
-| Italian: Leggi regionali (20 BUR) | per-regione | Italian | 🔲 V3 |
-| Italian: Gazzetta Ufficiale (sumario quotidiano) | XML feed | Italian | 🔲 V3 |
-| Italian: Decreti ministeriali / circolari | per-ministero | Italian | 🔲 V3 (import da URL) |
 | **Retsinformation** (Denmark) | JSON `/api/document/{eli}` + `/api/search` | Danish | planned |
 | **Légifrance** (France, via PISTE) | OAuth2 REST | French | planned |
 | **BOE** (Spain) | Open Data API + daily XML sumarios | Spanish | planned |
 | **Gesetze im Internet** (Germany) | TOC XML → per-law ZIP | German | scraping-only |
-| **Normattiva** (Italy, direct) | none — HTML / Akoma Ntoso URN deep links | Italian | sostituito dal connettore HF; resta utile come V2 live-fetch |
 
 ### Sovereign data
 Everything that contains user data lives under the workspace:
@@ -230,9 +222,6 @@ See `.env.example` for the full reference.
 | Authoritative-corpus framework (`LegalCorpusAdapter` trait) | ✅ |
 | EUR-Lex V1 (CELEX-based fetch + 24-language picker + EN fallback) | ✅ |
 | EUR-Lex V2 (full-text search via SOAP CWS) | 🔲 [registration required](docs/EURLEX_REGISTRATION.md) |
-| Italia legale V1 (Normattiva + Corte Cost via HF dataset) | ✅ |
-| Italia legale V2 (OpenGA opt-in, Cassazione, live Normattiva) | 🔲 see [CORPORA.md](docs/CORPORA.md) |
-| Italia legale V3 (regional laws, GU, ministerial decrees) | 🔲 |
 | Other corpus ingestors (Retsinformation, Légifrance, BOE, ...) | 🔲 planned |
 
 ### Note: MCP client — async multi-step flows

@@ -116,6 +116,14 @@ pub struct AppState {
     /// the status endpoint. Cleared when the user removes the folder.
     #[cfg(feature = "rag")]
     pub scans: Arc<RwLock<HashMap<String, ScanProgressHandle>>>,
+
+    /// In-flight client-side tool requests. When the model calls a
+    /// "client tool" (e.g. vanga_search), the chat handler creates a
+    /// oneshot channel, inserts the sender here keyed by a UUID
+    /// request_id, emits an SSE event to the browser, then awaits the
+    /// receiver. The browser runs the tool and POSTs the result to
+    /// `/chat/client-tool-result`, which looks up and resolves the sender.
+    pub client_tool_tx: Arc<std::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<String>>>>,
 }
 
 impl AppState {
@@ -182,6 +190,7 @@ impl AppState {
             embeddings,
             #[cfg(feature = "rag")]
             scans: Arc::new(RwLock::new(HashMap::new())),
+            client_tool_tx: Arc::new(std::sync::Mutex::new(HashMap::new())),
         })
     }
 

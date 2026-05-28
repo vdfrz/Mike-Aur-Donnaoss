@@ -35,6 +35,10 @@ pub struct Message {
     /// tool results by id, Gemini keys them by function name — so we keep both.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
+    /// DeepSeek reasoning/thinking content. Must be passed back to the API
+    /// on subsequent turns when using thinking mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 impl Message {
@@ -46,6 +50,7 @@ impl Message {
             tool_calls: vec![],
             tool_call_id: None,
             tool_name: None,
+            reasoning_content: None,
         }
     }
     pub fn assistant(content: impl Into<String>) -> Self {
@@ -56,6 +61,7 @@ impl Message {
             tool_calls: vec![],
             tool_call_id: None,
             tool_name: None,
+            reasoning_content: None,
         }
     }
     /// Synthetic system-role message — used by the summarizer to inject
@@ -70,6 +76,7 @@ impl Message {
             tool_calls: vec![],
             tool_call_id: None,
             tool_name: None,
+            reasoning_content: None,
         }
     }
     pub fn tool_result(
@@ -84,6 +91,7 @@ impl Message {
             tool_calls: vec![],
             tool_call_id: Some(tool_call_id.into()),
             tool_name: Some(tool_name.into()),
+            reasoning_content: None,
         }
     }
     pub fn assistant_tool_calls(calls: Vec<ToolCall>) -> Self {
@@ -94,6 +102,7 @@ impl Message {
             tool_calls: calls,
             tool_call_id: None,
             tool_name: None,
+            reasoning_content: None,
         }
     }
 }
@@ -146,7 +155,15 @@ pub struct LocalConfig {
 
 pub struct StreamParams {
     pub model: String,
+    /// Stable system-prompt prefix — identical across the turns of a chat
+    /// (model instructions, attached-document text, tool descriptions).
+    /// Sent as a cacheable block so providers that support prompt caching
+    /// (Anthropic explicit, Gemini implicit) don't re-bill it every turn.
     pub system_prompt: String,
+    /// Volatile system-prompt tail — content that changes per turn (today:
+    /// per-query knowledge-base retrieval). Kept out of the cached prefix
+    /// so it never invalidates the cache. Empty for non-chat callers.
+    pub system_volatile: String,
     pub messages: Vec<Message>,
     pub tools: Vec<ToolSchema>,
     pub max_iterations: u32,
@@ -158,4 +175,18 @@ pub struct StreamParams {
     /// Gemini API calls. None or "global" → public endpoint. Preview models
     /// always force global; the `gemini::base_url` builder enforces this.
     pub gemini_region: Option<String>,
+}
+
+impl StreamParams {
+    /// The full system prompt — stable prefix plus volatile tail — for
+    /// providers that send it as one opaque string (Gemini, local).
+    pub fn full_system(&self) -> String {
+        if self.system_volatile.is_empty() {
+            self.system_prompt.clone()
+        } else if self.system_prompt.is_empty() {
+            self.system_volatile.clone()
+        } else {
+            format!("{}\n\n---\n\n{}", self.system_prompt, self.system_volatile)
+        }
+    }
 }

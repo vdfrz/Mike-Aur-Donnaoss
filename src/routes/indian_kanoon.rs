@@ -48,6 +48,7 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/config", get(get_config).put(put_config))
         .route("/search", post(search))
+        .route("/meta/{tid}", get(fetch_meta))
         .route("/doc/{tid}", get(fetch_doc))
         .route("/doc-html/{tid}", get(fetch_doc_html))
         .route("/docfragment/{tid}", get(doc_fragment))
@@ -360,6 +361,68 @@ struct DocFragmentQuery {
     #[serde(default)]
     #[allow(dead_code)]
     formInput: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// GET /indian-kanoon/meta/:tid — lightweight court metadata (no doc ingestion)
+// ---------------------------------------------------------------------------
+
+async fn fetch_meta(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+    Path(tid): Path<i64>,
+) -> ApiResult {
+    // Resolve the IK API key.
+    let ik_key: Option<String> = sqlx::query_as::<_, (Option<String>,)>(
+        "SELECT ik_api_key FROM corpus_settings WHERE user_id = ? AND corpus_id = ?",
+    )
+    .bind(&auth.user_id)
+    .bind(CORPUS_ID)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
+    .and_then(|(k,)| k)
+    .or_else(|| std::env::var("IK_API_KEY").ok());
+
+    let ik_key = ik_key.ok_or_else(|| {
+        err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "No Indian Kanoon API key configured.",
+        )
+    })?;
+
+    let client = reqwest::Client::builder()
+        .user_agent("MikeRust/0.1 (Indian Kanoon integration)")
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let resp = client
+        .post(format!("{IK_API_BASE}/doc/{tid}/"))
+        .header("Authorization", format!("Token {ik_key}"))
+        .send()
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, &format!("IK API error: {e}")))?;
+
+    if !resp.status().is_success() {
+        return Err(err(
+            StatusCode::BAD_GATEWAY,
+            &format!("Indian Kanoon returned HTTP {}", resp.status()),
+        ));
+    }
+
+    let data: Value = resp
+        .json()
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, &format!("Failed to parse IK response: {e}")))?;
+
+    Ok(Json(json!({
+        "tid": tid,
+        "title": data["title"].as_str().unwrap_or(""),
+        "docsource": data["docsource"].as_str().unwrap_or(""),
+        "publishdate": data["publishdate"].as_str().unwrap_or(""),
+    })))
 }
 
 async fn fetch_doc(

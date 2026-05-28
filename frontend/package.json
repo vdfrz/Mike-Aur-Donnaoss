@@ -17,6 +17,7 @@
     "dependencies": {
         "@aws-sdk/client-s3": "^3.1046.0",
         "@aws-sdk/s3-request-presigner": "^3.1046.0",
+        "@duckdb/duckdb-wasm": "^1.33.1-dev45.0",
         "@openrouter/sdk": "^0.3.11",
         "@radix-ui/react-dropdown-menu": "^2.1.16",
         "@radix-ui/react-icons": "^1.3.2",
@@ -54,6 +55,7 @@
         "remark-math": "^6.0.0",
         "resend": "^6.8.0",
         "tailwind-merge": "^3.4.0",
+        "tesseract.js": "^7.0.0",
         "tiptap-markdown": "^0.9.0"
     },
     "devDependencies": {

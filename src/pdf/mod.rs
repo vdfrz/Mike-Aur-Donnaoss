@@ -109,8 +109,8 @@ pub struct PageText {
 fn ocr_page(pdfium: &Pdfium, page: &PdfPage, page_index: usize) -> Result<String> {
     use anyhow::anyhow;
 
-    // 300 DPI is Tesseract's default — good balance of speed & accuracy.
-    let scale = 300.0 / 72.0;
+    // 150 DPI — faster render + smaller image for Tesseract while still readable.
+    let scale = 150.0 / 72.0;
     let config = PdfRenderConfig::new().scale_page_by_factor(scale);
     let bitmap = page
         .render_with_config(&config)
@@ -133,8 +133,19 @@ fn ocr_page(pdfium: &Pdfium, page: &PdfPage, page_index: usize) -> Result<String
         None
     };
 
-    let mut lt = leptess::LepTess::new(tessdata, "eng")
-        .map_err(|e| anyhow!("leptess init: {e}"))?;
+    // Indian case files are routinely a mix of English and Hindi
+    // (Devanagari). Tesseract supports multi-language OCR via "lang1+lang2"
+    // syntax, so we prefer "eng+hin" when Hindi traineddata is available
+    // and fall back to "eng" alone if not. Detect availability by probing
+    // for hin.traineddata in the tessdata directory.
+    let want_hindi = tessdata
+        .map(|d| std::path::Path::new(d).join("hin.traineddata").exists())
+        .unwrap_or(false);
+    let langs = if want_hindi { "eng+hin" } else { "eng" };
+
+    let mut lt = leptess::LepTess::new(tessdata, langs)
+        .or_else(|_| leptess::LepTess::new(tessdata, "eng"))
+        .map_err(|e| anyhow!("leptess init (langs={langs}): {e}"))?;
     lt.set_image_from_mem(&png_buf)
         .map_err(|e| anyhow!("leptess set_image page {page_index}: {e}"))?;
     let text = lt

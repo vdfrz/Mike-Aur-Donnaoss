@@ -75,6 +75,23 @@ aws-sdk-s3 = { version = "1", optional = true }
 aws-config = { version = "1", optional = true }
 
 # ------------------------------------------------------------------
+# AWS verification — read public Indian-high-court-judgments parquet
+# metadata (no AWS credentials needed; bucket is anonymous-read). We
+# only download the small per-(court, year) metadata.parquet files
+# on demand, cache them locally, and use them to cross-reference
+# Kanoon hits against the canonical court PDF index. The parquet
+# crate is heavy (~15s extra compile) so it's feature-gated, but
+# enabled by default so verification works out of the box.
+# ------------------------------------------------------------------
+# Compression codecs ("snap", "brotli", "lz4", "zstd") are mandatory —
+# the public dataset uses snappy-compressed pages and parquet's default
+# build refuses to read them otherwise. Async transport not used here
+# (we cache parquet files on disk before reading).
+parquet = { version = "53", optional = true, default-features = false, features = ["arrow", "snap", "brotli", "flate2", "lz4", "zstd"] }
+arrow-array = { version = "53", optional = true }
+arrow-schema = { version = "53", optional = true }
+
+# ------------------------------------------------------------------
 # PDF extraction — pdfium-render (bundled dll in libs/pdfium/)
 # Pass 1: native text extraction; Pass 2: Tesseract OCR fallback
 # ------------------------------------------------------------------
@@ -98,14 +115,6 @@ pulldown-cmark = { version = "0.12", default-features = false }
 # content page down to the article body so we can chunk + embed it.
 # pure-Rust, ~1MB of compile-time cost; no native deps.
 scraper = "0.20"
-# Parquet reader for the italian-legal-corpus HuggingFace bulk import.
-# We download the dataset's published shards, project only the
-# metadata columns we need (no `text` body — that stays remote and is
-# fetched on demand), and stream them into our local SQLite FTS5
-# index. Used by `src/corpora/italian_legal.rs`.
-parquet = { version = "53", default-features = false, features = ["arrow", "snap", "zstd"] }
-arrow-array = "53"
-arrow-schema = "53"
 
 # ------------------------------------------------------------------
 # RTF — pure-Rust text extraction via rtf-parser (26k recent
@@ -137,6 +146,7 @@ bytes = "1"
 # ------------------------------------------------------------------
 # Serialization / misc
 # ------------------------------------------------------------------
+regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
@@ -154,12 +164,17 @@ async-trait = "0.1"
 # Optional features
 # ------------------------------------------------------------------
 [features]
-default = ["local-storage", "rag", "pdf", "tesseract"]
+default = ["local-storage", "rag", "pdf", "tesseract", "aws-verification"]
 local-storage = []
 s3-storage = ["dep:aws-sdk-s3", "dep:aws-config"]
 pdf = ["dep:pdfium-render"]
 # Tesseract OCR for scanned PDFs — requires `brew install tesseract`
 tesseract = ["dep:leptess"]
+# AWS verification: cross-reference Kanoon hits against the canonical
+# indian-high-court-judgments parquet metadata so each citation can be
+# tagged VERIFIED / UNVERIFIED with a link to the canonical court PDF.
+# Adds the parquet + arrow crates. Disable if you only want Kanoon.
+aws-verification = ["dep:parquet", "dep:arrow-array", "dep:arrow-schema"]
 # Embeddings + vector DB + folder scanner. Pulled in by default so the
 # UI's "Sincronizza cartella" panel is functional out of the box, but
 # can be disabled (`--no-default-features`) for slim CI builds since

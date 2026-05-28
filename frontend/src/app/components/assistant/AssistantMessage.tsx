@@ -18,6 +18,7 @@ import type {
 import { EditCard, applyOptimisticResolution } from "./EditCard";
 import { PreResponseWrapper } from "../shared/PreResponseWrapper";
 import { THINKING_SNIPPETS, getRandomSnippet } from "../../data/thinkingSnippets";
+import KanoonVerifyBadge, { extractKanoonTid } from "./KanoonVerifyBadge";
 
 /**
  * Card rendered above the per-edit EditCards when a message produced
@@ -353,6 +354,44 @@ function ThinkingPlaceholder({ showConnector }: { showConnector?: boolean }) {
             )}
             <div className="w-1.5 h-1.5 rounded-full border border-gray-400 border-t-transparent animate-spin shrink-0" />
             <span className="ml-2">{snippet}</span>
+        </div>
+    );
+}
+
+/** Cycles through thinking snippets every 3s while a DOCX is being drafted. */
+function DraftingPlaceholder({
+    showConnector,
+    elapsed,
+}: {
+    showConnector?: boolean;
+    elapsed?: number;
+}) {
+    const [snippet, setSnippet] = useState(getRandomSnippet);
+
+    useEffect(() => {
+        const interval = setInterval(() => {
+            setSnippet(getRandomSnippet());
+        }, 3000);
+        return () => clearInterval(interval);
+    }, []);
+
+    return (
+        <div className="relative">
+            {showConnector && (
+                <div className="absolute bottom-0 w-[1px] bg-gray-300 top-[13px] left-[2.5px] h-[calc(100%+11px)]" />
+            )}
+            <div className="flex items-center text-sm font-serif text-gray-500">
+                <div className="w-1.5 h-1.5 rounded-full border border-gray-400 border-t-transparent animate-spin shrink-0" />
+                <span className="font-medium ml-2">Drafting your document</span>
+                {typeof elapsed === "number" && elapsed > 0 && (
+                    <span className="ml-2 text-xs text-gray-400 tabular-nums">
+                        {elapsed}s
+                    </span>
+                )}
+            </div>
+            <div className="flex items-center text-sm font-serif text-gray-400 mt-1.5 ml-[14px]">
+                <span className="italic">{snippet}</span>
+            </div>
         </div>
     );
 }
@@ -977,14 +1016,19 @@ function MarkdownContent({
                                 // at a glance "this is from my library, not
                                 // from the attached doc".
                                 const isKb = annotation.source === "kb" || annotation.source === "tool";
-                                const tooltipText = isKb
+                                const isVanga = annotation.source === "vanga";
+                                const tooltipText = isVanga
+                                    ? `${annotation.filename}: "${displayCitationQuote(annotation)}"`
+                                    : isKb
                                     ? `${annotation.scope === "project" ? "Progetto" : "Libreria"} · ${annotation.filename}` +
                                       (annotation.chunk_index !== undefined
                                           ? ` (chunk ${annotation.chunk_index})`
                                           : "") +
                                       `: "${displayCitationQuote(annotation)}"`
                                     : `${formatCitationPage(annotation)}: "${displayCitationQuote(annotation)}"`;
-                                const pillClass = isKb
+                                const pillClass = isVanga
+                                    ? "bg-amber-50 text-amber-700 hover:bg-amber-100 border border-amber-200"
+                                    : isKb
                                     ? annotation.scope === "project"
                                         ? "bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200"
                                         : "bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200"
@@ -1023,18 +1067,69 @@ function MarkdownContent({
                     ),
                     a: ({ node, href, children, ...props }) => {
                         const isIKLink = href && href.includes("indiankanoon.org");
+                        const kanoonTid = isIKLink ? extractKanoonTid(href ?? undefined) : null;
+                        const linkText = typeof children === "string"
+                            ? children
+                            : Array.isArray(children)
+                              ? children.map((c) => (typeof c === "string" ? c : "")).join("")
+                              : "Indian Kanoon";
                         const handleClick = (e: React.MouseEvent) => {
                             e.preventDefault();
                             if (!href) return;
                             if (isIKLink && onIKLinkClick) {
-                                const linkText = typeof children === "string"
-                                    ? children
-                                    : Array.isArray(children)
-                                      ? children.map((c) => (typeof c === "string" ? c : "")).join("")
-                                      : "Indian Kanoon";
-                                const paraEl = (e.currentTarget as HTMLElement).closest("p, li, div, blockquote");
-                                const context = paraEl?.textContent ?? linkText;
-                                onIKLinkClick(href, linkText, context);
+                                const linkEl = e.currentTarget as HTMLElement;
+                                const paraEl = linkEl.closest("p, li, div, blockquote");
+                                const paragraphText = paraEl?.textContent ?? linkText;
+                                // The system prompt makes Mike write a verbatim quote
+                                // after every citation, BUT the model often renders the
+                                // quote as a separate Markdown blockquote rather than
+                                // inline. So look for the verbatim quote in this order:
+                                //   1. A nearby <blockquote> following the citation paragraph
+                                //   2. A "..." quoted passage inside the citation paragraph
+                                //   3. Fallback: the whole paragraph
+                                let highlightTarget: string | null = null;
+
+                                // (1) Look at next 1-3 siblings of the citation paragraph
+                                // for a blockquote with substantial text. This catches
+                                // Mike's pattern: "[citation]. summary. The snippet reads:
+                                // \n\n> verbatim quote here"
+                                let sibling: Element | null = paraEl?.nextElementSibling ?? null;
+                                for (let i = 0; i < 3 && sibling; i++) {
+                                    if (sibling.tagName === "BLOCKQUOTE") {
+                                        const t = (sibling.textContent ?? "").trim();
+                                        if (t.length >= 40) {
+                                            highlightTarget = t;
+                                            break;
+                                        }
+                                    }
+                                    sibling = sibling.nextElementSibling;
+                                }
+
+                                // (2) Look for an inline “...” quote in the citation
+                                // paragraph AND nearby siblings — the model often
+                                // places the verbatim quote in a following paragraph.
+                                if (!highlightTarget) {
+                                    const textsToCheck = [paragraphText];
+                                    let sib2: Element | null = paraEl?.nextElementSibling ?? null;
+                                    for (let j = 0; j < 3 && sib2; j++) {
+                                        textsToCheck.push((sib2.textContent ?? "").trim());
+                                        sib2 = sib2.nextElementSibling;
+                                    }
+                                    for (const txt of textsToCheck) {
+                                        const quoteMatch =
+                                            txt.match(/[""]([^””]{30,400})[””]/) ||
+                                            txt.match(/[‘’]([^’’]{30,400})[’’]/);
+                                        if (quoteMatch) {
+                                            highlightTarget = quoteMatch[1];
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                // (3) Fallback to the whole paragraph.
+                                if (!highlightTarget) highlightTarget = paragraphText;
+
+                                onIKLinkClick(href, linkText, highlightTarget);
                                 return;
                             }
                             const url = href;
@@ -1047,14 +1142,19 @@ function MarkdownContent({
                             });
                         };
                         return (
-                            <a
-                                href={href}
-                                className="text-blue-600 hover:text-blue-700 underline cursor-pointer"
-                                onClick={handleClick}
-                                {...props}
-                            >
-                                {children}
-                            </a>
+                            <>
+                                <a
+                                    href={href}
+                                    className="text-blue-600 hover:text-blue-700 underline cursor-pointer"
+                                    onClick={handleClick}
+                                    {...props}
+                                >
+                                    {children}
+                                </a>
+                                {kanoonTid !== null && (
+                                    <KanoonVerifyBadge tid={kanoonTid} title={linkText} />
+                                )}
+                            </>
                         );
                     },
                     hr: ({ node, ...props }) => (
@@ -1134,6 +1234,7 @@ interface Props {
      */
     resolvedEditStatuses?: Record<string, "accepted" | "rejected">;
     onIKLinkClick?: (url: string, title: string, context: string) => void;
+    onSendMessage?: (text: string) => void;
 }
 
 export function AssistantMessage({
@@ -1155,6 +1256,7 @@ export function AssistantMessage({
     isEditReloading,
     resolvedEditStatuses,
     onIKLinkClick,
+    onSendMessage,
 }: Props) {
     const messageKey = useId();
     const tA = useTranslations("Assistant");
@@ -1194,12 +1296,20 @@ export function AssistantMessage({
     // only for cross-page continuations via the [[PAGE_BREAK]] sentinel).
     const citationsList: MikeCitationAnnotation[] = [];
     const processedTexts: string[] = [];
+    // Strip [INTAKE]...[/INTAKE] blocks — they're rendered as structured
+    // clarification chips below, not as raw text in the message body.
+    const stripIntakeBlock = (text: string): string => {
+        return text
+            .replace(/\[INTAKE\][\s\S]*?\[\/INTAKE\]/g, "")
+            .replace(/\n{3,}/g, "\n\n")
+            .trim();
+    };
     if (events) {
         for (const event of events) {
             processedTexts.push(
                 event.type === "content"
                     ? preprocessCitations(
-                          event.text,
+                          stripIntakeBlock(event.text),
                           annotations,
                           citationsList,
                       )
@@ -1230,6 +1340,16 @@ export function AssistantMessage({
         }
     };
 
+    // When the message produced (or is producing) a document, hide raw
+    // streamed text — the user only wants the DOCX download card.
+    // Show thinking snippets while the draft is being generated.
+    const hasDocCreated = events?.some((e) => e.type === "doc_created") ?? false;
+    const hasDocxToolCall = events?.some(
+        (e) => e.type === "tool_call_start" && e.name === "generate_docx",
+    ) ?? false;
+    // Hide content when a DOCX is being created OR has been created
+    const suppressContent = hasDocCreated || hasDocxToolCall;
+
     const lastContentIdx = events
         ? events.reduce(
               (last, e, idx) => (e.type === "content" ? idx : last),
@@ -1253,6 +1373,11 @@ export function AssistantMessage({
     if (events) {
         let current: Extract<EventGroup, { kind: "pre" }> | null = null;
         events.forEach((e, i) => {
+            // Skip content events entirely when we're generating a DOCX —
+            // the raw markdown is garbled and the user only wants the file.
+            if (e.type === "content" && suppressContent) {
+                return;
+            }
             if (e.type === "content") {
                 if (current) {
                     groups.push(current);
@@ -1314,6 +1439,19 @@ export function AssistantMessage({
         if (event.type === "tool_call_start") {
             const elapsed = event.elapsedSecs ?? 0;
             const showSlowHint = elapsed >= 10;
+            // For generate_docx, show cycling thinking snippets
+            // instead of the generic "Running generate_docx..."
+            if (event.name === "generate_docx") {
+                return (
+                    <DraftingPlaceholder
+                        key={globalIdx}
+                        showConnector={showConnector}
+                        elapsed={elapsed}
+                    />
+                );
+            }
+            const toolLabel = event.name ? `${event.name}` : "tool";
+            const displayLabel = event.progressLabel || `${tA("running")} ${toolLabel}...`;
             return (
                 <div key={globalIdx} className="relative">
                     <div className="flex items-center text-sm font-serif text-gray-500">
@@ -1321,11 +1459,15 @@ export function AssistantMessage({
                             <div className="absolute bottom-0 w-[1px] bg-gray-300 top-[13px] left-[2.5px] h-[calc(100%+11px)]" />
                         )}
                         <div className="w-1.5 h-1.5 rounded-full border border-gray-400 border-t-transparent animate-spin shrink-0" />
-                        <span className="font-medium ml-2">{tA("running")}</span>
-                        <span className="ml-1">
-                            {event.name ? `${event.name}...` : "tool..."}
-                        </span>
-                        {elapsed > 0 && (
+                        {event.progressLabel ? (
+                            <span className="ml-2">{displayLabel}</span>
+                        ) : (
+                            <>
+                                <span className="font-medium ml-2">{tA("running")}</span>
+                                <span className="ml-1">{toolLabel}...</span>
+                            </>
+                        )}
+                        {elapsed > 0 && !event.progressLabel && (
                             <span className="ml-2 text-xs text-gray-400 tabular-nums">
                                 {elapsed}s
                             </span>
@@ -1340,7 +1482,7 @@ export function AssistantMessage({
             );
         }
         if (event.type === "thinking") {
-            return <ThinkingPlaceholder showConnector={showConnector} />;
+            return <ThinkingPlaceholder key={globalIdx} showConnector={showConnector} />;
         }
         if (event.type === "doc_read") {
             const ann = annotations.find((a) => a.filename === event.filename);
@@ -1471,6 +1613,31 @@ export function AssistantMessage({
                                         ),
                                     )}
                                 </PreResponseWrapper>
+                            );
+                        })}
+                        {/* Clarification chips — rendered directly without
+                            PreResponseWrapper so they're always visible. */}
+                        {events.filter((e) => e.type === "clarification").map((e, i) => {
+                            if (e.type !== "clarification") return null;
+                            return (
+                                <div key={`clarify-${i}`} className="flex flex-col gap-3 mt-2">
+                                    {e.questions.map((q, qi) => (
+                                        <div key={qi}>
+                                            <p className="text-sm font-medium text-gray-700 mb-1.5">{q.text}</p>
+                                            <div className="flex flex-wrap gap-1.5">
+                                                {q.chips.map((chip) => (
+                                                    <button
+                                                        key={chip}
+                                                        className="px-3 py-1 text-sm rounded-full border border-gray-300 bg-white text-gray-700 hover:bg-gray-100 hover:border-gray-400 transition-colors"
+                                                        onClick={() => onSendMessage?.(chip)}
+                                                    >
+                                                        {chip}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
                             );
                         })}
                         {/* Bulk accept/reject + per-edit cards — below the

@@ -365,9 +365,11 @@ export function useAssistantChat({
             ? messages
             : [...messages, message];
 
+        const initialEvents: AssistantEvent[] = [{ type: "thinking" as const, isStreaming: true }];
+
         setMessages([
             ...newMessages,
-            { role: "assistant", content: "", annotations: [], events: [] },
+            { role: "assistant", content: "", annotations: [], events: initialEvents },
         ]);
 
         let streamedChatId: string | null = null;
@@ -375,7 +377,7 @@ export function useAssistantChat({
         stopDrip();
         dripTargetRef.current = "";
         dripDisplayLenRef.current = 0;
-        eventsRef.current = [];
+        eventsRef.current = initialEvents;
 
         try {
             const controller = new AbortController();
@@ -386,6 +388,7 @@ export function useAssistantChat({
                 content: currentMessage.content,
                 files: currentMessage.files,
                 workflow: currentMessage.workflow,
+                reasoning_content: currentMessage.reasoning_content,
             }));
 
             const model = message.model;
@@ -783,7 +786,6 @@ export function useAssistantChat({
                             updateMatchingEvent(
                                 (e) =>
                                     e.type === "doc_created" &&
-                                    e.filename === data.filename &&
                                     !!e.isStreaming,
                                 (e) => {
                                     const next: Extract<
@@ -791,8 +793,7 @@ export function useAssistantChat({
                                         { type: "doc_created" }
                                     > = {
                                         type: "doc_created",
-                                        filename: (e as { filename: string })
-                                            .filename,
+                                        filename: data.filename as string,
                                         download_url:
                                             data.download_url as string,
                                         isStreaming: false,
@@ -911,6 +912,88 @@ export function useAssistantChat({
                             continue;
                         }
 
+                        if (data.type === "client_tool_request") {
+                            const { request_id, name, arguments: args } = data;
+                            if (name === "vanga_search") {
+                                (async () => {
+                                    try {
+                                        const { searchWithFullText } = await import("@/lib/vanga-search");
+                                        const results = await searchWithFullText(
+                                            args,
+                                            true,
+                                            (p) => {
+                                                let label = "Searching judgments…";
+                                                if (p.phase === "loading") {
+                                                    label = `Loading ${p.loaded} of ${p.total} judgments…`;
+                                                } else if (p.phase === "done") {
+                                                    label = "Analysing…";
+                                                }
+                                                updateMatchingEvent(
+                                                    (e) => e.type === "tool_call_start" && e.name === "vanga_search" && !!e.isStreaming,
+                                                    (e) => ({ ...e, progressLabel: label }),
+                                                );
+                                            },
+                                        );
+                                        const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:3001";
+                                        const token = typeof window !== "undefined"
+                                            ? localStorage.getItem("mike_auth_token")
+                                            : null;
+                                        await fetch(`${apiBase}/chat/client-tool-result`, {
+                                            method: "POST",
+                                            headers: {
+                                                "Content-Type": "application/json",
+                                                ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                                            },
+                                            body: JSON.stringify({
+                                                request_id,
+                                                result: JSON.stringify(results),
+                                            }),
+                                        });
+                                    } catch (err) {
+                                        console.error("[vanga] client tool error:", err);
+                                        const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:3001";
+                                        const token = typeof window !== "undefined"
+                                            ? localStorage.getItem("mike_auth_token")
+                                            : null;
+                                        await fetch(`${apiBase}/chat/client-tool-result`, {
+                                            method: "POST",
+                                            headers: {
+                                                "Content-Type": "application/json",
+                                                ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                                            },
+                                            body: JSON.stringify({
+                                                request_id,
+                                                result: JSON.stringify({ error: String(err) }),
+                                            }),
+                                        });
+                                    }
+                                })();
+                            }
+                            continue;
+                        }
+
+                        if (data.type === "clarification_request") {
+                            const questions = data.questions as { text: string; chips: string[] }[];
+                            clearStreamingPlaceholders();
+                            eventsRef.current = [
+                                ...eventsRef.current,
+                                { type: "clarification" as const, questions },
+                            ];
+                            const snapshot = [...eventsRef.current];
+                            setMessages((prev) => {
+                                const updated = [...prev];
+                                const last = updated[updated.length - 1];
+                                if (last?.role === "assistant") {
+                                    updated[updated.length - 1] = {
+                                        ...last,
+                                        events: snapshot,
+                                    };
+                                }
+                                return updated;
+                            });
+                            continue;
+                        }
+
                         if (data.type === "citations") {
                             // End-of-stream signal — scrub any lingering
                             // placeholders so they don't persist into the
@@ -960,6 +1043,24 @@ export function useAssistantChat({
 
             flushDrip();
             finalizeStreamingReasoning();
+
+            // Collect reasoning text from events so it can be passed back
+            // to DeepSeek on subsequent turns (required by their API).
+            const reasoningParts = eventsRef.current
+                .filter((e): e is { type: "reasoning"; text: string } => e.type === "reasoning" && !!("text" in e && e.text))
+                .map((e) => e.text);
+            if (reasoningParts.length > 0) {
+                const rc = reasoningParts.join("");
+                setMessages((prev) => {
+                    const updated = [...prev];
+                    const last = updated[updated.length - 1];
+                    if (last?.role === "assistant") {
+                        updated[updated.length - 1] = { ...last, reasoning_content: rc };
+                    }
+                    return updated;
+                });
+            }
+
             setIsResponseLoading(false);
             setIsLoadingCitations(false);
 

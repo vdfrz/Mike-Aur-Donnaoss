@@ -100,6 +100,7 @@ export type AssistantEvent =
          *  manual approval click on the server side). Absent on the
          *  initial event; populated thereafter. */
         elapsedSecs?: number;
+        progressLabel?: string;
     }
   | { type: "thinking"; isStreaming?: boolean }
   | {
@@ -154,7 +155,11 @@ export type AssistantEvent =
         error?: string;
         isStreaming?: boolean;
     }
-  | { type: "content"; text: string; isStreaming?: boolean };
+  | { type: "content"; text: string; isStreaming?: boolean }
+  | {
+        type: "clarification";
+        questions: { text: string; chips: string[] }[];
+    };
 
 export interface MikeMessage {
   role: "user" | "assistant";
@@ -166,6 +171,8 @@ export interface MikeMessage {
   events?: AssistantEvent[];
   /** Set when streaming failed; rendered as a red error block. */
   error?: string;
+  /** DeepSeek reasoning content — must be passed back to the API on subsequent turns. */
+  reasoning_content?: string;
 }
 
 export interface CitationQuote {
@@ -202,10 +209,12 @@ export interface MikeCitationAnnotation {
    *  - "tool"  → fetched by the model via `search_kb` tool
    *    (placeholder — tool not yet implemented)
    */
-  source?: "attached" | "kb" | "tool";
+  source?: "attached" | "kb" | "tool" | "vanga";
   scope?: "global" | "project";
   path?: string;
   chunk_index?: number;
+  pdf_url?: string;
+  court_code?: string;
 }
 
 const PAGE_BREAK_SENTINEL = "[[PAGE_BREAK]]";
@@ -328,4 +337,71 @@ export interface TabularReviewDetailOut {
   review: TabularReview;
   cells: TabularCell[];
   documents: MikeDocument[];
+}
+
+// Cases
+
+export interface MikeCase {
+  id: string;
+  user_id: string;
+  title: string;
+  court: string | null;
+  parties_json: string | null;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  document_count?: number;
+}
+
+export interface CaseParty {
+  name: string;
+  role: "petitioner" | "respondent" | "appellant" | "other";
+}
+
+export interface CaseDocument {
+  case_id: string;
+  document_id: string;
+  document_type: string | null;
+  attached_at: string | null;
+  filename?: string;
+  file_type?: string | null;
+  status?: string;
+  size_bytes?: number;
+  page_count?: number;
+  needs_ocr?: boolean;
+}
+
+export interface CaseFinding {
+  id: string;
+  case_id: string;
+  agent_name: string;
+  finding_type: string;
+  content_json: string;
+  grounding_json: string | null;
+  created_at: string;
+}
+
+export interface CaseOutput {
+  id: string;
+  case_id: string;
+  output_type: string;
+  content_md: string;
+  docx_document_id: string | null;
+  created_at: string;
+}
+
+export interface CaseDetail {
+  case_info: MikeCase;
+  documents: CaseDocument[];
+  findings: CaseFinding[];
+  outputs: CaseOutput[];
+}
+
+export type AnalysisAgentStatus = "pending" | "running" | "done" | "error";
+
+export interface AnalysisProgress {
+  agent_name: string;
+  status: AnalysisAgentStatus;
+  error?: string;
+  thinking?: string;
 }

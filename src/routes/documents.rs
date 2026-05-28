@@ -27,23 +27,18 @@ fn err(status: StatusCode, msg: &str) -> (StatusCode, Json<Value>) {
 }
 
 pub fn router() -> Router<Arc<AppState>> {
-    // axum's DefaultBodyLimit caps multipart bodies at 2 MB out of the box.
-    // A handful of docx/pdf docs uploaded together blow past that and the
-    // connection is reset mid-stream — the browser surfaces it as
-    // `TypeError: Failed to fetch`, not as an HTTP 413, which is why the
-    // backend log shows nothing when concurrent uploads fail. 100 MB is
-    // safely above any realistic legal document we expect.
+    use axum::routing::post;
     Router::new()
         .route("/", get(list_documents).post(upload_document))
         .route("/{id}", get(get_document).delete(delete_document))
-        // Display endpoint used by the in-app viewer (DocView.tsx / DocxView.tsx).
-        // Returns the file bytes with the appropriate Content-Type so the
-        // frontend can pick PDF.js or docx-preview based on it.
         .route("/{id}/display", get(display_document))
         .route("/{id}/docx", get(display_document))
         .route("/{id}/text", get(display_document))
         .route("/{id}/url", get(get_document_url))
-        .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
+        .route("/{id}/tracked-change-ids", get(tracked_change_ids))
+        .route("/{id}/edits/{edit_id}/accept", post(resolve_edit_accept))
+        .route("/{id}/edits/{edit_id}/reject", post(resolve_edit_reject))
+        .layer(DefaultBodyLimit::max(50_usize * 1024 * 1024 * 1024))
 }
 
 // ---------------------------------------------------------------------------
@@ -436,4 +431,179 @@ async fn delete_document(
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
     Ok(Json(json!({ "ok": true })))
+}
+
+// ---------------------------------------------------------------------------
+// GET /document/:id/tracked-change-ids?version_id=…
+// ---------------------------------------------------------------------------
+#[derive(Deserialize)]
+struct TrackedChangeQuery {
+    version_id: Option<String>,
+}
+
+async fn tracked_change_ids(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+    Query(q): Query<TrackedChangeQuery>,
+) -> ApiResult {
+    let storage_path = match &q.version_id {
+        Some(vid) => {
+            let row: Option<(String,)> = sqlx::query_as(
+                "SELECT dv.storage_path FROM document_versions dv \
+                 JOIN documents d ON d.id = dv.document_id \
+                 WHERE dv.id = ? AND d.id = ? AND d.user_id = ?"
+            )
+                .bind(vid)
+                .bind(&id)
+                .bind(&auth.user_id)
+                .fetch_optional(&state.db)
+                .await
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+            row.map(|(p,)| p)
+        }
+        None => {
+            let row: Option<(Option<String>,)> = sqlx::query_as(
+                "SELECT storage_path FROM documents WHERE id = ? AND user_id = ?"
+            )
+                .bind(&id)
+                .bind(&auth.user_id)
+                .fetch_optional(&state.db)
+                .await
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+            row.and_then(|(p,)| p)
+        }
+    };
+
+    let storage_path = storage_path
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "Document or version not found"))?;
+
+    let storage = make_storage().map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    let bytes = storage.get(&storage_path).await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let ids = crate::pdf::docx_writer::extract_tracked_change_ids(&bytes)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let ids_json: Vec<Value> = ids.iter()
+        .map(|(kind, w_id)| json!({"kind": kind, "w_id": w_id}))
+        .collect();
+
+    Ok(Json(json!({ "ids": ids_json })))
+}
+
+// ---------------------------------------------------------------------------
+// POST /document/:id/edits/:edit_id/accept
+// POST /document/:id/edits/:edit_id/reject
+// ---------------------------------------------------------------------------
+#[derive(Deserialize)]
+struct EditPath {
+    id: String,
+    edit_id: String,
+}
+
+async fn resolve_edit_accept(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+    Path(EditPath { id, edit_id }): Path<EditPath>,
+) -> ApiResult {
+    resolve_edit(state, &auth.user_id, &id, &edit_id, true).await
+}
+
+async fn resolve_edit_reject(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+    Path(EditPath { id, edit_id }): Path<EditPath>,
+) -> ApiResult {
+    resolve_edit(state, &auth.user_id, &id, &edit_id, false).await
+}
+
+async fn resolve_edit(
+    state: Arc<AppState>,
+    user_id: &str,
+    doc_id: &str,
+    edit_id: &str,
+    accept: bool,
+) -> ApiResult {
+    // Look up the edit record
+    let row: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT de.del_w_id, de.ins_w_id, de.version_id FROM document_edits de \
+         JOIN documents d ON d.id = de.document_id \
+         WHERE de.id = ? AND de.document_id = ? AND d.user_id = ?"
+    )
+        .bind(edit_id)
+        .bind(doc_id)
+        .bind(user_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let (del_w_id, ins_w_id, _version_id) = row
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "Edit not found"))?;
+
+    // Fetch current document bytes
+    let doc_row: Option<(Option<String>,)> = sqlx::query_as(
+        "SELECT storage_path FROM documents WHERE id = ? AND user_id = ?"
+    )
+        .bind(doc_id)
+        .bind(user_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let storage_path = doc_row
+        .and_then(|(p,)| p)
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "Document not found"))?;
+
+    let storage = make_storage()
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    let bytes = storage.get(&storage_path).await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    // Resolve the tracked change — try both del and ins w:ids
+    let w_id = if accept { &ins_w_id } else { &del_w_id };
+    let other_id = if accept { &del_w_id } else { &ins_w_id };
+
+    let mut new_bytes = bytes.clone();
+
+    // Accept: unwrap ins (keep content), remove del
+    // Reject: unwrap del (keep content, delText→t), remove ins
+    if !w_id.is_empty() {
+        if let Ok(Some(b)) = crate::pdf::docx_writer::resolve_tracked_change(&new_bytes, w_id, accept) {
+            new_bytes = b;
+        }
+    }
+    if !other_id.is_empty() {
+        if let Ok(Some(b)) = crate::pdf::docx_writer::resolve_tracked_change(&new_bytes, other_id, accept) {
+            new_bytes = b;
+        }
+    }
+
+    // Write back
+    storage.put(
+        &storage_path,
+        &new_bytes,
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ).await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let new_size = new_bytes.len() as i64;
+    let _ = sqlx::query("UPDATE documents SET size_bytes = ? WHERE id = ? AND user_id = ?")
+        .bind(new_size)
+        .bind(doc_id)
+        .bind(user_id)
+        .execute(&state.db)
+        .await;
+
+    let status_str = if accept { "accepted" } else { "rejected" };
+    let _ = sqlx::query("UPDATE document_edits SET status = ? WHERE id = ?")
+        .bind(status_str)
+        .bind(edit_id)
+        .execute(&state.db)
+        .await;
+
+    Ok(Json(json!({
+        "ok": true,
+        "status": status_str,
+        "download_url": format!("/document/{}/docx", doc_id),
+    })))
 }

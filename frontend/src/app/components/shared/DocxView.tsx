@@ -378,8 +378,17 @@ export function DocxView({
                     ignoreHeight: false,
                     renderChanges: true,
                     experimental: true,
+                    ignoreFonts: true,
                 });
                 if (cancelled) return;
+
+                // Force Times New Roman on all rendered elements.
+                // docx-preview injects inline font-family styles that
+                // override CSS classes, so we strip them and inject our own.
+                containerEl.querySelectorAll<HTMLElement>("span, p, div, td, th").forEach((el) => {
+                    el.style.fontFamily = "'Times New Roman', Times, serif";
+                });
+
                 await tagWIdsOnRenderedDom(
                     containerEl,
                     documentId,
