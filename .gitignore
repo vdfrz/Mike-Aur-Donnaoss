@@ -113,6 +113,10 @@ docs/mike-upstream/
 # Training data (JSONL files with extracted legal texts)
 training/*.jsonl
 
+# Roadmap docs (internal planning)
+Mike_aur_Donna_Roadmap_v2.docx
+ROADMAP.md
+
 # WhatsApp web cache
 .wwebjs_cache/
 
