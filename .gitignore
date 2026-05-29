@@ -110,6 +110,12 @@ TODO.md
 # about a different stack and a different toolchain than MikeRust.
 docs/mike-upstream/
 
+# Training data (JSONL files with extracted legal texts)
+training/*.jsonl
+
+# WhatsApp web cache
+.wwebjs_cache/
+
 # Secrets & DB
 mike.db
 .env
