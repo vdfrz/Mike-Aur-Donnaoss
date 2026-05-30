@@ -1739,7 +1739,7 @@ function FindingsTab({
                                                       const g = typeof f.grounding_json === "string"
                                                           ? JSON.parse(f.grounding_json)
                                                           : f.grounding_json;
-                                                      return g as { total_references?: number; valid?: number; invalid_doc_ids?: string[] };
+                                                      return g as { total_references?: number; verified?: number; unverified?: { doc_id: string; quote: string; reason: string }[] };
                                                   } catch { return null; }
                                               })()
                                             : null;
@@ -1773,11 +1773,11 @@ function FindingsTab({
                                                 {groundingStats && groundingStats.total_references != null && (
                                                     <div className="mt-2 flex items-center gap-2">
                                                         <span className="text-[10px] text-gray-400">
-                                                            {groundingStats.valid}/{groundingStats.total_references} references verified
+                                                            {groundingStats.verified}/{groundingStats.total_references} quotes verified
                                                         </span>
-                                                        {groundingStats.invalid_doc_ids && groundingStats.invalid_doc_ids.length > 0 && (
+                                                        {groundingStats.unverified && groundingStats.unverified.length > 0 && (
                                                             <span className="text-[10px] text-amber-600">
-                                                                ({groundingStats.invalid_doc_ids.length} unresolved)
+                                                                ({groundingStats.unverified.length} unverified)
                                                             </span>
                                                         )}
                                                     </div>

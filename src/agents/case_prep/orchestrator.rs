@@ -3,7 +3,7 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use tokio::sync::mpsc;
 
 use crate::llm::summarize::{context_window_tokens, estimate_tokens};
@@ -147,8 +147,12 @@ pub async fn analyze_case(
         case_context.push_str(&format!("[doc-{i}: {filename}]\n{text}\n\n"));
     }
 
-    let valid_doc_ids: HashSet<String> =
-        (0..doc_texts.len()).map(|i| format!("doc-{i}")).collect();
+    // Original (uncompressed) per-doc text, keyed by doc-N, for quote verification.
+    let doc_text_map: HashMap<String, String> = doc_texts
+        .iter()
+        .enumerate()
+        .map(|(i, (_, text))| (format!("doc-{i}"), text.clone()))
+        .collect();
 
     // 4. Token budget — compress if documents exceed 75% of context window
     let window = context_window_tokens(&llm_params.model);
@@ -186,7 +190,7 @@ pub async fn analyze_case(
         let ctx = final_context.clone();
         let cid = case_id.to_string();
         let pool = db.clone();
-        let ids = valid_doc_ids.clone();
+        let doc_map = doc_text_map.clone();
         let tx = progress_tx.clone();
         let mut full_prompt = format!("{}\n\n{}", super::INDIAN_LEGAL_CONTEXT, system_prompt);
         if !prefs_prompt.is_empty() {
@@ -212,7 +216,7 @@ pub async fn analyze_case(
         }
 
         handles.push(tokio::spawn(async move {
-            let finding = run_agent(&cid, agent_name, finding_type, params, &ids, &pool, tx.clone()).await;
+            let finding = run_agent(&cid, agent_name, finding_type, params, &doc_map, &pool, tx.clone()).await;
             if let Some(tx) = &tx {
                 let _ = tx.send(ProgressEvent::AgentDone { finding: finding.clone() }).await;
             }
@@ -238,7 +242,7 @@ async fn run_agent(
     agent_name: &'static str,
     finding_type: &str,
     params: StreamParams,
-    valid_doc_ids: &HashSet<String>,
+    doc_texts: &HashMap<String, String>,
     db: &SqlitePool,
     progress_tx: Option<mpsc::Sender<ProgressEvent>>,
 ) -> Finding {
@@ -248,7 +252,7 @@ async fn run_agent(
     let (content_json, grounding_json) = match call_llm(params, agent_name, progress_tx.clone()).await {
         Ok(raw) => {
             let parsed = parse_json_response(&raw);
-            let grounding = validate_grounding(&parsed, valid_doc_ids);
+            let grounding = validate_grounding(&parsed, doc_texts);
             (parsed.to_string(), Some(grounding.to_string()))
         }
         Err(e) => {
@@ -378,39 +382,138 @@ fn strip_markdown_fences(s: &str) -> String {
     out.trim().to_string()
 }
 
-fn validate_grounding(parsed: &Value, valid_doc_ids: &HashSet<String>) -> Value {
-    let mut refs = Vec::new();
-    collect_source_doc_ids(parsed, &mut refs);
+const QUOTE_MATCH_THRESHOLD: f64 = 0.95;
 
-    let invalid: Vec<&String> = refs
-        .iter()
-        .filter(|id| !valid_doc_ids.contains(*id))
-        .collect();
+fn validate_grounding(parsed: &Value, doc_texts: &HashMap<String, String>) -> Value {
+    let mut refs = Vec::new();
+    collect_quote_refs(parsed, &mut refs);
+
+    let mut verified = 0usize;
+    let mut unverified = Vec::new();
+    for (doc_id, quote) in &refs {
+        match doc_texts.get(doc_id) {
+            Some(text) if verify_quote(quote, text) >= QUOTE_MATCH_THRESHOLD => verified += 1,
+            Some(_) => unverified.push(json!({
+                "doc_id": doc_id, "quote": quote, "reason": "quote_not_in_doc",
+            })),
+            None => unverified.push(json!({
+                "doc_id": doc_id, "quote": quote, "reason": "invalid_doc_id",
+            })),
+        }
+    }
 
     json!({
         "total_references": refs.len(),
-        "valid": refs.len() - invalid.len(),
-        "invalid_doc_ids": invalid,
+        "verified": verified,
+        "unverified": unverified,
     })
 }
 
-fn collect_source_doc_ids(value: &Value, out: &mut Vec<String>) {
+/// Collect (source_doc_id, quote) pairs from agent JSON. Handles both field
+/// conventions: {source_doc_id, exact_quote} and {supporting_doc, supporting_text}.
+fn collect_quote_refs(value: &Value, out: &mut Vec<(String, String)>) {
     match value {
         Value::Object(map) => {
-            if let Some(Value::String(id)) = map.get("source_doc_id") {
-                out.push(id.clone());
+            if let (Some(Value::String(id)), Some(Value::String(q))) =
+                (map.get("source_doc_id"), map.get("exact_quote"))
+            {
+                out.push((id.clone(), q.clone()));
+            }
+            if let (Some(Value::String(id)), Some(Value::String(q))) =
+                (map.get("supporting_doc"), map.get("supporting_text"))
+            {
+                out.push((id.clone(), q.clone()));
             }
             for v in map.values() {
-                collect_source_doc_ids(v, out);
+                collect_quote_refs(v, out);
             }
         }
         Value::Array(arr) => {
             for v in arr {
-                collect_source_doc_ids(v, out);
+                collect_quote_refs(v, out);
             }
         }
         _ => {}
     }
+}
+
+/// Normalize for OCR-tolerant comparison: lowercase, ASCII-ize smart quotes,
+/// collapse whitespace (also flattens injected "[Page N]" line breaks), and fold
+/// the classic "rn"->"m" OCR misread mid-word. The fold is applied symmetrically
+/// to both quote and source, so legitimate text matches unchanged while a quote
+/// the model silently "corrected" still aligns with its garbled source.
+fn normalize_for_match(s: &str) -> String {
+    let s = s
+        .replace(['\u{2018}', '\u{2019}'], "'")
+        .replace(['\u{201C}', '\u{201D}'], "\"");
+    let mut lowered = String::with_capacity(s.len());
+    let mut last_was_ws = false;
+    for ch in s.chars() {
+        if ch.is_whitespace() {
+            if !last_was_ws {
+                lowered.push(' ');
+                last_was_ws = true;
+            }
+        } else {
+            lowered.extend(ch.to_lowercase());
+            last_was_ws = false;
+        }
+    }
+
+    let chars: Vec<char> = lowered.trim().chars().collect();
+    let mut out = String::with_capacity(chars.len());
+    let mut prev: Option<char> = None;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == 'r'
+            && chars.get(i + 1) == Some(&'n')
+            && prev.is_some_and(|p| p.is_alphanumeric())
+        {
+            out.push('m');
+            prev = Some('m');
+            i += 2;
+            continue;
+        }
+        out.push(c);
+        prev = Some(c);
+        i += 1;
+    }
+    out
+}
+
+/// Verify a quote against its source doc: exact substring first (free), then a
+/// sliding fuzzy match for OCR garbling. Returns match confidence (0.0 = miss).
+fn verify_quote(quote: &str, doc_text: &str) -> f64 {
+    let q = normalize_for_match(quote);
+    if q.chars().count() < 8 {
+        return 0.0; // too short to verify meaningfully
+    }
+    let doc = normalize_for_match(doc_text);
+    if doc.contains(&q) {
+        return 1.0;
+    }
+    // Fuzzy fallback for OCR garbling. Slide a word-aligned window (word count =
+    // quote's) across the doc: OCR corrupts a word's characters but rarely its
+    // boundaries, so word alignment keeps the levenshtein comparison meaningful.
+    let qwords: Vec<&str> = q.split(' ').collect();
+    let dwords: Vec<&str> = doc.split(' ').collect();
+    if dwords.len() < qwords.len() {
+        return strsim::normalized_levenshtein(&q, &doc);
+    }
+    let n = qwords.len();
+    let mut best = 0.0_f64;
+    for start in 0..=(dwords.len() - n) {
+        let window = dwords[start..start + n].join(" ");
+        let ratio = strsim::normalized_levenshtein(&q, &window);
+        if ratio > best {
+            best = ratio;
+            if best >= 0.99 {
+                break;
+            }
+        }
+    }
+    best
 }
 
 /// Returns (text, page_count, needed_ocr) for richer progress reporting.
@@ -538,4 +641,52 @@ async fn compress_context(
         gemini_region: llm_params.gemini_region.clone(),
     };
     call_llm(params, "compressor", None).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DOC: &str = "[Page 1]\nThe respondent failed to pay maintenance of Rs. 5,000\nper month as ordered by the Family Court on 12.03.2021.";
+
+    #[test]
+    fn exact_quote_verifies() {
+        assert_eq!(verify_quote("failed to pay maintenance of Rs. 5,000", DOC), 1.0);
+    }
+
+    #[test]
+    fn quote_spanning_page_break_verifies() {
+        // quote crosses the "[Page 1]" line break — whitespace normalization bridges it
+        assert!(verify_quote("maintenance of Rs. 5,000 per month", DOC) >= QUOTE_MATCH_THRESHOLD);
+    }
+
+    #[test]
+    fn smart_quotes_normalize() {
+        let doc = "the court held \u{201C}res judicata applies here\u{201D} firmly";
+        assert!(verify_quote("\"res judicata applies here\"", doc) >= QUOTE_MATCH_THRESHOLD);
+    }
+
+    #[test]
+    fn ocr_garble_passes_fuzzy() {
+        // OCR misread "form" as "forrn"; fuzzy match should still accept
+        let doc = "the applicant must submit the prescribed forrn before the deadline";
+        assert!(verify_quote("submit the prescribed form before", doc) >= QUOTE_MATCH_THRESHOLD);
+    }
+
+    #[test]
+    fn fabricated_quote_fails() {
+        assert!(verify_quote("the respondent admitted committing the fraud", DOC) < QUOTE_MATCH_THRESHOLD);
+    }
+
+    #[test]
+    fn collects_both_field_conventions() {
+        let v = json!({
+            "items": [{"source_doc_id": "doc-0", "exact_quote": "alpha"}],
+            "strength": {"supporting_doc": "doc-1", "supporting_text": "beta"}
+        });
+        let mut refs = Vec::new();
+        collect_quote_refs(&v, &mut refs);
+        assert!(refs.contains(&("doc-0".to_string(), "alpha".to_string())));
+        assert!(refs.contains(&("doc-1".to_string(), "beta".to_string())));
+    }
 }
