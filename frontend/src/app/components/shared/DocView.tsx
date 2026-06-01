@@ -539,6 +539,20 @@ export function DocView({
         }
     }
 
+    // Plain-text source (e.g. a cached Indian Kanoon judgment .txt) — render
+    // as text with the cited passage highlighted, instead of forcing it
+    // through PDF.js / docx-preview.
+    if (result?.type === "text") {
+        return (
+            <TextDocView
+                text={result.text}
+                quote={quoteList[0]?.quote}
+                bordered={bordered}
+                rounded={rounded}
+            />
+        );
+    }
+
     if (fallbackToDocx && (doc?.document_id || kbPath)) {
         return (
             <DocxView
@@ -600,6 +614,83 @@ export function DocView({
                     </div>
                 </>
             )}
+        </div>
+    );
+}
+
+/**
+ * Renders a plain-text document (e.g. a cached Indian Kanoon judgment) with
+ * the cited passage highlighted in yellow. Matching is whitespace- and
+ * quote-tolerant: it builds a flexible regex from the first ~14 words of the
+ * quote so minor formatting differences between the model's quote and the
+ * stored text don't prevent a match. Falls back to plain text on no match.
+ */
+function TextDocView({
+    text,
+    quote,
+    bordered,
+    rounded,
+}: {
+    text: string;
+    quote?: string;
+    bordered: boolean;
+    rounded: boolean;
+}) {
+    const markRef = useRef<HTMLSpanElement>(null);
+
+    const segments = useMemo<{ before: string; match: string; after: string }>(() => {
+        const empty = { before: text, match: "", after: "" };
+        if (!quote || quote.trim().length < 12) return empty;
+        // Representative chunk: first ~14 words, so an over-long quote still
+        // matches its opening run.
+        const chunk = quote.trim().split(/\s+/).slice(0, 14).join(" ");
+        const escaped = chunk
+            .replace(/[.*+?^${}()|[\]\\]/g, "\\$&") // escape regex metachars
+            .replace(/\s+/g, "\\s+") // tolerate any whitespace (incl. newlines)
+            .replace(/["“”]/g, '["“”]') // tolerate straight/curly double quotes
+            .replace(/['‘’]/g, "['‘’]"); // tolerate straight/curly single quotes
+        try {
+            const re = new RegExp(escaped, "i");
+            const m = re.exec(text);
+            if (!m) return empty;
+            return {
+                before: text.slice(0, m.index),
+                match: text.slice(m.index, m.index + m[0].length),
+                after: text.slice(m.index + m[0].length),
+            };
+        } catch {
+            return empty;
+        }
+    }, [text, quote]);
+
+    useEffect(() => {
+        if (markRef.current) {
+            markRef.current.scrollIntoView({ block: "center", behavior: "smooth" });
+        }
+    }, [segments]);
+
+    return (
+        <div
+            className={`relative flex flex-col flex-1 overflow-hidden ${bordered ? "border border-gray-200" : ""} ${rounded ? "rounded-xl" : ""}`}
+        >
+            <div className="flex-1 overflow-auto bg-white px-6 py-5">
+                <div className="text-sm leading-relaxed text-gray-800 font-serif whitespace-pre-wrap">
+                    {segments.match ? (
+                        <>
+                            {segments.before}
+                            <span
+                                ref={markRef}
+                                className="bg-yellow-200 rounded px-0.5 font-medium"
+                            >
+                                {segments.match}
+                            </span>
+                            {segments.after}
+                        </>
+                    ) : (
+                        text
+                    )}
+                </div>
+            </div>
         </div>
     );
 }

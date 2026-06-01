@@ -9,6 +9,7 @@ pub mod indian_kanoon;
 pub mod messy_doc;
 pub mod personalization;
 pub mod projects;
+pub mod statutes;
 pub mod sync;
 pub mod tabular_reviews;
 pub mod user;

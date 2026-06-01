@@ -146,6 +146,7 @@ pub async fn run_server_with_bio_tx(
         .nest("/ecourts-verify", routes::ecourts::router())
         .nest("/cases", routes::cases::router())
         .nest("/messy-doc", routes::messy_doc::router())
+        .nest("/statutes", routes::statutes::router())
         .merge(routes::personalization::router())
         .nest("/desktop",  routes::desktop::router())
         .layer(cors)

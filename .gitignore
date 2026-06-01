@@ -58,6 +58,7 @@ sentencepiece.bpe.model
 # SQLite + storage tree (chats, indexed docs, FTS5 italian-corpus,
 # EUR-Lex synced text, chat-attached docs cache, etc.).
 data/
+!frontend/src/app/data/
 *.db
 *.db-wal
 *.db-shm

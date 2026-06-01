@@ -52,6 +52,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/doc/{tid}", get(fetch_doc))
         .route("/doc-html/{tid}", get(fetch_doc_html))
         .route("/docfragment/{tid}", get(doc_fragment))
+        .route("/aws-verify", get(aws_verify))
         .route("/documents", get(list_documents))
         .route("/documents/{id}", delete(delete_document))
         .route("/documents/{id}/resync", post(resync_document))
@@ -367,6 +368,27 @@ struct DocFragmentQuery {
 // GET /indian-kanoon/meta/:tid — lightweight court metadata (no doc ingestion)
 // ---------------------------------------------------------------------------
 
+/// Pull the "Equivalent citations:" line out of a Kanoon judgment's HTML.
+/// Kanoon has no structured citation field — the case's own reporter
+/// citations (AIR / SCC / SCR / INSC) only appear as text in the header,
+/// and only for cases that have been reported. Returns the raw citation
+/// string (e.g. "AIR 1973 SUPREME COURT 1461, 1973 4 SCC 225") or None.
+fn extract_equivalent_citations(doc_html: &str) -> Option<String> {
+    let lower = doc_html.to_lowercase();
+    let idx = lower.find("equivalent citation")?;
+    let after = &doc_html[idx..];
+    let colon = after.find(':')?;
+    let rest = &after[colon + 1..];
+    // The citation text sits inside one HTML element — it ends at the next tag.
+    let end = rest.find('<').unwrap_or(rest.len());
+    let cite = rest[..end].trim();
+    if cite.is_empty() {
+        None
+    } else {
+        Some(cite.to_string())
+    }
+}
+
 async fn fetch_meta(
     State(state): State<Arc<AppState>>,
     auth: AuthUser,
@@ -417,12 +439,199 @@ async fn fetch_meta(
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, &format!("Failed to parse IK response: {e}")))?;
 
+    let citation = extract_equivalent_citations(data["doc"].as_str().unwrap_or(""));
+
     Ok(Json(json!({
         "tid": tid,
         "title": data["title"].as_str().unwrap_or(""),
         "docsource": data["docsource"].as_str().unwrap_or(""),
         "publishdate": data["publishdate"].as_str().unwrap_or(""),
+        "citation": citation,
     })))
+}
+
+/// Result of persisting a judgment's text. `Stored` carries what the caller
+/// needs to embed it; `AlreadyCached` short-circuits (we keep one row per tid).
+enum StoreOutcome {
+    AlreadyCached {
+        doc_id: String,
+        status: String,
+    },
+    Stored {
+        doc_id: String,
+        title: String,
+        filename: String,
+        source_path: String,
+        plain_text: String,
+        size: i64,
+    },
+}
+
+/// Fetch a judgment's full text from the IK API and persist it as a
+/// `documents` row (status `syncing`) plus a plain-text cache file. Shared by
+/// the `/doc/{tid}` HTTP handler and the background chat-side cacher. Does NOT
+/// embed — the caller runs `index_document` and flips the status, because
+/// embedding is gated behind the `rag` feature.
+async fn store_judgment_text(
+    db: &sqlx::SqlitePool,
+    user_id: &str,
+    ik_key: &str,
+    tid: i64,
+) -> Result<StoreOutcome, String> {
+    // One cached row per (user, tid): if it exists, we're done.
+    let existing: Option<(String, String)> = sqlx::query_as(
+        "SELECT id, status FROM documents \
+         WHERE user_id = ? AND corpus_id = ? AND corpus_identifier = ?",
+    )
+    .bind(user_id)
+    .bind(CORPUS_ID)
+    .bind(&tid.to_string())
+    .fetch_optional(db)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    if let Some((doc_id, status)) = existing {
+        return Ok(StoreOutcome::AlreadyCached { doc_id, status });
+    }
+
+    let client = reqwest::Client::builder()
+        .user_agent("MikeRust/0.1 (Indian Kanoon integration)")
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let doc_response = client
+        .post(format!("{IK_API_BASE}/doc/{tid}/"))
+        .header("Authorization", format!("Token {ik_key}"))
+        .send()
+        .await
+        .map_err(|e| format!("IK API error: {e}"))?;
+
+    if !doc_response.status().is_success() {
+        return Err(format!(
+            "Indian Kanoon returned HTTP {}",
+            doc_response.status()
+        ));
+    }
+
+    let doc_data: Value = doc_response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse IK doc: {e}"))?;
+
+    let title = doc_data["title"]
+        .as_str()
+        .unwrap_or("Untitled Case")
+        .to_string();
+    let doc_html = doc_data["doc"].as_str().unwrap_or("");
+    if doc_html.is_empty() {
+        return Err("Empty document body from Indian Kanoon.".to_string());
+    }
+
+    // Strip HTML tags to get plain text for embedding.
+    let plain_text = strip_html_tags(doc_html);
+
+    // Hash + store the cache file (content-addressed, deduped on disk).
+    let hash = {
+        let mut h = Sha256::new();
+        h.update(plain_text.as_bytes());
+        format!("{:x}", h.finalize())
+    };
+    let bin_key = format!("cache/{}.txt", hash);
+
+    let storage = make_storage().map_err(|e| e.to_string())?;
+    let bin_abs = storage_root().join(bin_key.replace('/', std::path::MAIN_SEPARATOR_STR));
+    if !bin_abs.exists() {
+        storage
+            .put(&bin_key, plain_text.as_bytes(), "text/plain; charset=utf-8")
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
+    let doc_id = uuid::Uuid::new_v4().to_string();
+    let filename = format!("{}.txt", sanitize_filename(&title));
+    let size = plain_text.len() as i64;
+
+    // Insert with status='syncing'; the caller embeds then flips to 'ready'.
+    // NOTE: documents table has no updated_at column — created_at is the only
+    // timestamp we maintain. Including updated_at here was a stale ref carried
+    // over from a previous refactor of fetch_doc.
+    sqlx::query(
+        "INSERT INTO documents (\
+            id, user_id, corpus_id, corpus_identifier, filename, file_type, \
+            storage_path, extracted_text_path, content_hash, size_bytes, \
+            status, created_at\
+         ) VALUES (?, ?, ?, ?, ?, 'txt', ?, ?, ?, ?, 'syncing', datetime('now'))",
+    )
+    .bind(&doc_id)
+    .bind(user_id)
+    .bind(CORPUS_ID)
+    .bind(&tid.to_string())
+    .bind(&filename)
+    .bind(&bin_key)
+    .bind(&bin_key)
+    .bind(&hash)
+    .bind(size)
+    .execute(db)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(StoreOutcome::Stored {
+        doc_id,
+        title,
+        filename,
+        source_path: bin_abs.to_string_lossy().to_string(),
+        plain_text,
+        size,
+    })
+}
+
+/// Background-cache a single judgment pulled during a chat search: persist its
+/// text and embed it so it lands on the judgments tab and becomes locally
+/// searchable. Best-effort — runs in a spawned task; errors are logged, never
+/// surfaced (the chat answer has already gone out).
+#[cfg(feature = "rag")]
+pub(crate) async fn cache_judgment(
+    db: sqlx::SqlitePool,
+    embeddings: Option<Arc<crate::embeddings::EmbeddingService>>,
+    user_id: String,
+    ik_key: String,
+    tid: i64,
+) -> Result<(), String> {
+    let (doc_id, source_path, plain_text) = match store_judgment_text(&db, &user_id, &ik_key, tid)
+        .await?
+    {
+        StoreOutcome::AlreadyCached { .. } => return Ok(()),
+        StoreOutcome::Stored {
+            doc_id,
+            source_path,
+            plain_text,
+            ..
+        } => (doc_id, source_path, plain_text),
+    };
+
+    let status = if let Some(emb) = embeddings {
+        match emb
+            .index_document(&user_id, None, &doc_id, &source_path, &plain_text)
+            .await
+        {
+            Ok(_) => "ready",
+            Err(e) => {
+                tracing::warn!("[kanoon-cache] embed for {} failed: {}", doc_id, e);
+                "interrupted"
+            }
+        }
+    } else {
+        "ready"
+    };
+
+    sqlx::query("UPDATE documents SET status = ? WHERE id = ?")
+        .bind(status)
+        .bind(&doc_id)
+        .execute(&db)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 async fn fetch_doc(
@@ -450,110 +659,31 @@ async fn fetch_doc(
         )
     })?;
 
-    // Check if already cached.
-    let existing: Option<(String, String)> = sqlx::query_as(
-        "SELECT id, status FROM documents \
-         WHERE user_id = ? AND corpus_id = ? AND corpus_identifier = ?",
-    )
-    .bind(&auth.user_id)
-    .bind(CORPUS_ID)
-    .bind(&tid.to_string())
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-
-    if let Some((id, status)) = existing {
-        return Ok(Json(json!({
-            "id": id,
-            "tid": tid,
-            "status": status,
-            "already_cached": true,
-            "source_url": format!("https://indiankanoon.org/doc/{tid}/"),
-        })));
-    }
-
-    // Fetch the full document from IK API.
-    let client = reqwest::Client::builder()
-        .user_agent("MikeRust/0.1 (Indian Kanoon integration)")
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-
-    let doc_response = client
-        .post(format!("{IK_API_BASE}/doc/{tid}/"))
-        .header("Authorization", format!("Token {ik_key}"))
-        .send()
-        .await
-        .map_err(|e| err(StatusCode::BAD_GATEWAY, &format!("IK API error: {e}")))?;
-
-    if !doc_response.status().is_success() {
-        return Err(err(
-            StatusCode::BAD_GATEWAY,
-            &format!("Indian Kanoon returned HTTP {}", doc_response.status()),
-        ));
-    }
-
-    let doc_data: Value = doc_response
-        .json()
-        .await
-        .map_err(|e| err(StatusCode::BAD_GATEWAY, &format!("Failed to parse IK doc: {e}")))?;
-
-    let title = doc_data["title"].as_str().unwrap_or("Untitled Case").to_string();
-    let doc_html = doc_data["doc"].as_str().unwrap_or("");
-
-    if doc_html.is_empty() {
-        return Err(err(StatusCode::BAD_GATEWAY, "Empty document body from Indian Kanoon."));
-    }
-
-    // Strip HTML tags to get plain text for embedding.
-    let plain_text = strip_html_tags(doc_html);
-
-    // Hash + store.
-    let hash = {
-        let mut h = Sha256::new();
-        h.update(plain_text.as_bytes());
-        format!("{:x}", h.finalize())
-    };
-    let bin_key = format!("cache/{}.txt", hash);
-
-    let storage = make_storage()
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-    let bin_abs = storage_root().join(bin_key.replace('/', std::path::MAIN_SEPARATOR_STR));
-    if !bin_abs.exists() {
-        storage
-            .put(&bin_key, plain_text.as_bytes(), "text/plain; charset=utf-8")
+    let (doc_id, title, filename, source_path, plain_text, size) =
+        match store_judgment_text(&state.db, &auth.user_id, &ik_key, tid)
             .await
-            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-    }
-
-    let doc_id = uuid::Uuid::new_v4().to_string();
-    let filename = format!("{}.txt", sanitize_filename(&title));
-    let size = plain_text.len() as i64;
-
-    // Insert with status='syncing'.
-    sqlx::query(
-        "INSERT INTO documents (\
-            id, user_id, corpus_id, corpus_identifier, filename, \
-            storage_path, extracted_text_path, content_hash, size_bytes, \
-            status, created_at, updated_at\
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'syncing', datetime('now'), datetime('now'))",
-    )
-    .bind(&doc_id)
-    .bind(&auth.user_id)
-    .bind(CORPUS_ID)
-    .bind(&tid.to_string())
-    .bind(&filename)
-    .bind(&bin_key)
-    .bind(&bin_key)
-    .bind(&hash)
-    .bind(size)
-    .execute(&state.db)
-    .await
-    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+            .map_err(|e| err(StatusCode::BAD_GATEWAY, &e))?
+        {
+            StoreOutcome::AlreadyCached { doc_id, status } => {
+                return Ok(Json(json!({
+                    "id": doc_id,
+                    "tid": tid,
+                    "status": status,
+                    "already_cached": true,
+                    "source_url": format!("https://indiankanoon.org/doc/{tid}/"),
+                })));
+            }
+            StoreOutcome::Stored {
+                doc_id,
+                title,
+                filename,
+                source_path,
+                plain_text,
+                size,
+            } => (doc_id, title, filename, source_path, plain_text, size),
+        };
 
     // Run embedding/indexing.
-    let source_path = bin_abs.to_string_lossy().to_string();
-
     #[cfg(feature = "rag")]
     let (chunks_indexed, final_status) = if let Some(emb) = state.embeddings.clone() {
         match emb.index_document(&auth.user_id, None, &doc_id, &source_path, &plain_text).await {
@@ -568,7 +698,10 @@ async fn fetch_doc(
     };
 
     #[cfg(not(feature = "rag"))]
-    let (chunks_indexed, final_status) = (0usize, "ready".to_string());
+    let (chunks_indexed, final_status) = {
+        let _ = (&source_path, &plain_text);
+        (0usize, "ready".to_string())
+    };
 
     sqlx::query("UPDATE documents SET status = ? WHERE id = ?")
         .bind(&final_status)
@@ -660,6 +793,33 @@ async fn doc_fragment(
         "headline": headline,
         "source_url": format!("https://indiankanoon.org/doc/{tid}/"),
     })))
+}
+
+// ---------------------------------------------------------------------------
+// GET /indian-kanoon/aws-verify?title=..&court=..&date=..
+// Cross-check a case against the canonical AWS court-judgments dataset and
+// return the Verification (status + canonical CNR / neutral citation / PDF).
+// Used by the "Verify on eCourts" UI to pre-fill the SCR neutral-citation
+// field with the authoritative citation rather than guessing from the title.
+// ---------------------------------------------------------------------------
+
+async fn aws_verify(
+    _auth: AuthUser,
+    Query(params): Query<HashMap<String, String>>,
+) -> ApiResult {
+    let title = params.get("title").map(|s| s.trim()).unwrap_or("");
+    let court = params.get("court").map(|s| s.trim()).unwrap_or("");
+    let date = params
+        .get("date")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+    if title.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "title is required"));
+    }
+    let verification = crate::llm::aws_verification::verify(title, court, date).await;
+    let value = serde_json::to_value(&verification)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    Ok(Json(value))
 }
 
 // ---------------------------------------------------------------------------

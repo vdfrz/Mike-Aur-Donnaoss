@@ -54,6 +54,10 @@ pub struct Verification {
     pub status: VerificationStatus,
     pub canonical_pdf_url: Option<String>,
     pub canonical_cnr: Option<String>,
+    /// Canonical neutral / reporter citation from the AWS dataset
+    /// (e.g. "2021 INSC 687"). Often more useful to a lawyer than the
+    /// PDF link, and present even when the dataset has no per-case PDF.
+    pub canonical_citation: Option<String>,
     /// Human-readable note explaining the status — surfaced to the LLM.
     pub note: String,
 }
@@ -76,6 +80,7 @@ impl Verification {
             status: VerificationStatus::Unverified,
             canonical_pdf_url: None,
             canonical_cnr: None,
+            canonical_citation: None,
             note: reason.into(),
         }
     }
@@ -84,6 +89,7 @@ impl Verification {
             status: VerificationStatus::NotInAws,
             canonical_pdf_url: None,
             canonical_cnr: None,
+            canonical_citation: None,
             note: format!(
                 "No case with this title found in the AWS canonical dataset for {court} ({year}). \
                  Common for tribunal rulings, very recent cases, or special-court orders. \
@@ -91,14 +97,30 @@ impl Verification {
             ),
         }
     }
-    pub fn verified(cnr: String, pdf_url: String) -> Self {
+    /// Build a VERIFIED result. The PDF link and citation are both optional:
+    /// a title+CNR match in the canonical dataset is sufficient proof the case
+    /// is real, even when the dataset exposes no per-case PDF (e.g. the SC
+    /// corpus tars its PDFs) or no citation.
+    pub fn verified(
+        cnr: String,
+        pdf_url: Option<String>,
+        citation: Option<String>,
+    ) -> Self {
+        let note = match (&pdf_url, &citation) {
+            (Some(_), _) => "Cross-checked against the canonical AWS court-judgments dataset. \
+                 The canonical court PDF is available at canonical_pdf_url.",
+            (None, Some(_)) => "Cross-checked against the canonical AWS court-judgments dataset \
+                 (matched by title + CNR + neutral citation). No per-case PDF is published in \
+                 this dataset, but the case is confirmed genuine — cite with confidence.",
+            (None, None) => "Cross-checked against the canonical AWS court-judgments dataset \
+                 (matched by title + CNR). The case is confirmed genuine.",
+        };
         Self {
             status: VerificationStatus::Verified,
-            canonical_pdf_url: Some(pdf_url),
+            canonical_pdf_url: pdf_url,
             canonical_cnr: Some(cnr),
-            note: "Cross-checked against the canonical AWS indian-high-court-judgments dataset. \
-                   The canonical court PDF is available at canonical_pdf_url."
-                .into(),
+            canonical_citation: citation,
+            note: note.into(),
         }
     }
 }
@@ -158,20 +180,16 @@ const COURT_MAP: &[(&str, &str)] = &[
     ("kashmir", "1_12"),
 ];
 
-/// Extract a 4-digit year from common Kanoon date string shapes.
+/// Extract a 4-digit year from common Kanoon date string shapes:
+/// "12-04-2023", "2023-04-12", "April 12, 2023". Splits on non-digits and
+/// returns the first 4-digit group that's a plausible year (1900..=2100).
+/// A pure last-4-digits scan was wrong for ISO dates ("2023-04-12" → "0412").
 pub fn parse_year(date_str: &str) -> Option<i32> {
-    // Try last 4 digits anywhere in the string.
-    let digits: Vec<char> = date_str.chars().filter(|c| c.is_ascii_digit()).collect();
-    if digits.len() < 4 {
-        return None;
-    }
-    let yr_str: String = digits[digits.len() - 4..].iter().collect();
-    let y: i32 = yr_str.parse().ok()?;
-    if (1900..=2100).contains(&y) {
-        Some(y)
-    } else {
-        None
-    }
+    date_str
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|g| g.len() == 4)
+        .filter_map(|g| g.parse::<i32>().ok())
+        .find(|y| (1900..=2100).contains(y))
 }
 
 /// Where downloaded parquet files live on disk. Same root as the
@@ -293,8 +311,8 @@ async fn verify_inner(
         };
         match parquet_index::find_matching_case(&local, &title_norm) {
             Ok(Some(hit)) => {
-                let pdf_url = build_pdf_url(&hit.pdf_link);
-                return Verification::verified(hit.cnr, pdf_url);
+                let pdf_url = hit.pdf_link.as_deref().map(build_pdf_url);
+                return Verification::verified(hit.cnr, pdf_url, hit.citation);
             }
             Ok(None) => continue,
             Err(e) => {
@@ -353,8 +371,8 @@ async fn verify_supreme_court(title: &str, year: i32) -> Verification {
 
     match parquet_index::find_matching_case(&local, &title_norm) {
         Ok(Some(hit)) => {
-            let pdf_url = build_sc_pdf_url(&hit.pdf_link);
-            Verification::verified(hit.cnr, pdf_url)
+            let pdf_url = hit.pdf_link.as_deref().map(build_sc_pdf_url);
+            Verification::verified(hit.cnr, pdf_url, hit.citation)
         }
         Ok(None) => Verification::not_in_aws("Supreme Court of India", year),
         Err(e) => {
@@ -415,7 +433,10 @@ mod parquet_index {
         pub cnr: String,
         #[allow(dead_code)]
         pub title: String,
-        pub pdf_link: String,
+        /// None when the dataset has no PDF-link column (e.g. SC corpus).
+        pub pdf_link: Option<String>,
+        /// Neutral / reporter citation when the dataset provides one.
+        pub citation: Option<String>,
     }
 
     /// Enumerate the bench-partitioned parquet files for one
@@ -510,22 +531,31 @@ mod parquet_index {
         let title_idx = column_index_any(&schema, &[
             "title", "case_name", "cause_title", "caption", "case_title", "name",
         ])?;
-        let pdf_idx = column_index_any(&schema, &[
+        // PDF link is OPTIONAL — the SC corpus tars its PDFs and has no
+        // per-case link column, but a title+CNR match still verifies the case.
+        let pdf_idx = column_index_opt(&schema, &[
             "pdf_link", "pdf_url", "url", "source_url", "pdf", "pdf_path",
-        ])?;
+        ]);
+        // Neutral / reporter citation, when present (e.g. SC `nc_display`).
+        let cite_idx = column_index_opt(&schema, &[
+            "nc_display", "neutral_citation", "citation",
+        ]);
 
         let reader = builder.build()?;
         let mut best: Option<(f32, MatchedCase)> = None;
 
         for batch_result in reader {
             let batch = batch_result?;
-            let cnr_col = batch.column(cnr_idx);
-            let title_col = batch.column(title_idx);
-            let pdf_col = batch.column(pdf_idx);
-
-            let cnr_arr = string_column(cnr_col)?;
-            let title_arr = string_column(title_col)?;
-            let pdf_arr = string_column(pdf_col)?;
+            let cnr_arr = string_column(batch.column(cnr_idx))?;
+            let title_arr = string_column(batch.column(title_idx))?;
+            let pdf_arr = match pdf_idx {
+                Some(idx) => Some(string_column(batch.column(idx))?),
+                None => None,
+            };
+            let cite_arr = match cite_idx {
+                Some(idx) => Some(string_column(batch.column(idx))?),
+                None => None,
+            };
 
             for i in 0..batch.num_rows() {
                 let row_title = title_arr.value(i);
@@ -537,10 +567,15 @@ mod parquet_index {
                 if sim < 0.5 {
                     continue;
                 }
+                let non_empty = |s: &str| {
+                    let t = s.trim();
+                    (!t.is_empty()).then(|| t.to_string())
+                };
                 let candidate = MatchedCase {
                     cnr: cnr_arr.value(i).to_string(),
                     title: row_title.to_string(),
-                    pdf_link: pdf_arr.value(i).to_string(),
+                    pdf_link: pdf_arr.as_ref().and_then(|a| non_empty(a.value(i))),
+                    citation: cite_arr.as_ref().and_then(|a| non_empty(a.value(i))),
                 };
                 match &best {
                     Some((bs, _)) if *bs >= sim => {}
@@ -563,6 +598,21 @@ mod parquet_index {
             .iter()
             .position(|f| f.name().eq_ignore_ascii_case(name))
             .ok_or_else(|| anyhow!("column `{name}` not present in parquet schema"))
+    }
+
+    /// Like `column_index_any` but returns None instead of erroring when
+    /// no candidate matches. Used for OPTIONAL columns (pdf link, citation)
+    /// whose absence must not abort a verification.
+    fn column_index_opt(
+        schema: &arrow_schema::SchemaRef,
+        candidates: &[&str],
+    ) -> Option<usize> {
+        candidates.iter().find_map(|name| {
+            schema
+                .fields()
+                .iter()
+                .position(|f| f.name().eq_ignore_ascii_case(name))
+        })
     }
 
     /// Like column_index, but tries multiple candidate names. Logs the

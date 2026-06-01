@@ -47,10 +47,19 @@ function isSupremeCourt(title: string, court?: string): boolean {
 }
 
 /**
- * Fetch the court (docsource) for a Kanoon tid from the backend's
- * lightweight metadata endpoint. Returns the court string or null.
+ * Fetch court (docsource) and the case's own reporter citation for a
+ * Kanoon tid from the backend's lightweight metadata endpoint. The
+ * citation (e.g. "AIR 1973 SUPREME COURT 1461, 1973 4 SCC 225") is the
+ * only reliable way to pre-fill the SCR portal's citation fields —
+ * Kanoon titles almost never contain one.
  */
-async function fetchKanoonCourt(tid: number): Promise<string | null> {
+async function fetchKanoonMeta(
+  tid: number,
+): Promise<{
+  docsource: string | null;
+  citation: string | null;
+  publishdate: string | null;
+} | null> {
   try {
     const token = typeof window !== "undefined" ? localStorage.getItem("mike_auth_token") : null;
     const r = await fetch(`${API_BASE}/indian-kanoon/meta/${tid}`, {
@@ -58,7 +67,42 @@ async function fetchKanoonCourt(tid: number): Promise<string | null> {
     });
     if (!r.ok) return null;
     const data = await r.json();
-    return data.docsource ?? null;
+    return {
+      docsource: data.docsource ?? null,
+      citation: data.citation ?? null,
+      publishdate: data.publishdate ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Cross-check the case against the canonical AWS court-judgments dataset and
+ * return its authoritative neutral citation (e.g. "2021 INSC 687"). This is
+ * the most reliable key for the SCR portal's Neutral Citation field — far
+ * better than guessing Year/Volume/Page from the Kanoon title.
+ */
+async function fetchAwsCitation(
+  title: string,
+  court?: string,
+  date?: string,
+): Promise<string | null> {
+  try {
+    const token = typeof window !== "undefined" ? localStorage.getItem("mike_auth_token") : null;
+    const params = new URLSearchParams({ title });
+    if (court) params.set("court", court);
+    if (date) params.set("date", date);
+    const r = await fetch(`${API_BASE}/indian-kanoon/aws-verify?${params.toString()}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!r.ok) return null;
+    const data = await r.json();
+    // Only trust the citation when AWS actually matched the case.
+    if (data?.status === "VERIFIED" && data?.canonical_citation) {
+      return data.canonical_citation as string;
+    }
+    return null;
   } catch {
     return null;
   }
@@ -98,12 +142,13 @@ async function openExternalUrl(url: string) {
  * pre-fill the detailed eCourts SCR search form that appears *after* the
  * CAPTCHA is solved.
  */
-function parseCitationDetails(title: string): {
+function parseCitationDetails(text: string): {
   citYear?: number;
   citVolume?: number;
   citPage?: number;
   neuYear?: number;
   neuNumber?: number;
+  reporter?: "SCR" | "SCC" | "AIR";
 } {
   const out: {
     citYear?: number;
@@ -111,42 +156,52 @@ function parseCitationDetails(title: string): {
     citPage?: number;
     neuYear?: number;
     neuNumber?: number;
+    reporter?: "SCR" | "SCC" | "AIR";
   } = {};
   let m: RegExpMatchArray | null;
 
   // "1973 1 SCR 1" — year volume SCR page
-  m = title.match(/(\d{4})\s+(\d+)\s+SCR\s+(\d+)/i);
+  m = text.match(/(\d{4})\s+(\d+)\s+SCR\s+(\d+)/i);
   if (m) {
     out.citYear = parseInt(m[1]);
     out.citVolume = parseInt(m[2]);
     out.citPage = parseInt(m[3]);
-    return out;
+    out.reporter = "SCR";
   }
   // "SCR 1973 (1) 1" variant
-  m = title.match(/SCR\s+(\d{4})\s*\(\s*(\d+)\s*\)\s+(\d+)/i);
-  if (m) {
-    out.citYear = parseInt(m[1]);
-    out.citVolume = parseInt(m[2]);
-    out.citPage = parseInt(m[3]);
-    return out;
+  if (!out.reporter) {
+    m = text.match(/SCR\s+(\d{4})\s*\(\s*(\d+)\s*\)\s+(\d+)/i);
+    if (m) {
+      out.citYear = parseInt(m[1]);
+      out.citVolume = parseInt(m[2]);
+      out.citPage = parseInt(m[3]);
+      out.reporter = "SCR";
+    }
   }
-  // "1973 4 SCC 225"
-  m = title.match(/(\d{4})\s+(\d+)\s+SCC\s+(\d+)/i);
-  if (m) {
-    out.citYear = parseInt(m[1]);
-    out.citVolume = parseInt(m[2]);
-    out.citPage = parseInt(m[3]);
-    return out;
+  // "1973 4 SCC 225" — different reporter from SCR; recorded but NOT used
+  // to fill the SCR portal's Vol/Page fields (those expect SCR numbers).
+  if (!out.reporter) {
+    m = text.match(/(\d{4})\s+(\d+)\s+SCC\s+(\d+)/i);
+    if (m) {
+      out.citYear = parseInt(m[1]);
+      out.citVolume = parseInt(m[2]);
+      out.citPage = parseInt(m[3]);
+      out.reporter = "SCC";
+    }
   }
   // "AIR 1973 SC 1461"
-  m = title.match(/AIR\s+(\d{4})\s+SC\s+(\d+)/i);
-  if (m) {
-    out.citYear = parseInt(m[1]);
-    out.citPage = parseInt(m[2]);
-    return out;
+  if (!out.reporter) {
+    m = text.match(/AIR\s+(\d{4})\s+SC\s+(\d+)/i);
+    if (m) {
+      out.citYear = parseInt(m[1]);
+      out.citPage = parseInt(m[2]);
+      out.reporter = "AIR";
+    }
   }
-  // NEUTRAL citation: "2024 INSC 123"
-  m = title.match(/(\d{4})\s+INSC\s+(\d+)/i);
+  // NEUTRAL citation: "2024 INSC 123" — independent of the reporter above,
+  // so capture it even when an SCR/SCC/AIR citation is also present. Allow
+  // zero spaces too ("2024INSC123") since the AWS dataset stores it compact.
+  m = text.match(/(\d{4})\s*INSC\s*(\d+)/i);
   if (m) {
     out.neuYear = parseInt(m[1]);
     out.neuNumber = parseInt(m[2]);
@@ -190,6 +245,24 @@ function buildECourtsPrefillScript(
         var MIKE_COURT = "${courtValue}";
         var MIKE_CIT = ${citJSON};
 
+        // A citation is a UNIQUE, exact key. The SCR/eCourts portal ANDs every
+        // filled field, so if we fill BOTH a citation AND the free-text title,
+        // any title-format mismatch ("v." vs "versus", "(Since Deceased)" …)
+        // returns ZERO results. So: when we have a precise citation, search by
+        // citation ALONE and leave the keyword/title box empty.
+        var MIKE_HAS_NEUTRAL = !!(MIKE_CIT.neuYear && MIKE_CIT.neuNumber);
+        var MIKE_HAS_SCR = !!(MIKE_CIT.reporter === 'SCR' && MIKE_CIT.citYear && MIKE_CIT.citPage);
+        var MIKE_PRECISE = MIKE_HAS_NEUTRAL || MIKE_HAS_SCR;
+
+        function clearValue(selector) {
+          var el = document.querySelector(selector);
+          if (el && 'value' in el && el.value) {
+            el.value = '';
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+        }
+
         function setValue(selector, value) {
           var el = document.querySelector(selector);
           if (el && 'value' in el) {
@@ -218,9 +291,17 @@ function buildECourtsPrefillScript(
         // scr.sci.gov.in form (which uses placeholder-based inputs:
         // "Year", "Vol", "Supl", "Page", "Enter Year", "Enter Number").
         function fillSCRFields(filled) {
-          var citYear = (MIKE_CIT.citYear || MIKE_YEAR || null);
-          var citVol  = (MIKE_CIT.citVolume || null);
-          var citPage = (MIKE_CIT.citPage || null);
+          // The SCR Year/Vol/Page fields expect Supreme Court Reports
+          // numbers. Only fill them from a genuine SCR citation — SCC and
+          // AIR use different volume/page numbering and would point to the
+          // wrong report. Neutral citation (INSC) is filled independently.
+          // Prefer the neutral citation as the SINGLE search key when present
+          // — don't also fill SCR vol/page, to keep exactly one criterion.
+          var preferNeutral = MIKE_HAS_NEUTRAL;
+          var isSCR = (MIKE_CIT.reporter === 'SCR') && !preferNeutral;
+          var citYear = isSCR ? (MIKE_CIT.citYear || null) : null;
+          var citVol  = isSCR ? (MIKE_CIT.citVolume || null) : null;
+          var citPage = isSCR ? (MIKE_CIT.citPage || null) : null;
           var neuYear = (MIKE_CIT.neuYear || null);
           var neuNum  = (MIKE_CIT.neuNumber || null);
 
@@ -285,15 +366,21 @@ function buildECourtsPrefillScript(
               if (setValue(neuNumSels[i], String(neuNum))) { filled.push(neuNumSels[i]); break; }
             }
           }
-          // Keyword on the SCR form (uses same "Enter Keyword" placeholder)
+          // Keyword field. ONLY use it when we have no precise citation —
+          // otherwise it AND-narrows the citation search to zero. When precise,
+          // actively clear it so a stale title can't sabotage the search.
           var scrNameSels = [
             'input[placeholder="Enter Keyword"]',
             'input[placeholder="Enter keyword"]',
             '#pet_res_name', '#party_name_escr',
             '#petitioner_respondent', 'input[name="pet_res_name"]',
             'input[name="party_name_escr"]'];
-          for (var i = 0; i < scrNameSels.length; i++) {
-            if (setValue(scrNameSels[i], MIKE_TITLE)) { filled.push(scrNameSels[i]); break; }
+          if (MIKE_PRECISE) {
+            for (var i = 0; i < scrNameSels.length; i++) clearValue(scrNameSels[i]);
+          } else {
+            for (var i = 0; i < scrNameSels.length; i++) {
+              if (setValue(scrNameSels[i], MIKE_TITLE)) { filled.push(scrNameSels[i]); break; }
+            }
           }
         }
 
@@ -319,10 +406,16 @@ function buildECourtsPrefillScript(
             '#party_name', '#petitioner_name', '#petitioner',
             '#keyword', '#free_text',
           ];
-          for (var i = 0; i < titleSelectors.length; i++) {
-            if (setValue(titleSelectors[i], MIKE_TITLE)) { filled.push(titleSelectors[i]); break; }
+          if (MIKE_PRECISE) {
+            // Citation is the sole key — clear any free-text/title box so it
+            // can't AND-narrow the citation search to zero results.
+            for (var i = 0; i < titleSelectors.length; i++) clearValue(titleSelectors[i]);
+          } else {
+            for (var i = 0; i < titleSelectors.length; i++) {
+              if (setValue(titleSelectors[i], MIKE_TITLE)) { filled.push(titleSelectors[i]); break; }
+            }
           }
-          if (MIKE_YEAR) {
+          if (MIKE_YEAR && !MIKE_PRECISE) {
             var yearSelectors = [
               'select[name="year"]', 'input[name="year"]',
               'select[name="dec_year"]', 'input[name="dec_year"]',
@@ -450,7 +543,13 @@ function buildECourtsPrefillScript(
  *      open_external_url Tauri command, where the user pastes the
  *      clipboard contents manually.
  */
-async function openECourtsForVerification(title: string, year?: number, court?: string, tid?: number) {
+async function openECourtsForVerification(
+  title: string,
+  year?: number,
+  court?: string,
+  tid?: number,
+  decisionDate?: string,
+) {
   // 1. Clipboard pre-fill — always.
   try {
     await navigator.clipboard.writeText(title);
@@ -458,18 +557,37 @@ async function openECourtsForVerification(title: string, year?: number, court?: 
     // Non-fatal.
   }
 
-  // 1b. If court is unknown, try fetching it from Kanoon metadata.
+  // 1b. Fetch Kanoon metadata for the court (if unknown) and, crucially,
+  // the case's own reporter citation — the title rarely carries one.
   let resolvedCourt = court;
-  if (!resolvedCourt && tid) {
-    const fetched = await fetchKanoonCourt(tid);
-    if (fetched) resolvedCourt = fetched;
+  let citationStr: string | null = null;
+  let metaDate: string | null = null;
+  if (tid) {
+    const meta = await fetchKanoonMeta(tid);
+    if (meta) {
+      if (!resolvedCourt && meta.docsource) resolvedCourt = meta.docsource;
+      citationStr = meta.citation;
+      metaDate = meta.publishdate;
+    }
   }
+
+  // 1c. Best source of truth: the canonical neutral citation from the AWS
+  // dataset (e.g. "2021 INSC 687"). When AWS confirms the case, prefer this
+  // over the Kanoon reporter citation — it drops straight into the SCR
+  // portal's Neutral Citation field. AWS needs the decision year, which the
+  // badge usually lacks — fall back to the date from Kanoon metadata.
+  const effectiveDate = decisionDate || metaDate || undefined;
+  const awsCitation = await fetchAwsCitation(title, resolvedCourt, effectiveDate);
 
   // 2. Try the Rust-side Tauri command for full webview + JS injection.
   try {
     const tauri = await import("@tauri-apps/api/core");
     const isSC = isSupremeCourt(title, resolvedCourt);
-    const citation = parseCitationDetails(title);
+    // Prefer the AWS neutral citation, then Kanoon's reporter citation,
+    // then fall back to scraping the title.
+    const citation = parseCitationDetails(
+      [awsCitation, citationStr, title].filter(Boolean).join(" "),
+    );
     const script = buildECourtsPrefillScript(title, year, isSC, citation);
     // For SC cases, go directly to the SCR portal — skips the eCourts
     // intermediate step and lands on the form with Year/Vol/Page fields.
@@ -678,7 +796,7 @@ export default function KanoonVerifyBadge({
             // default browser), copies the case title to the clipboard,
             // and tries to JS-inject form pre-fill so the user only has
             // to solve the CAPTCHA + click Search.
-            openECourtsForVerification(title, yearFromDate, court, tid);
+            openECourtsForVerification(title, yearFromDate, court, tid, decisionDate);
             setShowForm(true);
           }}
           className="px-1.5 py-0.5 rounded text-xs bg-gray-50 text-gray-700 border border-gray-200 hover:bg-gray-100"

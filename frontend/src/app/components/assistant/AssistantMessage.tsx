@@ -19,6 +19,7 @@ import { EditCard, applyOptimisticResolution } from "./EditCard";
 import { PreResponseWrapper } from "../shared/PreResponseWrapper";
 import { THINKING_SNIPPETS, getRandomSnippet } from "../../data/thinkingSnippets";
 import KanoonVerifyBadge, { extractKanoonTid } from "./KanoonVerifyBadge";
+import PoweredByIKanoon from "../shared/PoweredByIKanoon";
 
 /**
  * Card rendered above the per-edit EditCards when a message produced
@@ -840,9 +841,12 @@ function preprocessCitations(
     annotations: MikeCitationAnnotation[],
     citationsList: MikeCitationAnnotation[],
 ): string {
-    // Strip the trailing <CITATIONS>…</CITATIONS> JSON block (the model
-    // emits it for the backend; users shouldn't see raw JSON in their chat).
-    text = text.replace(/<CITATIONS>[\s\S]*?<\/CITATIONS>\s*$/i, "").trimEnd();
+    // Strip the <CITATIONS>…</CITATIONS> JSON block (the model emits it for
+    // the backend; users shouldn't see raw JSON in their chat). NOT anchored
+    // to end-of-string: the backend may append a "missing verbatim quote"
+    // warning AFTER the block, which previously left it visible. Global so any
+    // stray block is removed wherever it lands.
+    text = text.replace(/<CITATIONS>[\s\S]*?<\/CITATIONS>/gi, "").trimEnd();
 
     // Inline citation markers come in three flavours:
     //   * `[1]`, `[2]`     — attached-document citations (ref-by-number).
@@ -903,6 +907,9 @@ function MarkdownContent({
     onIKLinkClick?: (url: string, title: string, context: string) => void;
     divRef?: React.RefObject<HTMLDivElement | null>;
 }) {
+    // IK API agreement requires the "Powered by IKanoon" badge alongside any
+    // results sourced from Indian Kanoon. Render once per message that cites IK.
+    const hasIKContent = text.includes("indiankanoon.org");
     return (
         <div
             ref={divRef}
@@ -1164,6 +1171,11 @@ function MarkdownContent({
             >
                 {text}
             </ReactMarkdown>
+            {hasIKContent && (
+                <div className="mt-3 not-prose">
+                    <PoweredByIKanoon />
+                </div>
+            )}
         </div>
     );
 }

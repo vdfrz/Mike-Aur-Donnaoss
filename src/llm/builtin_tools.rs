@@ -27,6 +27,7 @@ const VANGA_SEARCH: &str = "vanga_search";
 const KANOON_SEARCH: &str = "kanoon_search";
 const KANOON_GET_FRAGMENT: &str = "kanoon_get_fragment";
 const KANOON_VERIFY_CASE: &str = "kanoon_verify_case";
+const STATUTE_SEARCH: &str = "statute_search";
 
 pub fn is_builtin(name: &str) -> bool {
     matches!(
@@ -39,6 +40,7 @@ pub fn is_builtin(name: &str) -> bool {
             | KANOON_SEARCH
             | KANOON_GET_FRAGMENT
             | KANOON_VERIFY_CASE
+            | STATUTE_SEARCH
     )
 }
 
@@ -250,6 +252,26 @@ pub fn schemas() -> Vec<ToolSchema> {
                 "required": ["title", "court"]
             }),
         ),
+        fun(
+            STATUTE_SEARCH,
+            "Search the local Indian statute database (BNS, IPC, CrPC, BNSS, Evidence Act, BSA). Use this for questions about which statutory section applies or how the 2023 codes renumber the old ones — distinct from kanoon_search, which is for case law. Returns two things: `results` (matching section text, ordered by relevance) and `mappings` (authoritative old↔new section correspondences, e.g. IPC s.420 → BNS s.318(4)). Mapping lookups work whenever the query mentions a section number, so this answers 'what replaced IPC 420' even when section text isn't available. Query by legal concept or section number (e.g. 'cheating', 'dishonour cheque', '420'); do NOT include act abbreviations like 'BNS' as search words. Cite results as '<statute> s.<section>'.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Legal concept or section number to search section titles and text. Examples: 'cheating', 'criminal breach of trust', 'anticipatory bail', '138'. Avoid act names and full natural-language questions."
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Number of sections to return (1-15, default 8).",
+                        "minimum": 1,
+                        "maximum": 15
+                    }
+                },
+                "required": ["query"]
+            }),
+        ),
     ]
 }
 
@@ -276,6 +298,7 @@ pub async fn dispatch(
         KANOON_VERIFY_CASE => {
             crate::llm::kanoon_tool::exec_kanoon_verify_case(state, user_id, arguments).await
         }
+        STATUTE_SEARCH => crate::llm::statute_tool::exec_statute_search(state, arguments).await,
         other => json!({"error": format!("unknown builtin tool: {other}")}).to_string(),
     }
 }

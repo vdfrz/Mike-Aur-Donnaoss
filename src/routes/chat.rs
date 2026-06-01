@@ -1158,7 +1158,7 @@ VERIFICATION STATUS — how to read it:
 - After kanoon_search, every result has `verification.status: "PENDING"`. This means the case has NOT been cross-checked against the canonical AWS dataset. Treat as Kanoon-only at this stage.
 - After you call kanoon_verify_case, the response's `verification.status` is one of:
     VERIFIED   — case was found in the AWS canonical indian-high-court-judgments dataset. High confidence. canonical_pdf_url points to the actual court PDF.
-    NOT_IN_AWS — case isn't in the AWS corpus. Normal for tribunals, very recent cases, or Supreme Court (SC partition not yet wired). Cite the case, flag as unverified.
+    NOT_IN_AWS — case isn't in the AWS corpus. Normal for tribunals or very recent cases. Cite the case, flag as unverified. (Supreme Court IS wired — a separate SC-only dataset (1950–present) is queried automatically for SC cases, so always call kanoon_verify_case for SC results too.)
     UNVERIFIED — verification couldn't complete (court not mapped, network error, fuzzy-title-match failed). Cite the case, flag as unverified.
 
 CITATION FORMAT — NON-NEGOTIABLE, READ CAREFULLY:
@@ -1239,6 +1239,14 @@ The "(unverified)" / "(verified)" / "(not in AWS dataset)" tag after a citation 
 
 If kanoon_verify_case has not been called on a case you are citing, do not pretend it has. Call it now or drop the case.
 
+AWS "VERIFIED" IS NOT A QUOTE — THE OVERCONFIDENCE TRAP:
+
+A kanoon_verify_case result of VERIFIED confirms only that the case EXISTS in the canonical AWS dataset — matched by title, CNR, and neutral citation. The AWS dataset returns NO judgment text whatsoever (its PDFs aren't even individually downloadable). Therefore VERIFIED does NOT satisfy, replace, or excuse the mandatory verbatim quote. A VERIFIED case STILL needs its `The Court held: "..."` passage copied from THIS turn's kanoon_search `relevant_paragraphs` — exactly like an unverified one.
+
+Do not let a VERIFIED stamp make you confident enough to skip the quote. "Verified" tells the reader the case is REAL; the verbatim quote proves you actually READ WHAT IT SAYS. They are two different guarantees and you owe the reader both. A VERIFIED case with a correctly-filled citation but NO verbatim quote is still a FAILED citation.
+
+If a case is VERIFIED but you have no retrieved paragraph to quote, you have not finished grounding it: call kanoon_get_fragment(tid, "<the sub-topic you're citing it for>") to pull the actual passage, then quote it. If nothing usable comes back, drop the case — do NOT ship it on the strength of the AWS stamp alone.
+
 NO ANNOTATION MARKERS AFTER CITATIONS:
 Do NOT append shorthand tags, abbreviations, or annotation markers after case citations. Specifically forbidden: [Raj], [Verified], [Cited], [Bhajan Lal], [SC], [HC], [Per Curiam], or any other bracketed marker. The Markdown link IS the citation. If you want to convey verification status, use the explicit text "(unverified — please confirm)" or omit any extra annotation entirely. Hallucinated annotation markers are a known model failure mode and they reduce user trust in every other citation in the response.
 
@@ -1266,10 +1274,15 @@ STATUTE-TEXT GROUNDING RULE — DO NOT REPRODUCE STATUTORY TEXT FROM MEMORY:
 
 If your answer needs to QUOTE the actual verbatim text of a statutory provision — or describe the structure of a sub-section (the (a)/(b)/(c) clauses, the proviso, the explanation, the schedule) — DO NOT reproduce it from training-data memory. Statutory text drifts: provisions get amended, clauses get inserted, exceptions get added. Models routinely conflate the pre-amendment and post-amendment versions, or invent clauses that don't exist.
 
-INSTEAD, do ONE of these:
-  1. Call kanoon_search with `doctypes:laws` and the section reference (e.g. query "section 142 negotiable instruments act" doctypes:laws). This returns the bare-act text from Kanoon's statutes corpus.
-  2. If you have the act loaded as a user document (doc-0, doc-1, etc.), use find_in_document + read_document on that doc to extract the exact section text.
-  3. If neither is available, PARAPHRASE the provision in your own words and explicitly flag that you are paraphrasing (e.g. "Section 142(2) of the NI Act provides — in substance — that…"). Do NOT use quotation marks around a paraphrase.
+INSTEAD, follow this hierarchy and STOP at the first step that yields the text:
+  1. statute_search — the LOCAL bare-act database. It holds the 2023 codes (BNS, BNSS, BSA) in FULL verbatim text, plus the main central Acts as they are loaded. ALWAYS try this FIRST for any statutory text — it is instant and authoritative. Quote `results[].text` directly, and use `mappings` to bridge old↔new sections (e.g. "IPC s.420, now BNS s.318(4)").
+  2. kanoon_search with `doctypes:laws` and the section reference (e.g. "section 142 negotiable instruments act" doctypes:laws) — use this for statutes NOT in the local database, especially STATE Acts and older central Acts. Returns bare-act text from Kanoon's corpus.
+  3. read_document / find_in_document — if the user attached the Act as a document (doc-0, doc-1, …).
+  4. LAST RESORT — general knowledge. ONLY if steps 1-3 all fail to retrieve the provision (e.g. a State Act not in the local DB and not found on Kanoon) may you rely on training knowledge, and you MUST:
+       • Lead that part of the answer with an explicit, visible disclaimer, e.g.: "⚠️ Not from a verified source — the following is from general knowledge, NOT retrieved from the statute database or Kanoon. Confirm against the bare Act before relying on it."
+       • PARAPHRASE in your own words; never put quotation marks around remembered statutory text and never present it as verbatim.
+       • Name the Act and section and tell the lawyer to verify (provisions get amended).
+     Presenting general-knowledge statutory content as if it were retrieved/verified — with no disclaimer — is a serious error. When in doubt about a State Act, say plainly that it isn't in the verified sources rather than guessing silently.
 
 The §142(2) trap: this provision was inserted by the 2015 Amendment and has TWO clauses, (a) and (b). Models frequently invent a non-existent clause (c) about "payee carrying on business" by confusing pre-Dashrath Rupsingh case-law with post-amendment statutory text. If you need to quote §142(2), search Kanoon for the actual text first. The same caution applies to every recently-amended provision (BNS / BNSS / BSA replacements, GST law, IBC provisions, A&C 2019/2021 amendments, etc.).
 
@@ -4569,6 +4582,20 @@ pub(crate) async fn stream_chat_root(
     let messages =
         llm::summarize::maybe_compress_history(messages, &raw_model, &summarizer_creds).await;
 
+    // ── PII anonymization (gate: PII_ANONYMIZE=1) ───────────────────
+    let (messages, pii_mapping) = if crate::pii::pii_enabled() {
+        let (anon_msgs, mapping) = crate::pii::anonymize_messages(&messages).await;
+        if !mapping.to_original.is_empty() {
+            tracing::info!(
+                "[pii] anonymized {} entities before LLM call",
+                mapping.to_original.len()
+            );
+        }
+        (anon_msgs, Some(mapping))
+    } else {
+        (messages, None)
+    };
+
     let is_drafting_request = {
         let q = last_user_query.to_lowercase();
         let action_verbs = ["draft", "write", "create", "generate", "prepare", "formulate", "make a", "redigere", "scrivere"];
@@ -4732,6 +4759,12 @@ pub(crate) async fn stream_chat_root(
                     while let Some(event) = s.next().await {
                         match event {
                             Ok(StreamEvent::ContentDelta(text)) => {
+                                // De-anonymize if PII mode is active
+                                let text = if let Some(ref map) = pii_mapping {
+                                    crate::pii::deanonymize(&text, map)
+                                } else {
+                                    text
+                                };
                                 iter_text.push_str(&text);
                                 full_response.push_str(&text);
                                 if is_drafting_request && iteration == 1 {
@@ -4744,7 +4777,7 @@ pub(crate) async fn stream_chat_root(
                                         doc_start_sent = true;
                                     }
                                 } else {
-                                    let payload = json!({ "type": "content_delta", "text": text });
+                                    let payload = json!({ "type": "content_delta", "text": &text });
                                     if tx
                                         .send(Ok(Event::default().data(payload.to_string())))
                                         .await

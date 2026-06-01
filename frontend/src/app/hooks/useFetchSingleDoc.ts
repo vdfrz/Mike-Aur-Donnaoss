@@ -10,6 +10,7 @@ import { useEffect, useRef, useState } from "react";
  */
 export type DocResult =
     | { type: "pdf"; buffer: ArrayBuffer }
+    | { type: "text"; text: string }
     | { type: "docx" }
     | null;
 
@@ -98,6 +99,17 @@ export function useFetchSingleDoc(
                 if (contentType.includes("application/pdf")) {
                     const buffer = await response.arrayBuffer();
                     if (!cancelled) setResult({ type: "pdf", buffer });
+                } else if (
+                    contentType.includes("text/plain") ||
+                    contentType.includes("text/html") ||
+                    contentType.startsWith("text/")
+                ) {
+                    // Plain-text sources — e.g. cached Indian Kanoon judgments
+                    // (.txt). Render as text, NOT through docx-preview (which
+                    // throws "Can't find end of central directory" on non-zip
+                    // bytes).
+                    const text = await response.text();
+                    if (!cancelled) setResult({ type: "text", text });
                 } else {
                     // Drain the body so the connection is reusable, but the
                     // bytes are useless to the PDF viewer — the caller will

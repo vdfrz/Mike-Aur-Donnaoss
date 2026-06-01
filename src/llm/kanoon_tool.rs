@@ -148,6 +148,35 @@ pub async fn exec_kanoon_search(state: &AppState, user_id: &str, arguments: &Val
     rerank(&mut candidates, query);
     candidates.truncate(max_results);
 
+    // Phase 1 — background-cache every judgment we surfaced, so it lands on the
+    // judgments tab and becomes locally searchable. Best-effort and
+    // non-blocking: the chat answer returns immediately while the full doc is
+    // fetched + embedded in a spawned task. Already-cached tids are skipped
+    // inside cache_judgment.
+    #[cfg(feature = "rag")]
+    {
+        let db = state.db.clone();
+        let embeddings = state.embeddings.clone();
+        let uid = user_id.to_string();
+        let key = ik_key.clone();
+        let tids: Vec<i64> = candidates.iter().map(|c| c.tid).collect();
+        tokio::spawn(async move {
+            for tid in tids {
+                if let Err(e) = crate::routes::indian_kanoon::cache_judgment(
+                    db.clone(),
+                    embeddings.clone(),
+                    uid.clone(),
+                    key.clone(),
+                    tid,
+                )
+                .await
+                {
+                    tracing::warn!("[kanoon] background cache of doc {tid} failed: {e}");
+                }
+            }
+        });
+    }
+
     // Fetch fragments in parallel for each hit. AWS verification is
     // NO LONGER inline — it's expensive (parquet download + parse) and
     // would block the entire search. Instead, the model receives results

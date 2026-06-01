@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
 import { X, ExternalLink, Loader2 } from "lucide-react";
 import { DocPanel, type DocPanelMode } from "../shared/DocPanel";
+import PoweredByIKanoon from "../shared/PoweredByIKanoon";
 import type {
     MikeCitationAnnotation,
     MikeEditAnnotation,
@@ -124,6 +125,48 @@ function extractKeywords(text: string): string[] {
         .toLowerCase()
         .split(/[^a-z0-9]+/)
         .filter((w) => w.length > 2 && !IK_STOP_WORDS.has(w));
+}
+
+// Indian Kanoon judgment HTML carries typographic glyphs the app font can't
+// render — directional quotes, special dashes/spaces — which show up as "tofu"
+// boxes (the ⬚ "NO GLYPH" placeholder), especially around quoted passages.
+// Replace them with plain ASCII so the highlighted text reads cleanly: curly
+// quotes → straight " / ', fancy dashes → -, exotic spaces → space, and
+// zero-width / replacement junk is stripped. Operates only on text nodes, so
+// tags and attributes are never touched.
+function sanitizeIkText(html: string): string {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(`<div>${html}</div>`, "text/html");
+    const fix = (s: string) =>
+        s
+            .replace(/[“”„‟«»＂❝❞〝〞]/g, '"')
+            .replace(/[‘’‚‛❛❜ʼ＇]/g, "'")
+            .replace(/[‐‑‒–—―]/g, "-")
+            .replace(/[      　]/g, " ")
+            .replace(/[​-‍﻿­]/g, "");
+    const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+    // Final strip: control chars, private-use glyphs (IK uses these for
+    // footnote/reference markers — the ▯ boxes next to numbers), variation
+    // selectors, and object/replacement chars — none of which the font can
+    // draw. Tabs/newlines are preserved.
+    const stripTofu = (s: string) =>
+        Array.from(s)
+            .filter((ch) => {
+                const c = ch.codePointAt(0) ?? 0;
+                if (c === 0x09 || c === 0x0a || c === 0x0d) return true; // tab/newline
+                if (c < 0x20) return false; // C0 control chars
+                if (c >= 0x7f && c <= 0x9f) return false; // DEL + C1 controls
+                if (c >= 0xe000 && c <= 0xf8ff) return false; // private-use glyphs
+                if (c >= 0xfe00 && c <= 0xfe0f) return false; // variation selectors
+                if (c === 0xfffc || c === 0xfffd) return false; // object/replacement
+                return true;
+            })
+            .join("");
+    let n: Node | null;
+    while ((n = walker.nextNode())) {
+        if (n.nodeValue) n.nodeValue = stripTofu(fix(n.nodeValue));
+    }
+    return doc.body.innerHTML;
 }
 
 function highlightHtml(
@@ -250,7 +293,9 @@ function IKDocViewer({ url, title, query }: { url: string; title: string; query?
                 if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
                 const data = await resp.json();
                 if (!cancelled) {
-                    const rawHtml = data.html ?? "";
+                    // Clean up unrenderable "tofu" glyphs (curly quotes etc.)
+                    // before rendering or highlighting.
+                    const rawHtml = sanitizeIkText(data.html ?? "");
                     if (query) {
                         const result = highlightHtml(rawHtml, query);
                         setHtml(result.html);
@@ -471,6 +516,11 @@ export function AssistantSidePanel({
                                 className={`absolute inset-0 flex flex-col ${isActive ? "" : "invisible pointer-events-none"}`}
                                 aria-hidden={!isActive}
                             >
+                                {/* Per IK API agreement: attribution on top of
+                                    results, logo unaltered at native size. */}
+                                <div className="flex items-center justify-center px-3 py-2 border-b border-gray-100 bg-gray-50">
+                                    <PoweredByIKanoon variant="desktop" />
+                                </div>
                                 {/* IK header bar */}
                                 <div className="flex items-center justify-between px-3 py-2 border-b border-gray-200 bg-white">
                                     <span className="text-sm font-medium text-gray-700 truncate">
