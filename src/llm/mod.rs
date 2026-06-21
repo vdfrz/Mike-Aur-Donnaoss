@@ -54,6 +54,14 @@ pub fn strip_model_prefix(model: &str) -> &str {
         .unwrap_or(model)
 }
 
+/// True when this model id names a DeepSeek cloud model (e.g. `deepseek-v4-flash`,
+/// `local:deepseek-v4-pro`). DeepSeek shares the `local:` prefix with on-device
+/// Ollama models like `mike-legal`, so routing must inspect the bare name — not
+/// the prefix — to tell cloud apart from local.
+pub fn is_deepseek_model(model: &str) -> bool {
+    strip_model_prefix(model).starts_with("deepseek")
+}
+
 /// Best-effort detection of models that handle a long `tools` schema
 /// reliably. Used by the chat dispatcher to decide whether to inject
 /// **MCP** tool schemas alongside the always-on Mike builtins.

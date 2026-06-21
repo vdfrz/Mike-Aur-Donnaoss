@@ -90,8 +90,6 @@ export function buildAvailableModelsFromConfig(llm: LLMConfig | null | undefined
     const localBase = llm.localBaseUrl?.trim();
     if (localBase) {
         out.push({ id: "local:mike-legal", label: "mike-legal", group: "Local" });
-        out.push({ id: "local:qwen2.5-uncensored:3b", label: "qwen2.5-uncensored:3b", group: "Local" });
-        out.push({ id: "local:llama3.2-uncensored:3b", label: "llama3.2-uncensored:3b", group: "Local" });
     }
 
     return out;

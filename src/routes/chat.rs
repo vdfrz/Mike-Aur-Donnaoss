@@ -1086,6 +1086,18 @@ pub(crate) async fn load_attached_docs(
 
 /// Mike's original legal-assistant system prompt, adapted from upstream
 /// (willchen96/mike, `backend/src/lib/chatTools.ts` SYSTEM_PROMPT).
+/// Lean system prompt for small / on-device models (e.g. the offline `mike-legal`
+/// fallback). The full MIKE_SYSTEM_PROMPT (~15k tokens with the rubric) overflows
+/// an 8k context window and a 3B model can't use it well anyway — this keeps the
+/// prompt focused so it fits and the model stays on-task.
+const MIKE_SYSTEM_PROMPT_LITE: &str = r#"You are Mike, an AI legal assistant for Indian law, running on-device in offline mode.
+
+- Answer the user's legal question directly, concisely, and accurately.
+- Focus on Indian statutes and procedure. Use the current successor codes — BNS, BNSS, and BSA — in place of the older IPC, CrPC, and Evidence Act where relevant.
+- Only cite a section, case, or authority if you are confident it is real and correctly stated. If you are unsure, say so plainly — never invent a citation, section number, or case name.
+- You are offline: you cannot search live case-law databases (Indian Kanoon), browse the web, or open the user's uploaded documents. If a question genuinely needs those, tell the user to go back online for the full assistant.
+- Be practical and clear. This is general legal information, not formal legal advice."#;
+
 const MIKE_SYSTEM_PROMPT: &str = r#"You are Mike, an AI legal assistant that helps lawyers and legal professionals analyze documents, answer legal questions, and draft legal documents.
 
 DOCUMENT CITATION INSTRUCTIONS:
@@ -4511,15 +4523,19 @@ pub(crate) async fn stream_chat_root(
                     s.openai_api_key.clone(),
                     s.openai_model.clone().unwrap_or_default(),
                 )
-            } else if s.active_provider.as_deref() == Some("deepseek") {
+            } else if s.active_provider.as_deref() == Some("deepseek") && llm::is_deepseek_model(&raw_model) {
                 (
                     "https://api.deepseek.com/v1".to_string(),
                     s.local_api_key.clone(),
                     s.local_model.clone().unwrap_or_default(),
                 )
             } else {
+                // Local Ollama (e.g. the offline `mike-legal` fallback). Routes here
+                // for any non-DeepSeek `local:` model regardless of active_provider.
+                let base = s.local_base_url.clone().unwrap_or_default();
+                let base = if base.trim().is_empty() { "http://127.0.0.1:11434".to_string() } else { base };
                 (
-                    s.local_base_url.clone().unwrap_or_default(),
+                    base,
                     s.local_api_key.clone(),
                     s.local_model.clone().unwrap_or_default(),
                 )
@@ -4625,11 +4641,14 @@ pub(crate) async fn stream_chat_root(
     // Compose: Mike base + library inventory + KB excerpts + IK results
     // + attached full-text + MCP.
     let is_tiny = raw_model.contains("3b") || raw_model.contains("2b") || raw_model.contains("1.5b");
-    let is_finetuned = raw_model.contains("mike-legal") || raw_model.contains("mike_legal");
-    let is_deepseek = user_settings.as_ref()
-        .map_or(false, |s| s.active_provider.as_deref() == Some("deepseek"));
+    let is_deepseek = llm::is_deepseek_model(&raw_model)
+        && user_settings.as_ref()
+            .map_or(false, |s| s.active_provider.as_deref() == Some("deepseek"));
     let is_local_model = local_config.is_some() && !is_deepseek;
-    let is_small = (is_tiny || is_local_model) && !is_finetuned;
+    // Local Ollama models (e.g. the offline mike-legal fallback) have small
+    // context windows (~8k). Trim the heavy KB/inventory/profile/IK/harness
+    // injections so the prompt fits — full cloud-scale context overflows them.
+    let is_small = is_tiny || is_local_model;
 
     let inventory_prompt = if is_small {
         String::new()
@@ -4666,6 +4685,8 @@ pub(crate) async fn stream_chat_root(
                                                      DEPONENT"
                 .to_string(),
         );
+    } else if is_small {
+        sections.push(MIKE_SYSTEM_PROMPT_LITE.trim().to_string());
     } else {
         sections.push(MIKE_SYSTEM_PROMPT.trim().to_string());
     }
@@ -6906,7 +6927,7 @@ async fn post_message(
                         llm::strip_model_prefix(&model).to_string()
                     }),
                 )
-            } else if s.active_provider.as_deref() == Some("deepseek") {
+            } else if s.active_provider.as_deref() == Some("deepseek") && llm::is_deepseek_model(&model) {
                 (
                     "https://api.deepseek.com/v1".to_string(),
                     s.local_api_key.clone(),
@@ -6915,8 +6936,10 @@ async fn post_message(
                     }),
                 )
             } else {
+                let base = s.local_base_url.clone().unwrap_or_default();
+                let base = if base.trim().is_empty() { "http://127.0.0.1:11434".to_string() } else { base };
                 (
-                    s.local_base_url.clone().unwrap_or_default(),
+                    base,
                     s.local_api_key.clone(),
                     s.local_model.clone().unwrap_or_else(|| {
                         llm::strip_model_prefix(&model).to_string()
@@ -7170,15 +7193,17 @@ async fn generate_title(
                     s.openai_api_key.clone(),
                     s.openai_model.clone().unwrap_or_default(),
                 )
-            } else if s.active_provider.as_deref() == Some("deepseek") {
+            } else if s.active_provider.as_deref() == Some("deepseek") && llm::is_deepseek_model(&title_model) {
                 (
                     "https://api.deepseek.com/v1".to_string(),
                     s.local_api_key.clone(),
                     s.local_model.clone().unwrap_or_default(),
                 )
             } else {
+                let base = s.local_base_url.clone().unwrap_or_default();
+                let base = if base.trim().is_empty() { "http://127.0.0.1:11434".to_string() } else { base };
                 (
-                    s.local_base_url.clone().unwrap_or_default(),
+                    base,
                     s.local_api_key.clone(),
                     s.local_model.clone().unwrap_or_default(),
                 )
