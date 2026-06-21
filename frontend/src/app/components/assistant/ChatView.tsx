@@ -225,10 +225,20 @@ export function ChatView({
                 });
                 return;
             }
+            // Kanoon / tool citations have no upload-flow document_id, which
+            // left the tab id empty and forced a random fallback per click, so
+            // a second distinct citation could not get its own tab. Key the tab
+            // on the first stable identifier the citation actually carries.
+            const stableId =
+                citation.document_id ||
+                citation.path ||
+                citation.pdf_url ||
+                citation.doc_id ||
+                `cite-${citation.ref}`;
             upsertTab({
                 kind: "citation",
-                id: citation.document_id,
-                documentId: citation.document_id,
+                id: stableId,
+                documentId: stableId,
                 filename: citation.filename,
                 versionId: citation.version_id ?? null,
                 versionNumber: citation.version_number ?? null,

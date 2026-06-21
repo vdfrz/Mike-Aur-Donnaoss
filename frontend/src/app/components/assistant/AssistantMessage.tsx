@@ -990,8 +990,21 @@ function preprocessCitations(
                     // remains the authoritative signal.
                     return [];
                 }
-                const idx = citationsList.length;
-                citationsList.push(ann); // close inline-citation push
+                // De-duplicate: reuse an existing pill number for the same
+                // source instead of pushing a second copy. Otherwise the same
+                // case cited twice renders as pills "1" and "2" that open the
+                // same tab, so clicking the second looks like it does nothing.
+                let idx = citationsList.findIndex(
+                    (c) =>
+                        c === ann ||
+                        (c.ref === ann.ref &&
+                            c.doc_id === ann.doc_id &&
+                            c.source === ann.source),
+                );
+                if (idx < 0) {
+                    idx = citationsList.length;
+                    citationsList.push(ann); // close inline-citation push
+                }
                 return [`\`§${idx}§\`\u200B`];
             });
         return tokens.length > 0 ? tokens.join("") : full;

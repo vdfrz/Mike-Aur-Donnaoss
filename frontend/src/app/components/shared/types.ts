@@ -266,8 +266,13 @@ export function expandCitationToEntries(
 
 /** Format the page(s) of a citation for display, e.g. "Page 3" or "Page 41-42". */
 export function formatCitationPage(a: MikeCitationAnnotation): string {
-  if (typeof a.page === "string") return `Page ${a.page}`;
-  return `Page ${a.page}`;
+  const p = a.page;
+  if (p === undefined || p === null) return "";
+  const s = String(p).trim();
+  if (s === "" || s.toLowerCase() === "undefined" || s.toLowerCase() === "nan") {
+    return "";
+  }
+  return `Page ${s}`;
 }
 
 /** Produce a reader-friendly version of the quote (replaces [[PAGE_BREAK]] with "..."). */
