@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useState, useRef, useEffect } from "react";
-import { ArrowDown } from "lucide-react";
+import { ArrowDown, AlertTriangle, X } from "lucide-react";
 import { UserMessage } from "./UserMessage";
 import { AssistantMessage } from "./AssistantMessage";
 import { ChatInput } from "./ChatInput";
@@ -67,6 +67,13 @@ export function ChatView({
     );
     const { setSidebarOpen } = useSidebar();
     const [selectedModel] = useSelectedModel();
+    // After several turns on the local fine-tune (mike-legal), nudge the user
+    // toward a cloud model, which stays reliable past a few messages.
+    const CLOUD_NUDGE_AFTER = 5;
+    const userMsgCount = messages.filter((m) => m.role === "user").length;
+    const showCloudNudge =
+        selectedModel === "local:mike-legal" && userMsgCount >= CLOUD_NUDGE_AFTER;
+    const [cloudNudgeDismissed, setCloudNudgeDismissed] = useState(false);
 
 
     const showPanel = useCallback(() => {
@@ -661,6 +668,29 @@ export function ChatView({
         <div className="h-full w-full flex relative">
             {/* Chat column */}
             <div className="flex flex-col h-full flex-1 relative">
+                {showCloudNudge && !cloudNudgeDismissed && (
+                    <div className="shrink-0 w-full px-3 pt-3 flex justify-center pointer-events-none">
+                        <div className="pointer-events-auto flex max-w-xl w-full items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 shadow-md">
+                            <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
+                            <div className="flex-1 text-sm">
+                                <p className="font-medium text-amber-900">
+                                    You have already sent {userMsgCount} messages on mike-legal
+                                </p>
+                                <p className="mt-0.5 text-amber-800">
+                                    It gets unreliable past a few turns. Consider switching to a cloud model for better answers.
+                                </p>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => setCloudNudgeDismissed(true)}
+                                aria-label="Dismiss"
+                                className="rounded-md p-1 text-amber-700 hover:bg-amber-100"
+                            >
+                                <X className="h-4 w-4" />
+                            </button>
+                        </div>
+                    </div>
+                )}
                 {/* Scrollable messages */}
                 <div
                     ref={messagesContainerRef}

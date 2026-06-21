@@ -136,10 +136,10 @@ export function OfflineBanner() {
                     <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
                     <div className="flex-1 text-sm">
                         <p className="font-medium text-amber-900">
-                            mike-legal is a fine-tuned model — very much a work in progress
+                            mike-legal is a fine-tuned model, very much a work in progress
                         </p>
                         <p className="mt-0.5 text-amber-800">
-                            It can only handle about 4–5 messages and hallucinates hard. V2.0 will be much better — promise :3
+                            It can only handle about 4-5 messages and hallucinates hard. V2.0 will be much better, promise :3
                         </p>
                     </div>
                     <button
