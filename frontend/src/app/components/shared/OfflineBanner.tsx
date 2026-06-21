@@ -3,9 +3,10 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useTranslations } from "next-intl";
-import { Wifi, WifiOff, X } from "lucide-react";
+import { Wifi, WifiOff, X, AlertTriangle } from "lucide-react";
 import { useNetworkOnline } from "@/app/hooks/useNetworkOnline";
 import { useOfflineMode } from "@/app/hooks/useOfflineMode";
+import { useSelectedModel } from "@/app/hooks/useSelectedModel";
 
 /**
  * Global, app-wide network indicator. When the browser loses connectivity
@@ -25,6 +26,15 @@ export function OfflineBanner() {
 
     const [dismissed, setDismissed] = useState(false);
     const [reconnected, setReconnected] = useState(false);
+
+    // mike-legal caveat: warn whenever the local fine-tune is the active model.
+    const [model] = useSelectedModel();
+    const isMikeLegal = model === "local:mike-legal";
+    const [mlDismissed, setMlDismissed] = useState(false);
+    // Re-show the caveat each time the user switches back to mike-legal.
+    useEffect(() => {
+        setMlDismissed(false);
+    }, [model]);
 
     // The online/offline edge handlers run as window-event callbacks (not in
     // an effect body), so they read the latest offline-mode helpers through a
@@ -113,6 +123,33 @@ export function OfflineBanner() {
                 <div className="pointer-events-auto flex items-center gap-2 rounded-xl border border-[var(--blue-200)] bg-[var(--blue-50)] px-4 py-2.5 text-sm text-[var(--blue-700)] shadow-md">
                     <Wifi className="h-4 w-4 shrink-0" />
                     <span>{t("backOnline")}</span>
+                </div>
+            </div>
+        );
+    }
+
+    // mike-legal WIP caveat — same banner design as the offline notice above.
+    if (isMikeLegal && !mlDismissed) {
+        return (
+            <div className="fixed inset-x-0 top-0 z-[100] flex justify-center px-3 pt-3 pointer-events-none">
+                <div className="pointer-events-auto flex max-w-xl items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 shadow-md">
+                    <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
+                    <div className="flex-1 text-sm">
+                        <p className="font-medium text-amber-900">
+                            mike-legal is a fine-tuned model — very much a work in progress
+                        </p>
+                        <p className="mt-0.5 text-amber-800">
+                            It can only handle about 4–5 messages and hallucinates hard. V2.0 will be much better — promise :3
+                        </p>
+                    </div>
+                    <button
+                        type="button"
+                        onClick={() => setMlDismissed(true)}
+                        aria-label={t("dismiss")}
+                        className="rounded-md p-1 text-amber-700 hover:bg-amber-100"
+                    >
+                        <X className="h-4 w-4" />
+                    </button>
                 </div>
             </div>
         );
