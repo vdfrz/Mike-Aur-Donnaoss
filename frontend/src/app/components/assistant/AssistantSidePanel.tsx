@@ -37,6 +37,12 @@ type CommonTab = {
      * (auto-retrieval) or `tool` (search_kb fetch).
      */
     kbPath?: string | null;
+    /**
+     * Source markdown for inline AI editing (set on assistant-generated
+     * docs from the doc_created `body`). When present, DocPanel shows the
+     * "Edit (AI)" toggle; absent ⇒ no inline editor for that tab.
+     */
+    editableText?: string | null;
 };
 
 export type DocumentTab = CommonTab & { kind: "document" };

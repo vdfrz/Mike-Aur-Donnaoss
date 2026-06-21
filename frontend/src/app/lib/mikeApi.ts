@@ -449,12 +449,14 @@ export async function streamChat(payload: {
         role: string;
         content: string;
         files?: { filename: string; document_id?: string }[];
-        workflow?: { id: string; title: string };
+        workflow?: { id: string; title: string; prompt_md?: string | null };
         reasoning_content?: string;
     }[];
     chat_id?: string;
     project_id?: string;
     model?: string;
+    /** When "court_bundle", the backend focuses the assistant on bundling. */
+    intent?: string;
     signal?: AbortSignal;
 }): Promise<Response> {
     const { signal, ...body } = payload;
@@ -475,7 +477,7 @@ type StreamChatMessage = {
     role: string;
     content: string;
     files?: { filename: string; document_id?: string }[];
-    workflow?: { id: string; title: string };
+    workflow?: { id: string; title: string; prompt_md?: string | null };
     reasoning_content?: string;
 };
 
@@ -883,6 +885,43 @@ export async function deleteCase(caseId: string): Promise<void> {
     await apiRequest<void>(`/cases/${caseId}`, { method: "DELETE" });
 }
 
+export interface ResolvedPrecedentCase {
+    tid: number;
+    title: string | null;
+    court: string | null;
+    decision_date: string | null;
+    kanoon_url: string | null;
+    snippet: string | null;
+    relevant_paragraphs: string | null;
+    relevance_score: number | null;
+    confidence: number | null;
+    reason: string | null;
+}
+
+export interface ResolvedPrecedent {
+    point_of_law: string | null;
+    suggested_search_query: string;
+    target_court: string | null;
+    grounding: { source_doc_id: string; exact_quote: string } | null;
+    cases: ResolvedPrecedentCase[];
+}
+
+/** Resolve precedent_finder search suggestions into real Indian Kanoon cases. */
+export async function resolveCasePrecedents(
+    caseId: string,
+    resultsPerQuery = 1,
+): Promise<ResolvedPrecedent[]> {
+    const data = await apiRequest<{ resolved_precedents: ResolvedPrecedent[] }>(
+        `/cases/${caseId}/resolve-precedents`,
+        {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ results_per_query: resultsPerQuery }),
+        },
+    );
+    return data.resolved_precedents ?? [];
+}
+
 export async function addCaseDocuments(
     caseId: string,
     documents: { document_id: string; document_type?: string }[],
@@ -941,6 +980,8 @@ export async function generateCaseOutput(
         case_brief: "brief",
         strategy_memo: "strategy-memo",
         hearing_prep: "hearing-prep",
+        list_of_dates: "list-of-dates",
+        annexure_index: "annexure-index",
     };
     const endpoint = typeToEndpoint[outputType] ?? outputType;
     return apiRequest<CaseOutput>(`/cases/${caseId}/outputs/${endpoint}`, {
@@ -952,7 +993,7 @@ export async function generateCaseOutput(
 
 export async function streamCaseChat(payload: {
     caseId: string;
-    messages: { role: string; content: string }[];
+    messages: { role: string; content: string; workflow?: { id: string; title: string; prompt_md?: string | null } }[];
     chat_id?: string;
     model?: string;
     signal?: AbortSignal;
@@ -1002,4 +1043,244 @@ export async function putPersonalization(
 
 export async function deletePersonalization(): Promise<void> {
     await apiRequest("/personalization", { method: "DELETE" });
+}
+
+// ---------------------------------------------------------------------------
+// Drafting registry: parties, annexures, citations (cross-references)
+// ---------------------------------------------------------------------------
+
+export interface CasePartyRecord {
+    id: string;
+    case_id: string;
+    slug: string;
+    name: string;
+    side: "petitioner" | "respondent";
+    role_label: string | null;
+    serial_no: number;
+    source: "manual" | "ai";
+    created_at: string;
+    updated_at: string;
+}
+
+export interface CaseAnnexure {
+    id: string;
+    case_id: string;
+    document_id: string;
+    slug: string;
+    description: string | null;
+    doc_date: string | null;
+    side: "P" | "R" | "C";
+    serial_no: number;
+    created_at: string;
+    updated_at: string;
+}
+
+export interface CaseCitation {
+    id: string;
+    kind: "judgment" | "statute";
+    status: "referred" | "cited";
+    kanoon_tid?: number | null;
+    title?: string | null;
+    court?: string | null;
+    decision_date?: string | null;
+    kanoon_url?: string | null;
+    canonical_citation?: string | null;
+    pdf_document_id?: string | null;
+    statute?: string | null;
+    section_number?: string | null;
+    times_cited: number;
+    first_cited_at: string;
+    last_cited_at: string;
+}
+
+export async function listCaseParties(caseId: string): Promise<{ parties: CasePartyRecord[] }> {
+    return apiRequest(`/cases/${caseId}/parties`);
+}
+
+export async function createCaseParty(
+    caseId: string,
+    body: { name: string; side: "petitioner" | "respondent"; role_label?: string },
+): Promise<CasePartyRecord> {
+    return apiRequest(`/cases/${caseId}/parties`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+    });
+}
+
+export async function updateCaseParty(
+    caseId: string,
+    partyId: string,
+    body: { name?: string; role_label?: string; slug?: string },
+): Promise<{ party: CasePartyRecord | null }> {
+    return apiRequest(`/cases/${caseId}/parties/${partyId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+    });
+}
+
+export async function deleteCaseParty(caseId: string, partyId: string): Promise<void> {
+    await apiRequest(`/cases/${caseId}/parties/${partyId}`, { method: "DELETE" });
+}
+
+export async function reorderCaseParties(
+    caseId: string,
+    side: string,
+    orderedIds: string[],
+): Promise<{ parties: CasePartyRecord[] }> {
+    return apiRequest(`/cases/${caseId}/parties/reorder`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ side, ordered_ids: orderedIds }),
+    });
+}
+
+export async function aiPopulateParties(
+    caseId: string,
+): Promise<{ seeded: number; parties: CasePartyRecord[] }> {
+    return apiRequest(`/cases/${caseId}/parties/ai-populate`, { method: "POST" });
+}
+
+export async function listCaseAnnexures(caseId: string): Promise<{ annexures: CaseAnnexure[] }> {
+    return apiRequest(`/cases/${caseId}/annexures`);
+}
+
+export async function createCaseAnnexure(
+    caseId: string,
+    body: { document_id: string; side?: string; description?: string; doc_date?: string },
+): Promise<CaseAnnexure> {
+    return apiRequest(`/cases/${caseId}/annexures`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+    });
+}
+
+export async function updateCaseAnnexure(
+    caseId: string,
+    annexureId: string,
+    body: { description?: string; doc_date?: string; side?: string; slug?: string },
+): Promise<{ annexure: CaseAnnexure | null }> {
+    return apiRequest(`/cases/${caseId}/annexures/${annexureId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+    });
+}
+
+export async function deleteCaseAnnexure(caseId: string, annexureId: string): Promise<void> {
+    await apiRequest(`/cases/${caseId}/annexures/${annexureId}`, { method: "DELETE" });
+}
+
+export async function reorderCaseAnnexures(
+    caseId: string,
+    side: string,
+    orderedIds: string[],
+): Promise<{ annexures: CaseAnnexure[] }> {
+    return apiRequest(`/cases/${caseId}/annexures/reorder`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ side, ordered_ids: orderedIds }),
+    });
+}
+
+export async function aiPopulateAnnexures(
+    caseId: string,
+): Promise<{ seeded: number; annexures: CaseAnnexure[] }> {
+    return apiRequest(`/cases/${caseId}/annexures/ai-populate`, { method: "POST" });
+}
+
+export async function listCaseCitations(
+    caseId: string,
+): Promise<{ judgments: CaseCitation[]; statutes: CaseCitation[] }> {
+    return apiRequest(`/cases/${caseId}/citations`);
+}
+
+export async function deleteCaseCitation(caseId: string, citationId: string): Promise<void> {
+    await apiRequest(`/cases/${caseId}/citations/${citationId}`, { method: "DELETE" });
+}
+
+export async function resolveCaseRefs(
+    caseId: string,
+    markdown: string,
+): Promise<{ markdown: string; unresolved: string[] }> {
+    return apiRequest(`/cases/${caseId}/resolve-refs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ markdown }),
+    });
+}
+
+export async function generateCasesReferred(
+    caseId: string,
+): Promise<{ output_id: string; doc_id: string; content_md: string }> {
+    return apiRequest(`/cases/${caseId}/outputs/cases-referred`, { method: "POST" });
+}
+
+export async function generateAuthorities(
+    caseId: string,
+): Promise<{ output_id: string; doc_id: string; content_md: string }> {
+    return apiRequest(`/cases/${caseId}/outputs/authorities`, { method: "POST" });
+}
+
+
+// ---------------------------------------------------------------------------
+// Firm knowledge corpus
+// ---------------------------------------------------------------------------
+
+export interface CorpusFile {
+    id: string;
+    filename: string;
+    doc_type: string | null;
+    case_type: string | null;
+    court: string | null;
+    status: "pending" | "extracting" | "chunking" | "tagging" | "ready" | "failed" | "unsupported";
+    chunk_count: number;
+    is_template: boolean;
+    created_at: string;
+}
+
+export async function listCorpusFiles(): Promise<{ files: CorpusFile[] }> {
+    return apiRequest(`/corpus/files`);
+}
+
+export async function uploadCorpusFiles(
+    files: File[],
+    isTemplate = false,
+): Promise<{ accepted: string[]; duplicates: string[] }> {
+    const form = new FormData();
+    for (const f of files) form.append("file", f);
+    if (isTemplate) form.append("is_template", "true");
+    const response = await fetch(`${API_BASE}/corpus/files`, {
+        method: "POST",
+        headers: { ...getAuthHeader() },
+        body: form,
+    });
+    if (!response.ok) throw new Error(await response.text());
+    return response.json();
+}
+
+/** Returns the raw streaming Response; the caller reads the SSE body. */
+export async function processCorpusFiles(fileIds: string[]): Promise<Response> {
+    return fetch(`${API_BASE}/corpus/process`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...getAuthHeader() },
+        body: JSON.stringify({ file_ids: fileIds }),
+    });
+}
+
+export async function updateCorpusFile(
+    id: string,
+    body: { is_template?: boolean; doc_type?: string; case_type?: string },
+): Promise<{ ok: boolean }> {
+    return apiRequest(`/corpus/files/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+    });
+}
+
+export async function deleteCorpusFile(id: string): Promise<void> {
+    await apiRequest(`/corpus/files/${id}`, { method: "DELETE" });
 }

@@ -50,6 +50,8 @@ async fn fresh_app() -> (axum::Router, Arc<AppState>) {
         embeddings: None,
         #[cfg(feature = "rag")]
         scans: Default::default(),
+        #[cfg(feature = "rag")]
+        ik_reindex: Arc::new(tokio::sync::RwLock::new(Default::default())),
     };
     let state = Arc::new(state);
 

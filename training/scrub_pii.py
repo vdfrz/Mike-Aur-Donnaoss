@@ -254,6 +254,11 @@ def scrub_address(text: str) -> tuple[str, int]:
     return text, count
 
 
+# Precompiled once at import: known city/state followed by a 6-digit pincode.
+_CITY_ALT = "|".join(sorted((re.escape(c) for c in CITIES_STATES), key=len, reverse=True))
+_CITY_PIN_RE = re.compile(rf"(\b(?:{_CITY_ALT}),?\s+)(\d{{6}})\b", re.IGNORECASE)
+
+
 def scrub_pincode(text: str) -> tuple[str, int]:
     count = 0
 
@@ -271,12 +276,71 @@ def scrub_pincode(text: str) -> tuple[str, int]:
         return m.group(1) + REDACTED
     text = re.sub(r"(\b[A-Za-z]+-)\s*(\d{6})\b", repl2, text)
 
+    # Known city/state immediately followed by a 6-digit pin: "Delhi, 110059".
+    # Skip 6-digit numbers ending in 000 — almost always monetary amounts, not PINs.
+    def repl3(m):
+        nonlocal count
+        pin = m.group(2)
+        if pin.endswith("000"):
+            return m.group(0)
+        count += 1
+        return m.group(1) + REDACTED
+    text = _CITY_PIN_RE.sub(repl3, text)
+
     return text, count
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
+def scrub_org_names(text: str) -> tuple[str, int]:
+    """Redact organisation / firm names ending in a company-type suffix."""
+    count = 0
+    org_re = re.compile(
+        r"\b(?:M/?S\.?\s+)?"
+        r"([A-Z][\w&.'\-]*(?:\s+[A-Z0-9][\w&.'\-]*){0,5}\s+"
+        r"(?i:pvt\.?\s*ltd\.?|private\s+limited|ltd\.?|l\.?l\.?p\.?|"
+        r"&\s*co\.?|&\s*sons|&\s*associates|nursing\s+home|"
+        r"insurance\s+co(?:mpany)?(?:\s+ltd\.?)?))\b"
+    )
+
+    def repl(m):
+        nonlocal count
+        count += 1
+        return REDACTED
+
+    return org_re.sub(repl, text), count
+
+
+def scrub_case_number(text: str) -> tuple[str, int]:
+    """Redact case / diary numbers, keeping the case-type label."""
+    count = 0
+
+    def repl(m):
+        nonlocal count
+        count += 1
+        return m.group(1) + REDACTED
+
+    text = re.sub(
+        r"\b((?:Consumer\s+Case|Case|Complaint|Appeal|Second\s+Appeal|O\.?A\.?|"
+        r"C\.?C\.?|W\.?P\.?(?:\s*\([A-Z]\))?|HMA|Crl\.?(?:\s*\w+)?|CS|FAO|RFA|SLP|"
+        r"Suit|Bail\s+Application|Misc\.?(?:\s*\w+)?)\s*No\.?\s*)"
+        r"(\d+(?:\s*/\s*\d+)*(?:\s+of\s+\d{4})?)",
+        repl, text, flags=re.IGNORECASE,
+    )
+
+    # Slash-coded reference numbers, e.g. CIC/KVSAN/A/2017/164356-BJ
+    def repl2(m):
+        nonlocal count
+        count += 1
+        return REDACTED
+
+    # Require at least one digit in the slash-chain so plain acronym chains
+    # ("AND/OR/NOT", "DNA/RNA/ATP") are not redacted — case numbers have digits.
+    text = re.sub(r"\b(?=[A-Z0-9/.\-]*\d)[A-Z]{2,}(?:/[A-Z0-9.\-]+){2,}\b", repl2, text)
+    return text, count
+
 
 def scrub_document(doc: dict) -> tuple[dict, Counter]:
     text = doc["text"]
@@ -287,20 +351,33 @@ def scrub_document(doc: dict) -> tuple[dict, Counter]:
     text, c = scrub_names(text, party_names)
     counts["party_names"] = c
 
-    # 2-8. Structured PII patterns
+    # 2-10. Structured PII patterns
     for label, fn in [
         ("phone", scrub_phone),
         ("aadhaar", scrub_aadhaar),
         ("pan", scrub_pan),
         ("email", scrub_email),
         ("bank_account", scrub_bank_account),
+        ("org_names", scrub_org_names),
+        ("case_number", scrub_case_number),
         ("address", scrub_address),
         ("pincode", scrub_pincode),
     ]:
         text, c = fn(text)
         counts[label] = c
 
-    return {**doc, "text": text}, counts
+    # Scrub the filename + filepath too — they often embed party names ("X v Y").
+    def _scrub_path(s: str) -> str:
+        s, _ = scrub_names(s, party_names)
+        s = re.sub(r"\b[\w.'\-]+\s+[Vv][Ss]?\.?\s+[\w.'\-]+", f"{REDACTED} v {REDACTED}", s)
+        return s
+
+    out = {**doc, "text": text}
+    if "filename" in doc:
+        out["filename"] = _scrub_path(doc["filename"])
+    if "filepath" in doc:
+        out["filepath"] = _scrub_path(doc["filepath"])
+    return out, counts
 
 
 def main():
@@ -330,7 +407,7 @@ def main():
     print(f"Documents processed: {len(docs)}")
     print(f"Documents with PII:  {pii_docs}")
     print(f"\nReplacements by type:")
-    for t in ["party_names", "aadhaar", "pan", "phone", "email", "bank_account", "address", "pincode"]:
+    for t in ["party_names", "org_names", "case_number", "aadhaar", "pan", "phone", "email", "bank_account", "address", "pincode"]:
         print(f"  {t:20s} {total.get(t, 0):5d}")
     print(f"  {'TOTAL':20s} {sum(total.values()):5d}")
     print(f"\nOutput: {OUTPUT}")

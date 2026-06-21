@@ -142,3 +142,9 @@ mike.db.empty-backup
 
 # macOS
 .DS_Store
+
+# Sensitive client case files — keep local only, never commit
+training documents/
+# Local database backups
+src-tauri/mike.db.bak*
+src-tauri/mike.db.backup*

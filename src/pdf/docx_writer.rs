@@ -289,6 +289,22 @@ fn auto_style_legal(wml: &str) -> String {
             continue;
         }
 
+        // Multi-line blocks — party/cause-title particulars, addresses and
+        // signature blocks — are built with forced line breaks. Justified
+        // short lines stretch edge-to-edge and look broken, so left-align
+        // any otherwise-Normal paragraph that contains a manual line break.
+        if line.contains("<w:br/>")
+            && line.contains(r#"w:pStyle w:val="Normal""#)
+        {
+            let styled = line.replace(
+                r#"<w:pStyle w:val="Normal"/>"#,
+                r#"<w:pStyle w:val="Normal"/><w:jc w:val="left"/>"#,
+            );
+            result.push_str(&styled);
+            result.push('\n');
+            continue;
+        }
+
         // Default — keep as is
         result.push_str(line);
         result.push('\n');
@@ -712,48 +728,95 @@ fn tolerant_replace_in_runs(xml: &str, find: &str, replace: &str) -> Option<Stri
         search_from = close + 6;
     }
 
+    // Build the concatenated visible text and, in lockstep, a normalized
+    // (whitespace-collapsed, lowercased) form together with a map from each
+    // normalized byte to the originating byte offset in `combined`. The map
+    // lets us project a match found in the normalized form back to a precise
+    // byte range in `combined`, which we then splice across the spanned runs.
     let combined: String = runs.iter().map(|(_, _, t)| t.clone()).collect::<Vec<_>>().join("");
-    let normalized: String = combined.split_whitespace().collect::<Vec<_>>().join(" ");
-    let pos = normalized.to_lowercase().find(&needle.to_lowercase())?;
-
-    // Map pos in normalized back to position in combined (approximate by
-    // removing one whitespace at a time until lengths align).
-    let mut combined_pos = 0usize;
-    let mut norm_walk = 0usize;
+    let mut normalized = String::with_capacity(combined.len());
+    // norm_to_combined[i] = combined byte offset of the char that produced the
+    // normalized byte at index i. Plus a final sentinel = combined.len().
+    let mut norm_to_combined: Vec<usize> = Vec::with_capacity(combined.len() + 1);
     let mut last_was_space = false;
     for (i, c) in combined.char_indices() {
-        if norm_walk == pos {
-            combined_pos = i;
-            break;
-        }
         if c.is_whitespace() {
             if !last_was_space {
-                norm_walk += 1;
+                norm_to_combined.push(i);
+                normalized.push(' ');
                 last_was_space = true;
             }
         } else {
-            norm_walk += c.len_utf8();
+            for lc in c.to_lowercase() {
+                for _ in 0..lc.len_utf8() {
+                    norm_to_combined.push(i);
+                }
+                normalized.push(lc);
+            }
             last_was_space = false;
         }
     }
-    let _ = combined_pos; // we don't need exact byte-precision below
+    norm_to_combined.push(combined.len()); // sentinel for the end position
 
-    // Pragmatic: replace first whole run that contains a substring of the
-    // needle, write `replace` into it, and clear the others involved.
-    // Acceptable for the LLM-proposed edits which usually fit in one run.
-    let needle_lower = needle.to_lowercase();
+    let needle_norm = needle.to_lowercase();
+    let pos = normalized.find(&needle_norm)?;
+    let end = pos + needle_norm.len();
+
+    // Project the normalized match span onto byte offsets in `combined`.
+    let combined_start = norm_to_combined[pos];
+    let combined_end = norm_to_combined[end];
+
+    // Determine which runs the [combined_start, combined_end) span touches and
+    // splice the replacement across exactly those runs: the replacement text
+    // goes into the first spanned run (covering its overlapped portion), and
+    // the overlapped portion of every other spanned run is cleared. Each run's
+    // text before/after the span is preserved. If the span maps onto a single
+    // run we still produce a correct in-run substitution.
+    let mut run_offset = 0usize; // byte offset of this run's start within combined
+    let mut new_xml = String::with_capacity(xml.len() + replace.len());
+    let mut last_copied = 0usize; // byte offset in `xml` copied so far
+    let mut wrote_replacement = false;
+    let mut touched_any = false;
+
     for (open, close, text) in &runs {
-        if text.to_lowercase().contains(&needle_lower)
-            || (text.len() < needle.len() && needle_lower.contains(&text.to_lowercase()))
-        {
-            let mut new_xml = String::with_capacity(xml.len());
-            new_xml.push_str(&xml[..*open]);
-            new_xml.push_str(&xml_escape_static(replace));
-            new_xml.push_str(&xml[*close..]);
-            return Some(new_xml);
+        let run_start = run_offset;
+        let run_end = run_offset + text.len();
+        run_offset = run_end;
+
+        // Does this run overlap the match span?
+        let ov_start = combined_start.max(run_start);
+        let ov_end = combined_end.min(run_end);
+        if ov_start >= ov_end {
+            continue; // no overlap — leave this run untouched
         }
+        touched_any = true;
+
+        // Local (within-run) byte range of the overlap.
+        let local_start = ov_start - run_start;
+        let local_end = ov_end - run_start;
+        let before = &text[..local_start];
+        let after = &text[local_end..];
+
+        // Rebuild this run's inner text: kept prefix + (replacement only in the
+        // first spanned run) + kept suffix.
+        let mut inner = String::new();
+        inner.push_str(before);
+        if !wrote_replacement {
+            inner.push_str(replace);
+            wrote_replacement = true;
+        }
+        inner.push_str(after);
+
+        new_xml.push_str(&xml[last_copied..*open]);
+        new_xml.push_str(&xml_escape_static(&inner));
+        last_copied = *close;
     }
-    None
+
+    if !touched_any {
+        return None;
+    }
+    new_xml.push_str(&xml[last_copied..]);
+    Some(new_xml)
 }
 
 fn html_unescape(s: &str) -> String {
@@ -1288,5 +1351,114 @@ mod tests {
             ("del".to_string(), "1".to_string()),
             ("ins".to_string(), "2".to_string()),
         ]);
+    }
+
+    // ---- tolerant_replace_in_runs: multi-run correctness, no silent corruption ----
+
+    #[test]
+    fn tolerant_replace_single_run_works() {
+        // Sanity: the simple single-run case still replaces correctly.
+        let xml = r#"<w:p><w:r><w:t>Hello World</w:t></w:r></w:p>"#;
+        let out = tolerant_replace_in_runs(xml, "Hello World", "Hi Earth").unwrap();
+        assert!(out.contains("Hi Earth"), "should contain replacement, got: {out}");
+        assert!(!out.contains("Hello World"), "old text must be gone, got: {out}");
+    }
+
+    #[test]
+    fn tolerant_replace_across_runs_no_silent_corruption() {
+        // The needle "Hello World" spans two <w:t> runs ("Hello " + "World").
+        // The buggy implementation wrote the whole replacement into the first
+        // matching run and left the second ("World") intact => duplicated/wrong
+        // text, yet returned Some(...) so it counted as success.
+        let xml = concat!(
+            r#"<w:p>"#,
+            r#"<w:r><w:t xml:space="preserve">Hello </w:t></w:r>"#,
+            r#"<w:r><w:t>World</w:t></w:r>"#,
+            r#"</w:p>"#,
+        );
+        match tolerant_replace_in_runs(xml, "Hello World", "Goodbye Mars") {
+            Some(out) => {
+                // The visible text after replacement must equal exactly the
+                // replacement — no leftover "World", no leftover "Hello".
+                let visible = visible_text(&out);
+                assert_eq!(
+                    visible, "Goodbye Mars",
+                    "multi-run replace must produce exactly the replacement, got visible: {visible:?} xml: {out}"
+                );
+            }
+            None => {
+                // Returning None is also acceptable: the caller then surfaces
+                // "edit not applied" rather than silently corrupting the doc.
+            }
+        }
+    }
+
+    #[test]
+    fn tolerant_replace_across_three_runs_no_leftover() {
+        // Needle spans three runs.
+        let xml = concat!(
+            r#"<w:p>"#,
+            r#"<w:r><w:t xml:space="preserve">The quick </w:t></w:r>"#,
+            r#"<w:r><w:t xml:space="preserve">brown </w:t></w:r>"#,
+            r#"<w:r><w:t>fox</w:t></w:r>"#,
+            r#"</w:p>"#,
+        );
+        match tolerant_replace_in_runs(xml, "quick brown fox", "lazy dog") {
+            Some(out) => {
+                let visible = visible_text(&out);
+                assert_eq!(
+                    visible, "The lazy dog",
+                    "spanned runs must be spliced, got visible: {visible:?} xml: {out}"
+                );
+            }
+            None => {}
+        }
+    }
+
+    #[test]
+    fn tolerant_replace_across_runs_multibyte() {
+        // Devanagari needle spanning two runs; replacement also multibyte.
+        let xml = concat!(
+            r#"<w:p>"#,
+            r#"<w:r><w:t xml:space="preserve">नमस्ते </w:t></w:r>"#,
+            r#"<w:r><w:t>दुनिया</w:t></w:r>"#,
+            r#"</w:p>"#,
+        );
+        match tolerant_replace_in_runs(xml, "नमस्ते दुनिया", "धन्यवाद") {
+            Some(out) => {
+                let visible = visible_text(&out);
+                assert_eq!(visible, "धन्यवाद", "multibyte multi-run splice, got: {visible:?}");
+            }
+            None => {}
+        }
+    }
+
+    #[test]
+    fn tolerant_replace_no_match_returns_none() {
+        let xml = r#"<w:p><w:r><w:t>Hello World</w:t></w:r></w:p>"#;
+        assert!(
+            tolerant_replace_in_runs(xml, "absent phrase", "x").is_none(),
+            "a needle not present must return None, never a corrupt Some"
+        );
+    }
+
+    /// Test helper: concatenate the unescaped contents of every <w:t> element.
+    fn visible_text(xml: &str) -> String {
+        let mut out = String::new();
+        let mut from = 0;
+        while let Some(open) = xml[from..].find("<w:t") {
+            let abs = from + open;
+            let after = match xml[abs..].find('>') {
+                Some(p) => abs + p + 1,
+                None => break,
+            };
+            let close = match xml[after..].find("</w:t>") {
+                Some(p) => after + p,
+                None => break,
+            };
+            out.push_str(&html_unescape(&xml[after..close]));
+            from = close + 6;
+        }
+        out
     }
 }

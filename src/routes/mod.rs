@@ -1,12 +1,12 @@
 pub mod auth;
 pub mod cases;
 pub mod chat;
+pub mod corpus;
 pub mod desktop;
 pub mod documents;
 pub mod ecourts;
-pub mod eurlex;
 pub mod indian_kanoon;
-pub mod messy_doc;
+pub mod mike_feedback;
 pub mod personalization;
 pub mod projects;
 pub mod statutes;

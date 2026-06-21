@@ -522,7 +522,12 @@ async fn fetch_fragment(
     }
     let mut text = strip_html(raw);
     if text.len() > FRAGMENT_CHAR_CAP {
-        text.truncate(FRAGMENT_CHAR_CAP);
+        // `String::truncate` panics if the byte index lands mid-codepoint.
+        // Indian judgments routinely contain multibyte chars (Devanagari
+        // धारा, curly quotes/dashes Kanoon emits), so snap down to the
+        // nearest char boundary before truncating.
+        let cut = floor_char_boundary(&text, FRAGMENT_CHAR_CAP);
+        text.truncate(cut);
         text.push_str("…[truncated]");
     }
     Some(Fragment { title, text })
@@ -576,6 +581,16 @@ fn strip_html(html: &str) -> String {
         .replace("&nbsp;", " ");
     // Collapse whitespace.
     decoded.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Largest byte index `<= max` that is a UTF-8 char boundary in `s`.
+/// Used to truncate without panicking on a multibyte boundary.
+fn floor_char_boundary(s: &str, max: usize) -> usize {
+    let mut i = max.min(s.len());
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
 }
 
 // ---------------------------------------------------------------------------
@@ -659,6 +674,28 @@ mod tests {
     fn strip_html_removes_tags_and_decodes_entities() {
         let s = strip_html("<p>Section <b>138</b> &amp; the &quot;NI Act&quot;</p>");
         assert_eq!(s, "Section 138 & the \"NI Act\"");
+    }
+
+    #[test]
+    fn floor_char_boundary_never_panics_on_multibyte_truncate() {
+        // Devanagari धारा is 3 bytes/char; a cap landing mid-char must snap
+        // down to a boundary so String::truncate does not panic.
+        let mut s = "धारा".repeat(2000); // well over FRAGMENT_CHAR_CAP, all multibyte
+        let cut = floor_char_boundary(&s, FRAGMENT_CHAR_CAP);
+        assert!(s.is_char_boundary(cut));
+        assert!(cut <= FRAGMENT_CHAR_CAP);
+        // The exact operation fetch_fragment performs — must not panic.
+        s.truncate(cut);
+        s.push_str("…[truncated]");
+        assert!(s.ends_with("…[truncated]"));
+    }
+
+    #[test]
+    fn floor_char_boundary_ascii_is_exact() {
+        let s = "abcdef";
+        assert_eq!(floor_char_boundary(s, 3), 3);
+        // Past end clamps to len.
+        assert_eq!(floor_char_boundary(s, 100), 6);
     }
 
     #[test]

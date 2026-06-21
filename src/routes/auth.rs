@@ -346,8 +346,13 @@ async fn bio_verify(state: &AppState, reason: &str) -> anyhow::Result<bool> {
             .await
             .map_err(|_| anyhow::anyhow!("Biometric channel closed"))?;
         tracing::debug!("[bio_verify] request sent, awaiting reply...");
-        let result = reply_rx
+        // Hard timeout so the HTTP request never hangs indefinitely if the
+        // Tauri side accepts the request but never sends a reply (panic,
+        // dropped task that keeps the sender alive, or a hung WinRT call).
+        // Mirrors the 60s cap on the direct fallback in biometric.rs:94.
+        let result = tokio::time::timeout(std::time::Duration::from_secs(60), reply_rx)
             .await
+            .map_err(|_| anyhow::anyhow!("Biometric request timed out"))?
             .map_err(|_| anyhow::anyhow!("Biometric reply channel dropped"))?
             .map_err(|e| anyhow::anyhow!("{e}"));
         tracing::info!("[bio_verify] reply received: {:?}", result);
@@ -355,5 +360,36 @@ async fn bio_verify(state: &AppState, reason: &str) -> anyhow::Result<bool> {
     } else {
         tracing::info!("[bio_verify] no Tauri channel, calling biometric::verify directly");
         biometric::verify(reason).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Reproduces the hang: a Tauri side that accepts the request but never
+    /// replies leaves the oneshot receiver pending forever. The timeout
+    /// wrapper used in `bio_verify` must turn that into a bounded error
+    /// instead of blocking the HTTP request indefinitely.
+    #[tokio::test]
+    async fn biometric_reply_times_out_instead_of_hanging() {
+        // Keep the sender alive (mirrors a hung WinRT call holding the frame)
+        // so the receiver never errors on its own — only the timeout fires.
+        let (_reply_tx, reply_rx) =
+            tokio::sync::oneshot::channel::<Result<bool, String>>();
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(50), reply_rx).await;
+        assert!(result.is_err(), "await must time out, not hang forever");
+    }
+
+    #[tokio::test]
+    async fn biometric_reply_passes_through_when_prompt_replies() {
+        let (reply_tx, reply_rx) =
+            tokio::sync::oneshot::channel::<Result<bool, String>>();
+        reply_tx.send(Ok(true)).unwrap();
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(60), reply_rx)
+                .await
+                .expect("should not time out")
+                .expect("channel should not be dropped");
+        assert_eq!(result, Ok(true));
     }
 }

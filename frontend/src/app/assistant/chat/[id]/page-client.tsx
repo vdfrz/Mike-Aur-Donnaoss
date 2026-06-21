@@ -66,6 +66,7 @@ export default function AssistantChatPage() {
             isResponseLoading={isResponseLoading}
             handleChat={handleChat}
             cancel={cancel}
+            showOfflineToggle
         />
     );
 }

@@ -522,6 +522,71 @@ struct ProbeBody {
     headers: serde_json::Map<String, Value>,
 }
 
+/// Returns true if `ip` is an address an authenticated user must never be able
+/// to make the server fetch (SSRF): loopback, private RFC1918/ULA, link-local
+/// (incl. 169.254.169.254 cloud metadata), unspecified, or otherwise non-global.
+fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()        // 127.0.0.0/8
+                || v4.is_private()  // 10/8, 172.16/12, 192.168/16
+                || v4.is_link_local() // 169.254.0.0/16 (cloud metadata 169.254.169.254)
+                || v4.is_unspecified() // 0.0.0.0
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                // Carrier-grade NAT / shared address space 100.64.0.0/10.
+                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 0x40)
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()        // ::1
+                || v6.is_unspecified() // ::
+                // Unique-local fc00::/7 and link-local fe80::/10.
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+                // IPv4-mapped (::ffff:a.b.c.d) — re-check the embedded v4.
+                || v6.to_ipv4_mapped().map(|m| is_blocked_ip(std::net::IpAddr::V4(m))).unwrap_or(false)
+        }
+    }
+}
+
+/// Guard against server-side request forgery: an authenticated user may supply
+/// an arbitrary MCP `url`, which the server then fetches from inside its own
+/// network. Reject anything but http(s), and resolve the host so a hostname
+/// that points at a loopback/private/link-local/metadata address is rejected
+/// *before* any request is sent. Applied at probe time AND at chat dispatch.
+pub async fn assert_url_is_external(raw_url: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(raw_url)
+        .map_err(|e| format!("invalid url: {e}"))?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        other => return Err(format!("unsupported url scheme '{other}' (only http/https allowed)")),
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "url has no host".to_string())?;
+    let port = parsed.port_or_known_default().unwrap_or(443);
+
+    // Resolve every address the host maps to and reject if ANY is internal —
+    // a host that resolves to both a public and a private IP is still unsafe.
+    let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|e| format!("could not resolve host '{host}': {e}"))?
+        .collect();
+    if addrs.is_empty() {
+        return Err(format!("could not resolve host '{host}'"));
+    }
+    for addr in addrs {
+        if is_blocked_ip(addr.ip()) {
+            return Err(format!(
+                "url '{raw_url}' resolves to a blocked internal address ({}); \
+                 loopback, private, link-local and cloud-metadata ranges are not allowed",
+                addr.ip()
+            ));
+        }
+    }
+    Ok(())
+}
+
 async fn probe_mcp_server(
     _state: State<Arc<AppState>>,
     _auth: AuthUser,
@@ -531,6 +596,13 @@ async fn probe_mcp_server(
     if url.is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "url is required"));
     }
+
+    // SSRF guard: the fanout candidates (`/mcp`, `/messages`, `/api/mcp`) only
+    // vary the path, so the host is identical — checking the base url's host
+    // once rejects any request that would reach an internal address.
+    assert_url_is_external(&url)
+        .await
+        .map_err(|e| err(StatusCode::FORBIDDEN, &e))?;
 
     let mut req_headers = reqwest::header::HeaderMap::new();
     req_headers.insert("Content-Type", "application/json".parse().unwrap());
@@ -963,15 +1035,131 @@ async fn delete_mcp_server(
 // ---------------------------------------------------------------------------
 // DELETE /user/account  — irreversible, deletes all user data via CASCADE
 // ---------------------------------------------------------------------------
+#[derive(Deserialize, Default)]
+struct DeleteAccountBody {
+    #[serde(default)]
+    confirm: bool,
+}
+
 async fn delete_account(
     State(state): State<Arc<AppState>>,
     auth: AuthUser,
+    body: Option<Json<DeleteAccountBody>>,
 ) -> ApiResult {
+    // Irreversible: this CASCADE-wipes every case/chat/document. Require an
+    // explicit `confirm: true` so a stray DELETE can't nuke the account.
+    if !body.map(|b| b.0.confirm).unwrap_or(false) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "account deletion is irreversible — resend with {\"confirm\": true} to proceed",
+        ));
+    }
+
     sqlx::query("DELETE FROM user_profiles WHERE id = ?")
         .bind(&auth.user_id)
         .execute(&state.db)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
+    // Drop the in-memory MCP discovery cache so a deleted user's tool list
+    // isn't left keyed by a now-nonexistent user_id.
+    state.invalidate_mcp_cache_for_user(&auth.user_id).await;
+
     Ok(Json(json!({ "ok": true })))
+}
+
+#[cfg(test)]
+mod ssrf_tests {
+    use super::{assert_url_is_external, is_blocked_ip};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn blocks_internal_literal_ips() {
+        // loopback / private / link-local (metadata) / unspecified / CGNAT / ULA
+        for ip in [
+            "127.0.0.1", "10.0.0.5", "172.16.0.1", "192.168.1.1",
+            "169.254.169.254", "0.0.0.0", "100.64.0.1",
+        ] {
+            assert!(
+                is_blocked_ip(ip.parse::<IpAddr>().unwrap()),
+                "{ip} should be blocked"
+            );
+        }
+        assert!(is_blocked_ip(IpAddr::V6(Ipv6Addr::LOCALHOST)), "::1 should be blocked");
+        assert!(
+            is_blocked_ip("fc00::1".parse::<IpAddr>().unwrap()),
+            "ULA fc00::/7 should be blocked"
+        );
+        assert!(
+            is_blocked_ip("fe80::1".parse::<IpAddr>().unwrap()),
+            "link-local fe80::/10 should be blocked"
+        );
+        // IPv4-mapped loopback must also be caught.
+        assert!(
+            is_blocked_ip("::ffff:127.0.0.1".parse::<IpAddr>().unwrap()),
+            "ipv4-mapped loopback should be blocked"
+        );
+    }
+
+    #[test]
+    fn allows_public_literal_ips() {
+        for ip in ["8.8.8.8", "1.1.1.1"] {
+            assert!(
+                !is_blocked_ip(ip.parse::<IpAddr>().unwrap()),
+                "{ip} should be allowed"
+            );
+        }
+        assert!(!is_blocked_ip(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))));
+    }
+
+    #[tokio::test]
+    async fn rejects_loopback_url() {
+        let err = assert_url_is_external("http://127.0.0.1:8080/mcp")
+            .await
+            .expect_err("loopback url must be rejected");
+        assert!(err.contains("blocked"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn rejects_metadata_url() {
+        let err = assert_url_is_external("http://169.254.169.254/latest/meta-data/")
+            .await
+            .expect_err("cloud metadata url must be rejected");
+        assert!(err.contains("blocked"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn rejects_localhost_hostname() {
+        let err = assert_url_is_external("http://localhost:9000/")
+            .await
+            .expect_err("localhost must be rejected after resolution");
+        assert!(err.contains("blocked"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn rejects_private_url() {
+        let err = assert_url_is_external("https://10.1.2.3/mcp")
+            .await
+            .expect_err("private url must be rejected");
+        assert!(err.contains("blocked"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn rejects_non_http_scheme() {
+        let err = assert_url_is_external("file:///etc/passwd")
+            .await
+            .expect_err("non-http scheme must be rejected");
+        assert!(err.contains("scheme"), "got: {err}");
+    }
+
+    #[test]
+    fn delete_account_defaults_to_unconfirmed() {
+        use super::DeleteAccountBody;
+        // The security-critical default: an empty/missing body must NOT confirm.
+        let empty: DeleteAccountBody = serde_json::from_str("{}").unwrap();
+        assert!(!empty.confirm, "empty body must default confirm=false");
+        let explicit: DeleteAccountBody =
+            serde_json::from_str(r#"{"confirm": true}"#).unwrap();
+        assert!(explicit.confirm, "confirm:true must deserialize as true");
+    }
 }

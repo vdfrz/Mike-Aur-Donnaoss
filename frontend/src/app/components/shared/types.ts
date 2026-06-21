@@ -124,7 +124,16 @@ export type AssistantEvent =
         document_id?: string;
         version_id?: string;
         version_number?: number | null;
+        /** Source markdown the model used to generate the .docx; seeds the inline AI editor. */
+        body?: string;
         isStreaming?: boolean;
+        /** Court-bundle compile progress: current stage label (e.g. "Preparing Annexure P-1"). */
+        stage?: string;
+        /** Item progress within a stage (e.g. 2 of 5). */
+        stageCurrent?: number;
+        stageTotal?: number;
+        /** Epoch ms when compilation started, for the elapsed timer. */
+        startedAt?: number;
     }
   | { type: "doc_download"; filename: string; download_url: string }
   | {
@@ -158,14 +167,21 @@ export type AssistantEvent =
   | { type: "content"; text: string; isStreaming?: boolean }
   | {
         type: "clarification";
-        questions: { text: string; chips: string[] }[];
+        request_id?: string;
+        questions: {
+            header?: string;
+            text: string;
+            multiSelect?: boolean;
+            options?: { label: string; description?: string }[];
+            chips?: string[];
+        }[];
     };
 
 export interface MikeMessage {
   role: "user" | "assistant";
   content: string;
   files?: { filename: string; document_id?: string }[];
-  workflow?: { id: string; title: string };
+  workflow?: { id: string; title: string; prompt_md?: string | null };
   model?: string;
   annotations?: MikeCitationAnnotation[];
   events?: AssistantEvent[];

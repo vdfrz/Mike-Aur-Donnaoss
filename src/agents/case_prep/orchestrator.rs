@@ -16,6 +16,9 @@ pub enum ProgressEvent {
     ExtractingDoc { filename: String, doc_index: usize, total_docs: usize },
     ExtractedDoc { filename: String, doc_index: usize, total_docs: usize, page_count: usize, needed_ocr: bool },
     Compressing { original_tokens: usize, target_tokens: usize },
+    /// Compression failed; context was hard-truncated to the budget instead.
+    /// Surfaced so the user knows document content was dropped, not condensed.
+    Truncated { original_tokens: usize, target_tokens: usize, error: String },
     Estimate { total_pages: usize, estimated_seconds: u32, has_ocr: bool },
     AgentStarted { agent_name: &'static str },
     AgentThinking { agent_name: &'static str, snippet: String },
@@ -50,6 +53,10 @@ const AGENTS: &[(&str, &str, &str)] = &[
 ];
 
 const OUTPUT_RESERVE_TOKENS: usize = 8_000;
+
+/// Chars-per-token heuristic, matching `summarize::estimate_tokens` (4 chars/token).
+/// Used to convert a token budget to a char cap for the truncation fallback.
+const CHARS_PER_TOKEN: usize = 4;
 
 pub async fn analyze_case(
     case_id: &str,
@@ -170,9 +177,27 @@ pub async fn analyze_case(
                 target_tokens: target,
             }).await;
         }
-        compress_context(&case_context, target, &llm_params)
-            .await
-            .unwrap_or(case_context)
+        match compress_context(&case_context, target, &llm_params).await {
+            Ok(compressed) => compressed,
+            Err(e) => {
+                // Compression failed — do NOT fan the over-budget context out to
+                // the 7 agents (each would 400 or be provider-truncated, silently
+                // dropping the decisive tail). Hard-truncate to the budget and make
+                // the dropped content visible to the user.
+                tracing::warn!(
+                    "[case_prep] compression failed ({e}); hard-truncating context \
+                     from {context_tokens} tok to ~{target} tok"
+                );
+                if let Some(tx) = &progress_tx {
+                    let _ = tx.send(ProgressEvent::Truncated {
+                        original_tokens: context_tokens,
+                        target_tokens: target,
+                        error: e.to_string(),
+                    }).await;
+                }
+                hard_truncate_to_tokens(&case_context, target)
+            }
+        }
     } else {
         case_context
     };
@@ -603,6 +628,25 @@ fn extract_text(file_type: &str, bytes: &[u8]) -> String {
     }
 }
 
+/// Hard-truncate `text` to roughly `target_tokens` worth of characters on a UTF-8
+/// char boundary. Used as the fallback when LLM compression fails so we never fan
+/// the over-budget context out to the agents. Mirrors compress_context's
+/// char-boundary-safe slice (it never panics on multibyte input). Appends a marker
+/// so the dropped tail is visible in the prompt itself.
+fn hard_truncate_to_tokens(text: &str, target_tokens: usize) -> String {
+    let max_chars = target_tokens * CHARS_PER_TOKEN;
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    // max_chars is a char count; convert to a byte index on a char boundary.
+    let end = text
+        .char_indices()
+        .nth(max_chars)
+        .map(|(i, _)| i)
+        .unwrap_or(text.len());
+    format!("{}\n\n[... context truncated: compression failed]", &text[..end])
+}
+
 async fn compress_context(
     text: &str,
     target_tokens: usize,
@@ -676,6 +720,39 @@ mod tests {
     #[test]
     fn fabricated_quote_fails() {
         assert!(verify_quote("the respondent admitted committing the fraud", DOC) < QUOTE_MATCH_THRESHOLD);
+    }
+
+    #[test]
+    fn hard_truncate_bounds_over_budget_context() {
+        // A context far over budget must be cut down so it is NOT dispatched whole.
+        let big = "word ".repeat(10_000); // ~50k chars, ~12.5k tokens
+        let target = 1_000; // tokens
+        let out = hard_truncate_to_tokens(&big, target);
+        // Truncated payload (excluding marker) must fit the token budget.
+        assert!(estimate_tokens(&out) <= target + 50, "truncated context still over budget: {} tok", estimate_tokens(&out));
+        assert!(out.len() < big.len(), "nothing was truncated");
+        assert!(out.contains("context truncated"), "no visible truncation marker");
+    }
+
+    #[test]
+    fn hard_truncate_multibyte_never_panics() {
+        // Devanagari + ₹ + smart quotes straddling the byte cut must not panic
+        // and must stay on a char boundary.
+        let unit = "धारा ₹5,000 \u{201C}res judicata\u{201D} café — "; // multibyte
+        let big = unit.repeat(2_000);
+        for target in [1usize, 7, 50, 333, 1_000] {
+            let out = hard_truncate_to_tokens(&big, target);
+            // Slicing on a non-boundary would have panicked above; reaching here
+            // and round-tripping through chars proves boundary safety.
+            assert_eq!(out, out.chars().collect::<String>());
+        }
+    }
+
+    #[test]
+    fn hard_truncate_keeps_short_context_intact() {
+        let small = "short [doc-0: a.pdf] body";
+        let out = hard_truncate_to_tokens(small, 1_000);
+        assert_eq!(out, small, "under-budget context should pass through untouched");
     }
 
     #[test]

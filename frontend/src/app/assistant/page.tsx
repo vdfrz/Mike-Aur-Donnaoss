@@ -30,6 +30,7 @@ export default function AssistantPage() {
             isResponseLoading={isResponseLoading}
             handleChat={handleChat}
             cancel={cancel}
+            showOfflineToggle
         />
     );
 }

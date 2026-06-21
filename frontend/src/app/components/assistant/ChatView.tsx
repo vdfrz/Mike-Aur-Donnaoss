@@ -9,6 +9,7 @@ import { useSelectedModel } from "@/app/hooks/useSelectedModel";
 import {
     AssistantSidePanel,
     type AssistantSidePanelTab,
+    type DocumentTab,
 } from "./AssistantSidePanel";
 import { AssistantWorkflowModal } from "./AssistantWorkflowModal";
 import type {
@@ -25,6 +26,12 @@ interface Props {
     isResponseLoading: boolean;
     handleChat: (message: MikeMessage) => Promise<string | null>;
     cancel: () => void;
+    /** Hide the workflow (template) picker. */
+    hideWorkflowButton?: boolean;
+    /** False skips text extraction/OCR on upload. */
+    cacheUploads?: boolean;
+    /** Show the "Go Offline" toggle in the chat input (main assistant only). */
+    showOfflineToggle?: boolean;
 }
 
 export function ChatView({
@@ -32,6 +39,9 @@ export function ChatView({
     isResponseLoading,
     handleChat,
     cancel,
+    hideWorkflowButton,
+    cacheUploads,
+    showOfflineToggle,
 }: Props) {
     const [tabs, setTabs] = useState<AssistantSidePanelTab[]>([]);
     const [activeTabId, setActiveTabId] = useState<string | null>(null);
@@ -245,6 +255,7 @@ export function ChatView({
             filename: string;
             versionId: string | null;
             versionNumber: number | null;
+            editableText?: string | null;
         }) => {
             upsertTab({
                 kind: "document",
@@ -253,10 +264,12 @@ export function ChatView({
                 filename: args.filename,
                 versionId: args.versionId,
                 versionNumber: args.versionNumber,
+                editableText: args.editableText ?? null,
             });
         },
         [upsertTab],
     );
+
 
     const openIKLink = useCallback(
         (url: string, title: string, context: string) => {
@@ -565,6 +578,9 @@ export function ChatView({
         });
     }, [messages, openDocument]);
 
+    // Structured clarifications now render inline in the thread
+    // (see InlineClarification in AssistantMessage); no modal state needed.
+
     return (
         <div className="h-full w-full flex relative">
             {/* Chat column */}
@@ -709,6 +725,9 @@ export function ChatView({
                                 onSubmit={handleChat}
                                 onCancel={cancel}
                                 isLoading={isResponseLoading}
+                                hideWorkflowButton={hideWorkflowButton}
+                                cacheUploads={cacheUploads}
+                                showOfflineToggle={showOfflineToggle}
                             />
                             <div className="py-3 text-center">
                                 <p className="text-xs text-gray-500">
@@ -752,6 +771,7 @@ export function ChatView({
                     />
                 </div>
             )}
+
         </div>
     );
 }

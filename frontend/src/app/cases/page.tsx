@@ -3,8 +3,14 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useLocale, useTranslations } from "next-intl";
-import { Plus, Briefcase, FileText, Loader2 } from "lucide-react";
-import { listCases, createCase } from "@/app/lib/mikeApi";
+import { Plus, Briefcase, FileText, Loader2, MoreVertical, Archive, ArchiveRestore, Trash2 } from "lucide-react";
+import {
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { listCases, createCase, updateCase, deleteCase } from "@/app/lib/mikeApi";
 import type { MikeCase, CaseParty } from "@/app/components/shared/types";
 
 function formatDate(iso: string, locale: string) {
@@ -61,6 +67,28 @@ export default function CasesPage() {
         }
     }
 
+    async function handleToggleArchive(c: MikeCase) {
+        const nextStatus = c.status === "active" ? "archived" : "active";
+        try {
+            await updateCase(c.id, { status: nextStatus });
+            setCases((prev) =>
+                prev.map((x) => (x.id === c.id ? { ...x, status: nextStatus } : x)),
+            );
+        } catch {
+            // ignore; keep current state
+        }
+    }
+
+    async function handleDelete(c: MikeCase) {
+        if (!window.confirm(t("deleteConfirm", { title: c.title }))) return;
+        try {
+            await deleteCase(c.id);
+            setCases((prev) => prev.filter((x) => x.id !== c.id));
+        } catch {
+            // ignore; keep current state
+        }
+    }
+
     return (
         <div className="flex h-full flex-col overflow-hidden">
             {/* Header */}
@@ -104,26 +132,77 @@ export default function CasesPage() {
                             const parties = parseParties(c.parties_json);
                             const summary = partiesSummary(parties);
                             return (
-                                <button
+                                <div
                                     key={c.id}
+                                    role="button"
+                                    tabIndex={0}
                                     onClick={() => router.push(`/cases/${c.id}`)}
-                                    className="flex flex-col rounded-lg border border-gray-200 bg-white p-4 text-left hover:border-gray-300 hover:shadow-sm transition-all"
+                                    onKeyDown={(e) => {
+                                        if (e.key === "Enter" || e.key === " ") {
+                                            e.preventDefault();
+                                            router.push(`/cases/${c.id}`);
+                                        }
+                                    }}
+                                    className="flex flex-col rounded-lg border border-gray-200 bg-white p-4 text-left hover:border-gray-300 hover:shadow-sm transition-all cursor-pointer"
                                 >
                                     <div className="flex items-start justify-between gap-2 mb-2">
                                         <h3 className="text-sm font-medium text-gray-900 line-clamp-2">
                                             {c.title}
                                         </h3>
-                                        <span
-                                            className={`shrink-0 inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium ${
-                                                c.status === "active"
-                                                    ? "bg-green-50 text-green-700"
-                                                    : "bg-gray-100 text-gray-600"
-                                            }`}
-                                        >
-                                            {c.status === "active"
-                                                ? t("active")
-                                                : t("archived")}
-                                        </span>
+                                        <div className="flex shrink-0 items-center gap-1">
+                                            <span
+                                                className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                                                    c.status === "active"
+                                                        ? "bg-green-50 text-green-700"
+                                                        : "bg-gray-100 text-gray-600"
+                                                }`}
+                                            >
+                                                {c.status === "active"
+                                                    ? t("active")
+                                                    : t("archived")}
+                                            </span>
+                                            <DropdownMenu>
+                                                <DropdownMenuTrigger asChild>
+                                                    <button
+                                                        onClick={(e) => e.stopPropagation()}
+                                                        aria-label={t("caseActions")}
+                                                        className="-mr-1 rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700"
+                                                    >
+                                                        <MoreVertical className="h-4 w-4" />
+                                                    </button>
+                                                </DropdownMenuTrigger>
+                                                <DropdownMenuContent align="end" className="z-101">
+                                                    <DropdownMenuItem
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            void handleToggleArchive(c);
+                                                        }}
+                                                    >
+                                                        {c.status === "active" ? (
+                                                            <>
+                                                                <Archive className="mr-2 h-4 w-4" />
+                                                                {t("archive")}
+                                                            </>
+                                                        ) : (
+                                                            <>
+                                                                <ArchiveRestore className="mr-2 h-4 w-4" />
+                                                                {t("unarchive")}
+                                                            </>
+                                                        )}
+                                                    </DropdownMenuItem>
+                                                    <DropdownMenuItem
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            void handleDelete(c);
+                                                        }}
+                                                        className="text-red-600 focus:text-red-600"
+                                                    >
+                                                        <Trash2 className="mr-2 h-4 w-4" />
+                                                        {t("delete")}
+                                                    </DropdownMenuItem>
+                                                </DropdownMenuContent>
+                                            </DropdownMenu>
+                                        </div>
                                     </div>
                                     {c.court && (
                                         <p className="text-xs text-gray-500 mb-1">
@@ -147,7 +226,7 @@ export default function CasesPage() {
                                             {formatDate(c.updated_at, locale)}
                                         </span>
                                     </div>
-                                </button>
+                                </div>
                             );
                         })}
                     </div>

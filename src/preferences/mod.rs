@@ -18,7 +18,6 @@ pub enum PreferenceContext {
     Citation,
     CasePrep,
     GeneralChat,
-    MessyWord,
 }
 
 impl PreferenceContext {
@@ -29,7 +28,6 @@ impl PreferenceContext {
             Self::Citation => &["citation_style", "tone_profile"],
             Self::CasePrep => &["practice_specialization", "tone_profile", "anti_patterns"],
             Self::GeneralChat => &["tone_profile", "practice_specialization", "anti_patterns"],
-            Self::MessyWord => &["drafting_style", "tone_profile", "anti_patterns"],
         }
     }
 }

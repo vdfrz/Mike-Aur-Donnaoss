@@ -38,8 +38,8 @@ def extract_docx(path: Path) -> str:
     return "\n".join(p.text for p in doc.paragraphs)
 
 
-def extract_doc(path: Path) -> str:
-    """Extract text from .doc using macOS textutil."""
+def extract_textutil(path: Path) -> str:
+    """Extract text from .doc/.odt using macOS textutil."""
     result = subprocess.run(
         ["textutil", "-convert", "txt", "-stdout", str(path)],
         capture_output=True, text=True,
@@ -65,7 +65,7 @@ def main():
         sys.exit(1)
 
     output_path = Path(__file__).parent / "extracted_texts.jsonl"
-    extensions = {".pdf", ".docx", ".doc"}
+    extensions = {".pdf", ".docx", ".doc", ".odt"}
     files = [f for f in corpus.rglob("*") if f.suffix.lower() in extensions]
 
     extracted = 0
@@ -76,10 +76,10 @@ def main():
         for f in files:
             suffix = f.suffix.lower()
 
-            if suffix == ".doc":
+            if suffix in (".doc", ".odt"):
                 try:
-                    text = extract_doc(f)
-                    fmt = "doc"
+                    text = extract_textutil(f)
+                    fmt = suffix.lstrip(".")
                     record = {
                         "filepath": str(f),
                         "filename": f.name,
@@ -90,7 +90,7 @@ def main():
                     extracted += 1
                     continue
                 except Exception as e:
-                    print(f"SKIP (.doc extraction failed): {f} — {e}", file=sys.stderr)
+                    print(f"SKIP ({suffix} extraction failed): {f} — {e}", file=sys.stderr)
                     skipped += 1
                     continue
 

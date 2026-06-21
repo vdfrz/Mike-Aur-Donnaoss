@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Mike aur Donna — Drafting Studio (Mockup)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=EB+Garamond:ital,wght@0,400;0,500;0,600;1,400&display=swap" rel="stylesheet" />
+<style>
+  :root{
+    --blue:#0088ff;
+    --blue-700:#0070d6;
+    --blue-50:rgba(0,136,255,.06);
+    --blue-100:rgba(0,136,255,.12);
+    --blue-200:rgba(0,136,255,.28);
+    --ink:#111827;
+    --ink-2:#1f2937;
+    --gray:#64748b;
+    --gray-light:#94a3b8;
+    --border:#e2e8f0;
+    --border-2:#eef2f6;
+    --bg:#f5f7fa;
+    --panel:#ffffff;
+    --green:#16a34a;
+    --green-bg:rgba(22,163,74,.08);
+    --red:#dc2626;
+    --red-bg:rgba(220,38,38,.07);
+    --amber:#b45309;
+    --radius:10px;
+    --shadow-sm:0 1px 2px rgba(16,24,40,.06),0 1px 3px rgba(16,24,40,.04);
+    --shadow:0 8px 28px rgba(16,24,40,.12);
+    --shadow-lg:0 18px 48px rgba(16,24,40,.18);
+    --sans:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+    --serif:'EB Garamond','Times New Roman',Georgia,serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    font-family:var(--sans);
+    background:var(--bg);
+    color:var(--ink);
+    -webkit-font-smoothing:antialiased;
+    font-size:14px;
+    line-height:1.5;
+  }
+
+  /* ============ APP CHROME ============ */
+  .app{display:flex;flex-direction:column;height:100vh;overflow:hidden}
+
+  .topbar{
+    display:flex;align-items:center;gap:14px;
+    height:54px;padding:0 18px;
+    background:var(--panel);border-bottom:1px solid var(--border);
+    flex-shrink:0;z-index:40;
+  }
+  .brand{display:flex;align-items:center;gap:9px;font-weight:700;letter-spacing:-.02em}
+  .brand .dot{width:22px;height:22px;border-radius:7px;background:linear-gradient(135deg,var(--blue),#5fb4ff);
+    display:flex;align-items:center;justify-content:center;color:#fff;font-size:12px;box-shadow:0 2px 6px rgba(0,136,255,.4)}
+  .brand small{color:var(--gray);font-weight:500;font-size:11px}
+  .crumb{display:flex;align-items:center;gap:8px;color:var(--gray);font-size:13px}
+  .crumb .sep{color:var(--gray-light)}
+  .crumb b{color:var(--ink-2);font-weight:600}
+  .pill{font-size:11px;font-weight:600;padding:3px 9px;border-radius:999px;background:var(--blue-100);color:var(--blue-700)}
+  .topbar .spacer{flex:1}
+  .avatar{width:30px;height:30px;border-radius:50%;background:#dbe7f3;display:flex;align-items:center;justify-content:center;font-weight:600;color:var(--blue-700);font-size:12px}
+  .btn{font-family:var(--sans);font-size:13px;font-weight:600;border:1px solid var(--border);background:#fff;color:var(--ink-2);
+    padding:7px 13px;border-radius:8px;cursor:pointer;display:inline-flex;align-items:center;gap:6px;transition:.15s}
+  .btn:hover{border-color:var(--blue-200);color:var(--blue-700)}
+  .btn.primary{background:var(--blue);border-color:var(--blue);color:#fff}
+  .btn.primary:hover{background:var(--blue-700)}
+
+  /* ============ STEP RAIL ============ */
+  .steprail{
+    display:flex;align-items:center;gap:6px;
+    padding:10px 18px;background:#fff;border-bottom:1px solid var(--border);
+    flex-shrink:0;overflow-x:auto;
+  }
+  .step{
+    display:flex;align-items:center;gap:9px;
+    padding:7px 13px 7px 9px;border-radius:9px;cursor:pointer;
+    border:1px solid transparent;white-space:nowrap;transition:.15s;
+  }
+  .step:hover{background:var(--blue-50)}
+  .step.active{background:var(--blue-50);border-color:var(--blue-200)}
+  .step .num{width:22px;height:22px;border-radius:50%;background:#eef2f6;color:var(--gray);
+    display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0;transition:.15s}
+  .step.active .num{background:var(--blue);color:#fff}
+  .step .lbl{font-size:12.5px;font-weight:600;color:var(--gray)}
+  .step.active .lbl{color:var(--ink)}
+  .step .lbl small{display:block;font-weight:500;font-size:10.5px;color:var(--gray-light)}
+  .steprail .grow{flex:1}
+  .nav-hint{font-size:11px;color:var(--gray-light);display:flex;align-items:center;gap:5px;white-space:nowrap}
+  kbd{font-family:var(--sans);font-size:10px;font-weight:600;background:#f1f5f9;border:1px solid var(--border);
+    border-bottom-width:2px;border-radius:5px;padding:1px 5px;color:var(--gray)}
+
+  /* ============ BODY LAYOUT ============ */
+  .body{display:flex;flex:1;overflow:hidden}
+
+  /* ---- LEFT: case context ---- */
+  .context{
+    width:262px;flex-shrink:0;background:var(--panel);border-right:1px solid var(--border);
+    padding:16px 14px;overflow-y:auto;
+  }
+  .ctx-h{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--gray-light);margin:18px 4px 8px}
+  .ctx-h:first-child{margin-top:0}
+  .ctx-card{background:#fbfcfe;border:1px solid var(--border-2);border-radius:9px;padding:10px 11px;margin-bottom:7px}
+  .ctx-card .k{font-size:10.5px;color:var(--gray-light);font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+  .ctx-card .v{font-size:13px;color:var(--ink-2);font-weight:500;margin-top:1px}
+  .src{display:flex;align-items:center;gap:9px;padding:7px 9px;border-radius:8px;cursor:default}
+  .src:hover{background:var(--blue-50)}
+  .src .ic{width:26px;height:26px;border-radius:6px;background:var(--blue-100);color:var(--blue-700);
+    display:flex;align-items:center;justify-content:center;font-size:12px;flex-shrink:0}
+  .src .nm{font-size:12.5px;font-weight:500;color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .src .nm small{display:block;color:var(--gray-light);font-weight:400;font-size:10.5px}
+  .finding{display:flex;gap:8px;font-size:12px;color:var(--gray);padding:5px 4px;line-height:1.45}
+  .finding .tick{color:var(--green);flex-shrink:0;font-weight:700}
+  .finding b{color:var(--ink-2);font-weight:600}
+
+  /* ---- CENTER: document canvas ---- */
+  .canvas-wrap{flex:1;overflow-y:auto;padding:30px 24px 240px;position:relative}
+  .page{
+    width:660px;max-width:100%;margin:0 auto;background:#fff;border:1px solid var(--border);border-radius:6px;
+    box-shadow:var(--shadow-sm);padding:54px 64px 70px;position:relative;min-height:640px;
+    font-family:var(--serif);color:#1a1a1a;font-size:16px;line-height:1.9;
+  }
+  .page .court{text-align:center;font-weight:600;letter-spacing:.02em;font-size:16px;margin-bottom:2px}
+  .page .court small{display:block;font-weight:500;font-size:13.5px;color:#444;letter-spacing:.06em;margin-top:2px}
+  .page .caseno{text-align:right;font-size:14px;color:#333;margin:14px 0 18px}
+  .party{margin:2px 0}
+  .party .role{text-align:right;font-style:italic;color:#444;font-size:14px;margin-top:-4px}
+  .vs{text-align:center;font-weight:600;margin:8px 0;font-size:15px}
+  .rule{border:none;border-top:1px solid #d8d8d8;margin:20px 0}
+  .title{text-align:center;font-weight:600;text-decoration:underline;margin:18px 0 20px;font-size:16px}
+  .page p{margin:0 0 15px;text-align:justify}
+  .page p .lead{font-weight:600}
+  .ph{background:#fdeede;color:#9a4a00;padding:0 3px;border-radius:3px;font-style:italic}
+
+  /* selectable paragraph affordance */
+  .sel-target{position:relative;border-radius:4px;transition:background .15s}
+
+  /* ---- ghost text (autocomplete) ---- */
+  .ghost{color:#9aa6b2;font-style:normal}
+  .caret{display:inline-block;width:1.5px;height:1.05em;background:var(--blue);vertical-align:-2px;margin:0 1px;
+    animation:blink 1.05s steps(1) infinite}
+  @keyframes blink{50%{opacity:0}}
+  .tab-chip{
+    display:inline-flex;align-items:center;gap:6px;font-family:var(--sans);font-size:11px;font-weight:600;
+    color:var(--blue-700);background:var(--blue-50);border:1px solid var(--blue-200);
+    border-radius:7px;padding:3px 8px;margin-left:8px;vertical-align:middle;
+    transform:translateY(-2px);box-shadow:var(--shadow-sm)
+  }
+
+  /* ---- highlight selection ---- */
+  .selected{background:rgba(0,136,255,.16);box-shadow:0 0 0 1px var(--blue-200)}
+
+  /* ---- floating AI toolbar (rewrite) ---- */
+  .float{
+    position:absolute;z-index:30;background:#fff;border:1px solid var(--border);border-radius:13px;
+    box-shadow:var(--shadow-lg);width:430px;font-family:var(--sans);overflow:hidden;
+    animation:pop .18s ease-out;
+  }
+  @keyframes pop{from{opacity:0;transform:translateY(6px) scale(.98)}to{opacity:1;transform:none}}
+  .float .fhead{display:flex;align-items:center;gap:8px;padding:11px 13px;border-bottom:1px solid var(--border-2)}
+  .spark{width:22px;height:22px;border-radius:7px;background:linear-gradient(135deg,var(--blue),#7cc4ff);
+    color:#fff;display:flex;align-items:center;justify-content:center;font-size:12px;flex-shrink:0}
+  .float .fhead .t{font-size:12.5px;font-weight:600}
+  .float .fhead .t small{display:block;color:var(--gray-light);font-weight:500;font-size:11px}
+  .promptbox{display:flex;align-items:center;gap:8px;margin:11px 13px;padding:9px 11px;border:1.5px solid var(--blue-200);
+    border-radius:10px;background:var(--blue-50)}
+  .promptbox input{flex:1;border:none;background:transparent;font-family:var(--sans);font-size:13px;color:var(--ink);outline:none}
+  .promptbox input::placeholder{color:var(--gray-light)}
+  .promptbox .go{width:26px;height:26px;border-radius:7px;background:var(--blue);color:#fff;border:none;cursor:pointer;
+    display:flex;align-items:center;justify-content:center;font-size:13px}
+  .chips{display:flex;flex-wrap:wrap;gap:5px;padding:0 12px 9px}
+  .chip{font-size:11.5px;font-weight:500;color:var(--ink-2);background:#f4f7fa;border:1px solid var(--border);
+    border-radius:999px;padding:4px 9px;cursor:pointer;transition:.15s}
+  .chip:hover{background:var(--blue-50);border-color:var(--blue-200);color:var(--blue-700)}
+  .chip .i{color:var(--gray-light);margin-right:4px}
+
+  .preview{margin:0 13px 13px;border:1px solid var(--border-2);border-radius:10px;overflow:hidden}
+  .preview .pv-h{font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--gray-light);
+    padding:8px 12px;background:#fbfcfe;border-bottom:1px solid var(--border-2)}
+  .preview .pv-b{padding:11px 13px;font-family:var(--serif);font-size:14.5px;line-height:1.7;color:#1a1a1a}
+  .preview .add{background:var(--green-bg);color:#0f7a37;border-radius:3px;padding:0 2px}
+  .pv-actions{display:flex;gap:8px;padding:0 13px 13px}
+  .pv-actions .btn{flex:1;justify-content:center}
+
+  /* ---- insert command bar ---- */
+  .insertbar{
+    position:absolute;z-index:30;width:440px;background:#fff;border:1px solid var(--border);
+    border-radius:12px;box-shadow:var(--shadow-lg);padding:4px;font-family:var(--sans);animation:pop .18s ease-out
+  }
+  .insertbar .row{display:flex;align-items:center;gap:9px;padding:8px 10px}
+  .insertbar .row input{flex:1;border:none;outline:none;font-size:13.5px;font-family:var(--sans);background:transparent}
+  .insertbar .hintrow{border-top:1px solid var(--border-2);padding:7px 12px;font-size:11px;color:var(--gray-light);
+    display:flex;align-items:center;gap:6px}
+
+  /* ---- redline / tracked changes ---- */
+  del{color:var(--red);background:var(--red-bg);text-decoration:line-through;text-decoration-color:rgba(220,38,38,.7);padding:0 1px;border-radius:2px}
+  ins{color:#0f7a37;background:var(--green-bg);text-decoration:none;padding:0 1px;border-radius:2px}
+  .redcard{
+    position:absolute;z-index:30;width:300px;background:#fff;border:1px solid var(--border);border-radius:12px;
+    box-shadow:var(--shadow-lg);padding:13px;font-family:var(--sans);animation:pop .18s ease-out
+  }
+  .redcard .rh{display:flex;align-items:center;gap:8px;font-size:12.5px;font-weight:600;margin-bottom:8px}
+  .redcard .why{font-size:12px;color:var(--gray);line-height:1.5;background:#fbfcfe;border:1px solid var(--border-2);
+    border-radius:8px;padding:9px 10px;margin-bottom:11px}
+  .redcard .why b{color:var(--ink-2)}
+  .redcard .ra{display:flex;gap:8px}
+  .redcard .ra .btn{flex:1;justify-content:center;padding:7px}
+  .btn.accept{background:var(--green);border-color:var(--green);color:#fff}
+  .btn.reject{color:var(--red);border-color:#f3c4c4}
+
+  /* ---- generate scene ---- */
+  .genbar{
+    position:absolute;top:18px;left:50%;transform:translateX(-50%);z-index:30;width:560px;max-width:90%;
+    background:#fff;border:1px solid var(--blue-200);border-radius:13px;box-shadow:var(--shadow-lg);
+    font-family:var(--sans);overflow:hidden
+  }
+  .genbar .gtop{display:flex;align-items:center;gap:10px;padding:13px 15px}
+  .genbar .gtop .txt{flex:1}
+  .genbar .gtop .txt b{font-size:13.5px;display:block}
+  .genbar .gtop .txt small{color:var(--gray);font-size:12px}
+  .genbar .ctxchips{display:flex;flex-wrap:wrap;gap:6px;padding:0 15px 13px}
+  .ctxchip{font-size:11.5px;font-weight:500;color:var(--blue-700);background:var(--blue-50);
+    border:1px solid var(--blue-200);border-radius:999px;padding:4px 10px;display:flex;align-items:center;gap:5px}
+  .shimmer{position:relative;overflow:hidden;background:#eef2f6;border-radius:5px;height:13px;margin:0 0 11px}
+  .shimmer::after{content:"";position:absolute;inset:0;transform:translateX(-100%);
+    background:linear-gradient(90deg,transparent,rgba(255,255,255,.85),transparent);animation:sh 1.4s infinite}
+  @keyframes sh{100%{transform:translateX(100%)}}
+  .writing-cursor{display:inline-block;width:7px;height:1.05em;background:var(--blue);vertical-align:-2px;
+    border-radius:1px;animation:blink 1s steps(1) infinite}
+
+  /* ---- scene visibility ---- */
+  [data-show]{display:none}
+  body[data-scene="generate"] [data-show~="generate"],
+  body[data-scene="autocomplete"] [data-show~="autocomplete"],
+  body[data-scene="rewrite"] [data-show~="rewrite"],
+  body[data-scene="insert"] [data-show~="insert"],
+  body[data-scene="redline"] [data-show~="redline"]{display:revert}
+
+  /* hide normal paragraph text when its scene-variant is shown */
+  body[data-scene="autocomplete"] #p-auto-static{display:none}
+  body[data-scene="generate"] #page>:not([data-show]){display:none}
+  /* swap p3's plain copy for the scene-specific copy */
+  body[data-scene="rewrite"] #p3-normal,
+  body[data-scene="redline"] #p3-normal{display:none}
+
+  /* ---- caption ---- */
+  .caption{
+    position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:50;
+    background:rgba(17,24,39,.94);color:#fff;border-radius:12px;padding:12px 18px;max-width:680px;width:calc(100% - 48px);
+    box-shadow:var(--shadow-lg);display:flex;gap:13px;align-items:flex-start;backdrop-filter:blur(6px)
+  }
+  .caption .cnum{background:var(--blue);color:#fff;font-weight:700;font-size:12px;border-radius:7px;
+    min-width:24px;height:24px;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:1px}
+  .caption .ctext{font-size:13px;line-height:1.5}
+  .caption .ctext b{color:#7cc4ff}
+  .caption .cnav{display:flex;gap:6px;align-items:center;margin-left:6px}
+  .caption .cnav button{background:rgba(255,255,255,.12);border:none;color:#fff;width:28px;height:28px;border-radius:7px;
+    cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;transition:.15s}
+  .caption .cnav button:hover{background:rgba(255,255,255,.25)}
+
+  .tag{font-family:var(--sans);font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;
+    color:var(--blue-700);background:var(--blue-50);border:1px solid var(--blue-200);border-radius:6px;padding:2px 7px}
+
+  .watermark{position:fixed;top:60px;right:14px;z-index:60;font-size:10.5px;font-weight:600;color:var(--gray-light);
+    background:#fff;border:1px solid var(--border);border-radius:7px;padding:4px 9px;box-shadow:var(--shadow-sm)}
+</style>
+</head>
+<body data-scene="generate">
+
+  <div class="watermark">◆ Concept mockup — not a live product</div>
+
+  <div class="app">
+    <!-- TOP BAR -->
+    <div class="topbar">
+      <div class="brand"><span class="dot">M</span> Mike <small>aur Donna</small></div>
+      <div class="crumb">
+        <span class="sep">/</span><span>Cases</span>
+        <span class="sep">/</span><b>State v. R. Sharma</b>
+        <span class="sep">/</span><span>Drafts</span>
+      </div>
+      <span class="pill">Drafting Studio</span>
+      <div class="spacer"></div>
+      <button class="btn">⤓ Export .docx</button>
+      <button class="btn primary">✓ Save draft</button>
+      <div class="avatar">VM</div>
+    </div>
+
+    <!-- STEP RAIL -->
+    <div class="steprail" id="rail">
+      <div class="step" data-go="generate"><span class="num">1</span><span class="lbl">Generate first draft<small>AI writes it for you</small></span></div>
+      <div class="step" data-go="autocomplete"><span class="num">2</span><span class="lbl">Type-ahead<small>AI finishes your sentence</small></span></div>
+      <div class="step" data-go="rewrite"><span class="num">3</span><span class="lbl">Highlight &amp; rewrite<small>fix just one part</small></span></div>
+      <div class="step" data-go="insert"><span class="num">4</span><span class="lbl">Insert a clause<small>add at the cursor</small></span></div>
+      <div class="step" data-go="redline"><span class="num">5</span><span class="lbl">Surgical redline<small>nothing else changes</small></span></div>
+      <div class="grow"></div>
+      <div class="nav-hint">Use <kbd>←</kbd> <kbd>→</kbd> to walk through</div>
+    </div>
+
+    <!-- BODY -->
+    <div class="body">
+
+      <!-- LEFT CONTEXT -->
+      <aside class="context">
+        <div class="ctx-h">Matter</div>
+        <div class="ctx-card"><div class="k">Court</div><div class="v">Sessions Court, Pune</div></div>
+        <div class="ctx-card"><div class="k">Applicant</div><div class="v">Rajesh Sharma</div></div>
+        <div class="ctx-card"><div class="k">Stage</div><div class="v">Regular bail · u/s 439 CrPC</div></div>
+
+        <div class="ctx-h">Sources the AI uses</div>
+        <div class="src"><span class="ic">📄</span><span class="nm">FIR_No_212_2025.pdf<small>doc-1 · 4 pages</small></span></div>
+        <div class="src"><span class="ic">📄</span><span class="nm">Remand_order.pdf<small>doc-2 · 2 pages</small></span></div>
+        <div class="src"><span class="ic">📄</span><span class="nm">Medical_report.pdf<small>doc-3 · 6 pages</small></span></div>
+
+        <div class="ctx-h">Case findings <span style="font-weight:500;color:var(--gray-light);text-transform:none;letter-spacing:0">(already in your app)</span></div>
+        <div class="finding"><span class="tick">✓</span><span>Applicant in custody since <b>14 days</b></span></div>
+        <div class="finding"><span class="tick">✓</span><span>Offence <b>not punishable by death</b></span></div>
+        <div class="finding"><span class="tick">✓</span><span>No prior criminal antecedents</span></div>
+        <div class="finding"><span class="tick">✓</span><span>Chargesheet <b>not yet filed</b></span></div>
+      </aside>
+
+      <!-- CENTER CANVAS -->
+      <div class="canvas-wrap" id="canvas">
+        <div class="page" id="page">
+
+          <!-- GENERATE overlay -->
+          <div class="genbar" data-show="generate">
+            <div class="gtop">
+              <span class="spark">✦</span>
+              <div class="txt"><b>Drafting a Regular Bail Application…</b><small>Mike is writing from your case facts &amp; sources</small></div>
+              <span class="writing-cursor"></span>
+            </div>
+            <div class="ctxchips">
+              <span class="ctxchip">📄 FIR_No_212_2025</span>
+              <span class="ctxchip">✓ 14 days custody</span>
+              <span class="ctxchip">✓ No antecedents</span>
+              <span class="ctxchip">⚖ u/s 439 CrPC</span>
+            </div>
+          </div>
+          <div class="gen-skeleton" data-show="generate" style="opacity:1;margin-top:120px">
+            <div class="shimmer" style="width:70%;margin-left:auto;margin-right:auto;height:16px"></div>
+            <div class="shimmer" style="width:40%;margin-left:auto;margin-right:auto"></div>
+            <div class="shimmer" style="width:100%;margin-top:24px"></div>
+            <div class="shimmer" style="width:96%"></div>
+            <div class="shimmer" style="width:88%"></div>
+            <div class="shimmer" style="width:100%;margin-top:18px"></div>
+            <div class="shimmer" style="width:92%"></div>
+            <div class="shimmer" style="width:60%"></div>
+          </div>
+
+          <!-- THE DOCUMENT -->
+          <div class="court">IN THE COURT OF SESSIONS JUDGE
+            <small>AT PUNE</small>
+          </div>
+          <div class="caseno">Bail Application No. <span class="ph">____</span> of 2026</div>
+
+          <div class="party"><b>Rajesh Sharma</b>, S/o Mohan Sharma,<br/>aged 34 years, R/o Kothrud, Pune</div>
+          <div class="party role">…Applicant / Accused</div>
+          <div class="vs">VERSUS</div>
+          <div class="party"><b>State of Maharashtra</b><br/>(through Kothrud Police Station)</div>
+          <div class="party role">…Respondent</div>
+          <hr class="rule" />
+          <div class="title">APPLICATION FOR REGULAR BAIL UNDER SECTION 439 OF THE CODE OF CRIMINAL PROCEDURE, 1973</div>
+
+          <p><span class="lead">MOST RESPECTFULLY SHOWETH:</span></p>
+
+          <p>1. That the applicant is a law-abiding citizen and has been falsely implicated in the above-mentioned case registered vide F.I.R. No. 212 of 2025 at Kothrud Police Station.</p>
+
+          <!-- AUTOCOMPLETE scene: static version (hidden during autocomplete) -->
+          <p id="p-auto-static">2. That the applicant has been in judicial custody since the date of his arrest and the continued detention of the applicant serves no useful purpose, as the investigation is substantially complete.</p>
+
+          <!-- AUTOCOMPLETE scene: ghost-text version -->
+          <p data-show="autocomplete" id="p-auto-ghost">2. That the applicant has been in judicial custody for the past fourteen days and<span class="caret"></span><span class="ghost" id="ghosttext">&nbsp;the continued detention of the applicant serves no useful purpose, as the investigation is substantially complete and no custodial interrogation is required.</span><span class="tab-chip" id="tabchip">Tab to accept ⇥</span></p>
+
+          <!-- REWRITE + REDLINE target paragraph -->
+          <p class="sel-target" id="p3">
+            <span id="p3-normal">3. That the applicant undertakes to cooperate with the investigation and shall not tamper with the evidence or influence the witnesses in any manner whatsoever.</span>
+            <span id="p3-selected" data-show="rewrite" class="selected">3. That the applicant undertakes to cooperate with the investigation and shall not tamper with the evidence or influence the witnesses in any manner whatsoever.</span>
+            <span id="p3-redline" data-show="redline">3. That the applicant undertakes to cooperate with the investigation and shall not tamper with the evidence or influence the witnesses in any manner whatsoever. <ins>The applicant further undertakes to attend the trial on every date of hearing and to abide by all conditions imposed by this Hon'ble Court.</ins></span>
+          </p>
+
+          <!-- INSERT anchor -->
+          <p id="p4">4. That the applicant is the sole bread-earner of his family, comprising his aged parents and two minor children, who are dependent upon him.</p>
+          <p data-show="insert" id="p-inserted" style="background:var(--green-bg);border-radius:5px;padding:2px 6px">
+            <ins>5. That the offence alleged is not punishable with death or imprisonment for life, and the applicant has no prior criminal antecedents, rendering him entitled to the concession of bail.</ins>
+          </p>
+
+          <p>6. That the applicant undertakes to abide by any terms and conditions that this Hon'ble Court may deem fit to impose while granting bail.</p>
+
+          <p style="margin-top:26px"><span class="lead">PRAYER:</span> It is therefore most respectfully prayed that this Hon'ble Court may be pleased to release the applicant on regular bail in connection with F.I.R. No. 212 of 2025, and pass such other order as it may deem fit in the interest of justice.</p>
+
+          <p style="text-align:right;margin-top:30px">Place: Pune<br/>Date: <span class="ph">__/__/2026</span><br/><br/>Through Counsel<br/><span class="ph">[Advocate name]</span></p>
+
+
+          <!-- ===== FLOATING UI OVERLAYS ===== -->
+
+          <!-- REWRITE toolbar -->
+          <div class="float" data-show="rewrite" id="rewriteFloat" style="top:0;left:0">
+            <div class="fhead">
+              <span class="spark">✦</span>
+              <div class="t">Rewrite selection<small>AI changes only the highlighted text</small></div>
+            </div>
+            <div class="promptbox">
+              <span style="color:var(--blue-700)">✎</span>
+              <input value="make it firmer and add an undertaking to attend every hearing" readonly />
+              <button class="go">→</button>
+            </div>
+            <div class="chips">
+              <span class="chip"><span class="i">⚖</span>Formal</span>
+              <span class="chip"><span class="i">✂</span>Concise</span>
+              <span class="chip"><span class="i">§</span>Citation</span>
+              <span class="chip"><span class="i">↑</span>Strengthen</span>
+            </div>
+            <div class="preview">
+              <div class="pv-h">Suggested rewrite</div>
+              <div class="pv-b">3. That the applicant undertakes to fully cooperate with the investigation and not influence any witness, <span class="add">and to remain present before this Hon'ble Court on every date of hearing.</span></div>
+            </div>
+            <div class="pv-actions">
+              <button class="btn">Discard</button>
+              <button class="btn primary" style="flex:2">✓ Replace selection</button>
+            </div>
+          </div>
+
+          <!-- INSERT command bar -->
+          <div class="insertbar" data-show="insert" id="insertBar" style="top:0;left:0">
+            <div class="row">
+              <span class="spark">✦</span>
+              <input value="add a ground that the offence is not punishable by death and applicant has no antecedents" readonly />
+              <button class="btn primary">Insert ↵</button>
+            </div>
+            <div class="hintrow">↳ Inserts a new numbered paragraph here — drawn from your case findings</div>
+          </div>
+
+          <!-- REDLINE card -->
+          <div class="redcard" data-show="redline" id="redCard" style="top:0;left:0">
+            <div class="rh"><span class="spark" style="width:18px;height:18px;font-size:10px">✦</span> Tracked change · 1 of 1</div>
+            <div class="why"><b>What changed:</b> Added an undertaking to attend hearings. <b>Everything else is byte-for-byte unchanged</b> — no dates, names, or section numbers were touched.</div>
+            <div class="ra">
+              <button class="btn reject">✕ Reject</button>
+              <button class="btn accept">✓ Accept</button>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- CAPTION -->
+  <div class="caption">
+    <span class="cnum" id="capNum">1</span>
+    <div class="ctext" id="capText"></div>
+    <div class="cnav">
+      <button id="prevBtn">‹</button>
+      <button id="nextBtn">›</button>
+    </div>
+  </div>
+
+<script>
+  const scenes = ["generate","autocomplete","rewrite","insert","redline"];
+  const captions = {
+    generate: `<span class="tag">Step 1 · You already have this</span> &nbsp;Mike writes the <b>entire first draft</b> from your case facts and uploaded documents — a real bail application, formatted for an Indian court. This half is <b>already built</b> in your app.`,
+    autocomplete: `<span class="tag">Step 2 · The missing piece</b></span> &nbsp;As you type, the AI suggests the rest of your sentence in grey — like Gmail, but trained on <b>legal prose</b>. Press <b>Tab</b> to accept, or just keep typing to ignore it.`,
+    rewrite: `<span class="tag">Step 3 · The missing piece</span> &nbsp;Highlight any passage, tell the AI what you want ("make it firmer"), and it rewrites <b>only that passage</b>. Pick a quick action or type your own instruction. You approve before anything changes.`,
+    insert: `<span class="tag">Step 4 · The missing piece</span> &nbsp;Put your cursor anywhere and ask for a new clause. The AI drafts it <b>using your case findings</b> (here: "no antecedents", "not punishable by death") and drops it in as a new paragraph.`,
+    redline: `<span class="tag">Step 5 · The safety rule</span> &nbsp;Every AI edit shows as a <b>redline you accept or reject</b> — and it changes <b>only the words it means to</b>. A date, a name, or a section number is never silently altered. This is how drafting stays trustworthy.`
+  };
+
+  // position overlays relative to their anchor paragraphs
+  function place(){
+    const page = document.getElementById('page');
+    const pr = page.getBoundingClientRect();
+    const anchor = (el)=>el.getBoundingClientRect();
+
+    // rewrite float -> below p3 selection
+    const p3 = document.getElementById('p3');
+    const rf = document.getElementById('rewriteFloat');
+    if(rf){ const r = anchor(p3); rf.style.top = (r.bottom - pr.top + 10) + 'px'; rf.style.left = (r.left - pr.left) + 'px'; }
+
+    // insert bar -> below p4
+    const p4 = document.getElementById('p4');
+    const ib = document.getElementById('insertBar');
+    if(ib){ const r = anchor(p4); ib.style.top = (r.bottom - pr.top + 6) + 'px'; ib.style.left = (r.left - pr.left) + 'px'; }
+
+    // red card -> right of p3 redline
+    const rc = document.getElementById('redCard');
+    if(rc){ const r = anchor(p3); rc.style.top = (r.top - pr.top - 6) + 'px'; rc.style.left = Math.min(r.right - pr.left + 18, pr.width - 12) + 'px'; }
+  }
+
+  let idx = 0;
+  function setScene(name){
+    idx = scenes.indexOf(name);
+    document.body.dataset.scene = name;
+    document.querySelectorAll('.step').forEach(s=>s.classList.toggle('active', s.dataset.go===name));
+    document.getElementById('capNum').textContent = idx+1;
+    document.getElementById('capText').innerHTML = captions[name];
+    // reset autocomplete chip
+    const gt = document.getElementById('ghosttext'); const tc = document.getElementById('tabchip');
+    if(gt){ gt.style.display=''; gt.style.color='#9aa6b2'; }
+    if(tc){ tc.textContent='Tab to accept ⇥'; tc.style.background='var(--blue-50)'; }
+    // bring the relevant part of the document into view for this scene
+    const scrollMap={generate:'#page',autocomplete:'#p-auto-ghost',rewrite:'#p3',insert:'#p4',redline:'#p3'};
+    const blockMap ={generate:'start',autocomplete:'center',rewrite:'start',insert:'center',redline:'center'};
+    const tgt=document.querySelector(scrollMap[name]);
+    if(tgt) tgt.scrollIntoView({block:blockMap[name],behavior:'instant'});
+    requestAnimationFrame(place);
+    setTimeout(place,80);
+  }
+
+  document.querySelectorAll('.step').forEach(s=> s.addEventListener('click',()=>setScene(s.dataset.go)));
+  document.getElementById('nextBtn').onclick = ()=> setScene(scenes[Math.min(idx+1,scenes.length-1)]);
+  document.getElementById('prevBtn').onclick = ()=> setScene(scenes[Math.max(idx-1,0)]);
+  window.addEventListener('keydown',(e)=>{
+    if(e.key==='ArrowRight') setScene(scenes[Math.min(idx+1,scenes.length-1)]);
+    if(e.key==='ArrowLeft')  setScene(scenes[Math.max(idx-1,0)]);
+    if(e.key==='Tab' && document.body.dataset.scene==='autocomplete'){
+      e.preventDefault();
+      const gt=document.getElementById('ghosttext'); const tc=document.getElementById('tabchip');
+      gt.style.color='#1a1a1a'; tc.textContent='✓ Accepted'; tc.style.background='var(--green-bg)'; tc.style.color='#0f7a37'; tc.style.borderColor='#bfe3c9';
+    }
+  });
+  window.addEventListener('resize', place);
+  window.addEventListener('load', ()=> setScene('generate'));
+  document.getElementById('canvas').addEventListener('scroll', place);
+</script>
+</body>
+</html>

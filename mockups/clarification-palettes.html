@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Mike aur Donna — Inline Clarification · de-blued palettes</title>
+<!--
+  Concept B (inline "answer card"), pushed: depth, a slow-turning aperture
+  motif, motion. Swatched in 4 non-blue palettes applied across the whole
+  screen. Structure/tokens still follow the system (Inter + EB Garamond,
+  10-14px radius, hairline borders) — only the ACCENT changes.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=EB+Garamond:ital,wght@0,400;0,500;0,600;1,400&display=swap" rel="stylesheet" />
+<style>
+  :root{
+    --acc:#b07c2b; --acc-strong:#8f6320; --acc-tint:rgba(176,124,43,.10); --acc-tint2:rgba(176,124,43,.055);
+    --acc-line:rgba(176,124,43,.34); --acc-ring:rgba(176,124,43,.16);
+    --paper:#f7f5f0; --card:#ffffff; --ink:#1c1917; --ink-2:#3b352f; --gray:#7a7165; --gray-light:#a59b8c;
+    --border:#e9e4da; --border-2:#f1ede6; --green:#16a34a;
+    --radius:10px;
+    --shadow-sm:0 1px 3px rgba(28,25,23,.06),0 1px 2px rgba(28,25,23,.04);
+    --shadow:0 10px 30px rgba(28,25,23,.10); --shadow-lg:0 20px 50px rgba(28,25,23,.16);
+    --sans:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+    --serif:'EB Garamond','Times New Roman',Georgia,serif;
+  }
+  body[data-p="emerald"]{
+    --acc:#0f766e; --acc-strong:#0b574f; --acc-tint:rgba(15,118,110,.10); --acc-tint2:rgba(15,118,110,.05);
+    --acc-line:rgba(15,118,110,.32); --acc-ring:rgba(15,118,110,.15);
+    --paper:#f5f8f7; --ink:#0f1a17; --ink-2:#27322e; --gray:#5b6b66; --gray-light:#94a39e; --border:#e1eae7; --border-2:#eef4f2;
+  }
+  body[data-p="mono"]{
+    --acc:#262d38; --acc-strong:#0f172a; --acc-tint:rgba(38,45,56,.07); --acc-tint2:rgba(38,45,56,.04);
+    --acc-line:rgba(38,45,56,.26); --acc-ring:rgba(38,45,56,.14);
+    --paper:#f6f5f3; --ink:#14171c; --ink-2:#374151; --gray:#6b7280; --gray-light:#9aa1ab; --border:#e6e4df; --border-2:#f0eeea;
+  }
+  body[data-p="oxblood"]{
+    --acc:#8c2f39; --acc-strong:#6f242c; --acc-tint:rgba(140,47,57,.09); --acc-tint2:rgba(140,47,57,.05);
+    --acc-line:rgba(140,47,57,.32); --acc-ring:rgba(140,47,57,.15);
+    --paper:#f8f4f3; --ink:#1c1414; --ink-2:#382726; --gray:#7a6a68; --gray-light:#a8938f; --border:#ece2e0; --border-2:#f4eceb;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{font-family:var(--sans);background:var(--paper);color:var(--ink);-webkit-font-smoothing:antialiased;font-size:14px;line-height:1.5;transition:background .25s}
+  .lic{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}
+  .mm{display:block;flex-shrink:0}
+  .app{display:flex;flex-direction:column;height:100vh;overflow:hidden}
+
+  .topbar{display:flex;align-items:center;gap:14px;height:54px;padding:0 18px;background:var(--card);border-bottom:1px solid var(--border);flex-shrink:0}
+  .brand{display:flex;align-items:center;gap:8px}
+  .brand .word{font-family:var(--serif);font-weight:500;font-size:19px;color:var(--ink);letter-spacing:.01em}
+  .crumb{display:flex;align-items:center;gap:8px;color:var(--gray);font-size:13px;padding-left:6px;border-left:1px solid var(--border)}
+  .crumb .sep{color:var(--gray-light)} .crumb b{color:var(--ink-2);font-weight:600}
+  .pill{font-size:11px;font-weight:600;padding:3px 9px;border-radius:999px;background:var(--acc-tint);color:var(--acc-strong)}
+  .spacer{flex:1}
+  .avatar{width:30px;height:30px;border-radius:50%;background:var(--acc-tint);display:flex;align-items:center;justify-content:center;font-weight:600;color:var(--acc-strong);font-size:12px}
+
+  .switch{display:flex;align-items:center;gap:10px;padding:9px 18px;background:var(--card);border-bottom:1px solid var(--border);flex-shrink:0}
+  .switch .lab{font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--gray-light)}
+  .seg{display:inline-flex;background:var(--paper);border:1px solid var(--border);border-radius:10px;padding:3px;gap:2px}
+  .seg button{font-family:var(--sans);font-size:12.5px;font-weight:600;color:var(--gray);background:transparent;border:none;padding:6px 12px;border-radius:7px;cursor:pointer;transition:.15s;display:flex;align-items:center;gap:7px}
+  .seg button .sw{width:11px;height:11px;border-radius:50%}
+  .seg button.on{background:var(--card);color:var(--ink);box-shadow:var(--shadow-sm)}
+  .switch .hint{margin-left:auto;font-size:11.5px;color:var(--gray-light)}
+
+  .body{display:flex;flex:1;overflow:hidden}
+  .context{width:248px;flex-shrink:0;background:var(--card);border-right:1px solid var(--border);padding:16px 14px;overflow-y:auto}
+  .ctx-h{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--gray-light);margin:18px 4px 8px}
+  .ctx-h:first-child{margin-top:0}
+  .ctx-card{background:var(--paper);border:1px solid var(--border-2);border-radius:9px;padding:10px 11px;margin-bottom:7px}
+  .ctx-card .k{font-size:10.5px;color:var(--gray-light);font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+  .ctx-card .v{font-size:13px;color:var(--ink-2);font-weight:500;margin-top:1px}
+  .src{display:flex;align-items:center;gap:9px;padding:7px 9px;border-radius:8px}
+  .src .ic{width:26px;height:26px;border-radius:7px;background:var(--acc-tint);color:var(--acc-strong);display:flex;align-items:center;justify-content:center;flex-shrink:0}
+  .src .ic .lic{width:14px;height:14px}
+  .src .nm{font-size:12.5px;font-weight:500;color:var(--ink-2)}
+  .src .nm small{display:block;color:var(--gray-light);font-weight:400;font-size:10.5px}
+
+  .chat{flex:1;display:flex;flex-direction:column;overflow:hidden}
+  .thread{flex:1;overflow-y:auto;padding:28px 0 12px}
+  .thread-in{width:712px;max-width:calc(100% - 48px);margin:0 auto}
+  .msg{display:flex;gap:13px;margin-bottom:24px}
+  .ava-mike{width:30px;height:30px;border-radius:9px;background:#0f172a;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+  .ava-mike .mm{width:19px;height:19px}
+  .ava-user{width:30px;height:30px;border-radius:50%;background:var(--acc-tint);color:var(--acc-strong);font-weight:600;font-size:12px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+  .who{font-size:12px;font-weight:600;color:var(--gray);margin-bottom:4px}
+  .col{flex:1;min-width:0}
+  .bubble.user{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:11px 14px;box-shadow:var(--shadow-sm);font-size:14px;color:var(--ink-2)}
+  .ask{font-family:var(--serif);font-size:17px;line-height:1.6;color:var(--ink)}
+
+  /* ===== pushed answer card ===== */
+  .card{position:relative;background:
+      radial-gradient(120% 80% at 100% 0%, var(--acc-tint2), transparent 60%), var(--card);
+    border:1px solid var(--acc-line);border-radius:16px;margin-top:14px;overflow:hidden;
+    box-shadow:var(--shadow);animation:rise .4s cubic-bezier(.2,.7,.2,1) both}
+  @keyframes rise{from{opacity:0;transform:translateY(10px) scale(.99)}to{opacity:1;transform:none}}
+  .card .rail{position:absolute;left:0;top:0;bottom:0;width:3px;background:linear-gradient(var(--acc),var(--acc-strong))}
+  .card .wm{position:absolute;right:-26px;top:-22px;width:130px;height:130px;opacity:.05;pointer-events:none;
+    animation:spin 90s linear infinite;transform-origin:50% 50%}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .pad{padding:16px 18px 15px 20px;position:relative}
+  .chead{display:flex;align-items:center;gap:10px;margin-bottom:15px}
+  .chead .ic{width:26px;height:26px;border-radius:8px;background:#0f172a;display:flex;align-items:center;justify-content:center}
+  .chead .ic .mm{width:16px;height:16px}
+  .chead b{font-size:13.5px;font-weight:600;color:var(--ink)}
+  .chead .count{margin-left:auto;font-size:11px;font-weight:600;color:var(--acc-strong);background:var(--acc-tint);border:1px solid var(--acc-line);padding:3px 10px;border-radius:999px}
+  .qb{margin-bottom:16px}
+  .qtop{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+  .catpill{font-size:10px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;padding:3px 8px;border-radius:6px;background:var(--acc-tint);color:var(--acc-strong)}
+  .qtop .hint{font-size:11px;color:var(--gray-light)}
+  .opts{display:flex;flex-direction:column;gap:8px}
+  .opt{display:flex;align-items:flex-start;gap:11px;padding:11px 13px;border:1px solid var(--border);border-radius:11px;cursor:pointer;transition:.14s;background:var(--card)}
+  .opt:hover{border-color:var(--acc-line);transform:translateY(-1px);box-shadow:var(--shadow-sm)}
+  .opt.on{border-color:var(--acc);background:var(--acc-tint2);box-shadow:0 0 0 3px var(--acc-ring)}
+  .ctrl{width:19px;height:19px;border:1.5px solid var(--gray-light);flex-shrink:0;margin-top:1px;display:flex;align-items:center;justify-content:center;transition:.14s}
+  .ctrl.r{border-radius:50%} .ctrl.s{border-radius:6px}
+  .opt.on .ctrl{border-color:var(--acc);background:var(--acc)}
+  .ctrl .pip{width:7px;height:7px;border-radius:50%;background:#fff;transform:scale(0);transition:.14s}
+  .ctrl .tk{width:12px;height:12px;color:#fff;opacity:0;transform:scale(.6);transition:.14s}
+  .opt.on .ctrl .pip{transform:scale(1)} .opt.on .ctrl .tk{opacity:1;transform:scale(1)}
+  .olbl{font-size:13.5px;font-weight:600;color:var(--ink-2)}
+  .odesc{font-size:12px;color:var(--gray);margin-top:2px;line-height:1.45}
+  .minirow{display:flex;flex-wrap:wrap;gap:7px;margin-top:10px}
+  .mini{font-size:12px;font-weight:500;color:var(--ink-2);background:var(--card);border:1px solid var(--border);border-radius:999px;padding:6px 12px;cursor:pointer;transition:.13s}
+  .mini:hover{border-color:var(--acc-line);transform:translateY(-1px)}
+  .mini.on{background:var(--acc-tint);border-color:var(--acc);color:var(--acc-strong)}
+  .mini.ghost{border-style:dashed;color:var(--acc-strong);border-color:var(--acc-line)}
+  .cfoot{display:flex;align-items:center;gap:10px;margin-top:16px;padding-top:14px;border-top:1px solid var(--border-2)}
+  .cfoot .spacer{flex:1}
+  .send{display:inline-flex;align-items:center;gap:8px;font-family:var(--sans);font-size:13px;font-weight:600;color:#fff;
+    background:linear-gradient(var(--acc),var(--acc-strong));border:1px solid var(--acc-strong);border-radius:10px;padding:9px 16px;cursor:pointer;transition:.15s;box-shadow:0 2px 8px var(--acc-ring)}
+  .send:hover{filter:brightness(1.06);transform:translateY(-1px)}
+  .skip{font-family:var(--sans);font-size:13px;font-weight:600;color:var(--gray);background:transparent;border:none;cursor:pointer;padding:8px 6px}
+  .skip:hover{color:var(--acc-strong)}
+
+  .composer{flex-shrink:0;padding:12px 0 18px;background:linear-gradient(transparent,var(--paper) 30%)}
+  .composer-in{width:712px;max-width:calc(100% - 48px);margin:0 auto;display:flex;align-items:center;gap:9px;background:var(--card);border:1px solid var(--border);border-radius:13px;padding:9px 11px;box-shadow:var(--shadow-sm)}
+  .composer-in:focus-within{border-color:var(--acc-line);box-shadow:0 0 0 3px var(--acc-ring)}
+  .composer-in .pen{color:var(--gray-light);display:flex}
+  .composer-in .ph{flex:1;color:var(--gray-light);font-size:13.5px}
+  .composer-in .go{width:30px;height:30px;border-radius:9px;background:var(--acc);color:#fff;border:none;display:flex;align-items:center;justify-content:center;cursor:pointer}
+  .composer-in .go:hover{background:var(--acc-strong)}
+  .watermark{position:fixed;top:104px;right:14px;z-index:60;font-size:10.5px;font-weight:600;color:var(--gray-light);background:var(--card);border:1px solid var(--border);border-radius:7px;padding:4px 9px;box-shadow:var(--shadow-sm)}
+</style>
+</head>
+<body data-p="gold">
+
+<svg class="mm" style="position:absolute;width:0;height:0" aria-hidden="true">
+  <symbol id="mikeIcon" viewBox="100 100 300 300">
+    <defs>
+      <clipPath id="mi-topClip"><rect x="30" y="-25" width="130" height="23" /></clipPath>
+      <path id="mi-blade" d="M 40,0 A 4,4 0 0 1 43,-3 Q 95,-22 147,-3 A 4,4 0 0 1 150,0 A 4,4 0 0 1 147,3 Q 95,22 43,3 A 4,4 0 0 1 40,0 Z" />
+      <linearGradient id="mi-specular" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#fff" stop-opacity="0.85"/><stop offset="25%" stop-color="#fff" stop-opacity="0.4"/><stop offset="50%" stop-color="#fff" stop-opacity="0"/></linearGradient>
+      <linearGradient id="mi-glassBorder" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#fff" stop-opacity="0.8"/><stop offset="50%" stop-color="#69c" stop-opacity="0.5"/><stop offset="100%" stop-color="#fff" stop-opacity="0.65"/></linearGradient>
+      <filter id="mi-shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="1.5" stdDeviation="3" flood-color="#111827" flood-opacity="0.35"/></filter>
+      <linearGradient id="mi-glassFill" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#374151" stop-opacity="0.9"/><stop offset="30%" stop-color="#4b5563" stop-opacity="0.8"/><stop offset="70%" stop-color="#1f2937" stop-opacity="0.9"/><stop offset="100%" stop-color="#374151" stop-opacity="0.9"/></linearGradient>
+      <linearGradient id="mi-prism" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#111827" stop-opacity="0.95"/><stop offset="40%" stop-color="#0f172a" stop-opacity="0.95"/><stop offset="80%" stop-color="#111827" stop-opacity="0.95"/></linearGradient>
+    </defs>
+    <g transform="translate(250,250)">
+      <g transform="rotate(0)" filter="url(#mi-shadow)"><use href="#mi-blade" fill="url(#mi-glassFill)"/><use href="#mi-blade" fill="url(#mi-prism)" opacity="0.3"/><use href="#mi-blade" fill="url(#mi-specular)" clip-path="url(#mi-topClip)"/><use href="#mi-blade" fill="none" stroke="url(#mi-glassBorder)" stroke-width="1"/></g>
+      <g transform="rotate(30)" filter="url(#mi-shadow)"><use href="#mi-blade" fill="url(#mi-glassFill)"/><use href="#mi-blade" fill="url(#mi-prism)" opacity="0.3"/><use href="#mi-blade" fill="url(#mi-specular)" clip-path="url(#mi-topClip)"/><use href="#mi-blade" fill="none" stroke="url(#mi-glassBorder)" stroke-width="1"/></g>
+      <g transform="rotate(60)" filter="url(#mi-shadow)"><use href="#mi-blade" fill="url(#mi-glassFill)"/><use href="#mi-blade" fill="url(#mi-prism)" opacity="0.3"/><use href="#mi-blade" fill="url(#mi-specular)" clip-path="url(#mi-topClip)"/><use href="#mi-blade" fill="none" stroke="url(#mi-glassBorder)" stroke-width="1"/></g>
+      <g transform="rotate(90)" filter="url(#mi-shadow)"><use href="#mi-blade" fill="url(#mi-glassFill)"/><use href="#mi-blade" fill="url(#mi-prism)" opacity="0.3"/><use href="#mi-blade" fill="url(#mi-specular)" clip-path="url(#mi-topClip)"/><use href="#mi-blade" fill="none" stroke="url(#mi-glassBorder)" stroke-width="1"/></g>
+      <g transform="rotate(120)" filter="url(#mi-shadow)"><use href="#mi-blade" fill="url(#mi-glassFill)"/><use href="#mi-blade" fill="url(#mi-prism)" opacity="0.3"/><use href="#mi-blade" fill="url(#mi-specular)" clip-path="url(#mi-topClip)"/><use href="#mi-blade" fill="none" stroke="url(#mi-glassBorder)" stroke-width="1"/></g>
+      <g transform="rotate(150)" filter="url(#mi-shadow)"><use href="#mi-blade" fill="url(#mi-glassFill)"/><use href="#mi-blade" fill="url(#mi-prism)" opacity="0.3"/><use href="#mi-blade" fill="url(#mi-specular)" clip-path="url(#mi-topClip)"/><use href="#mi-blade" fill="none" stroke="url(#mi-glassBorder)" stroke-width="1"/></g>
+      <g transform="rotate(180)" filter="url(#mi-shadow)"><use href="#mi-blade" fill="url(#mi-glassFill)"/><use href="#mi-blade" fill="url(#mi-prism)" opacity="0.3"/><use href="#mi-blade" fill="url(#mi-specular)" clip-path="url(#mi-topClip)"/><use href="#mi-blade" fill="none" stroke="url(#mi-glassBorder)" stroke-width="1"/></g>
+      <g transform="rotate(210)" filter="url(#mi-shadow)"><use href="#mi-blade" fill="url(#mi-glassFill)"/><use href="#mi-blade" fill="url(#mi-prism)" opacity="0.3"/><use href="#mi-blade" fill="url(#mi-specular)" clip-path="url(#mi-topClip)"/><use href="#mi-blade" fill="none" stroke="url(#mi-glassBorder)" stroke-width="1"/></g>
+      <g transform="rotate(240)" filter="url(#mi-shadow)"><use href="#mi-blade" fill="url(#mi-glassFill)"/><use href="#mi-blade" fill="url(#mi-prism)" opacity="0.3"/><use href="#mi-blade" fill="url(#mi-specular)" clip-path="url(#mi-topClip)"/><use href="#mi-blade" fill="none" stroke="url(#mi-glassBorder)" stroke-width="1"/></g>
+      <g transform="rotate(270)" filter="url(#mi-shadow)"><use href="#mi-blade" fill="url(#mi-glassFill)"/><use href="#mi-blade" fill="url(#mi-prism)" opacity="0.3"/><use href="#mi-blade" fill="url(#mi-specular)" clip-path="url(#mi-topClip)"/><use href="#mi-blade" fill="none" stroke="url(#mi-glassBorder)" stroke-width="1"/></g>
+      <g transform="rotate(300)" filter="url(#mi-shadow)"><use href="#mi-blade" fill="url(#mi-glassFill)"/><use href="#mi-blade" fill="url(#mi-prism)" opacity="0.3"/><use href="#mi-blade" fill="url(#mi-specular)" clip-path="url(#mi-topClip)"/><use href="#mi-blade" fill="none" stroke="url(#mi-glassBorder)" stroke-width="1"/></g>
+      <g transform="rotate(330)" filter="url(#mi-shadow)"><use href="#mi-blade" fill="url(#mi-glassFill)"/><use href="#mi-blade" fill="url(#mi-prism)" opacity="0.3"/><use href="#mi-blade" fill="url(#mi-specular)" clip-path="url(#mi-topClip)"/><use href="#mi-blade" fill="none" stroke="url(#mi-glassBorder)" stroke-width="1"/></g>
+    </g>
+  </symbol>
+  <g id="ic-check"><polyline points="20 6 9 17 4 12"/></g>
+  <g id="ic-arrow"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></g>
+  <g id="ic-file"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></g>
+  <g id="ic-pen"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z"/></g>
+</svg>
+
+<div class="watermark">◆ Concept mockup — accent only changes</div>
+
+<div class="app">
+  <div class="topbar">
+    <div class="brand"><svg class="mm" style="width:26px;height:26px"><use href="#mikeIcon"/></svg><span class="word">Mike aur Donna</span></div>
+    <div class="crumb"><span>Cases</span><span class="sep">/</span><b>State v. R. Sharma</b><span class="sep">/</span><span>Assistant</span></div>
+    <span class="pill">Case chat</span>
+    <div class="spacer"></div>
+    <div class="avatar">VM</div>
+  </div>
+
+  <div class="switch">
+    <span class="lab">Palette</span>
+    <div class="seg" id="seg">
+      <button data-go="gold" class="on"><span class="sw" style="background:#b07c2b"></span>Graphite &amp; gold</button>
+      <button data-go="emerald"><span class="sw" style="background:#0f766e"></span>Ink &amp; emerald</button>
+      <button data-go="mono"><span class="sw" style="background:#262d38"></span>Monochrome ink</button>
+      <button data-go="oxblood"><span class="sw" style="background:#8c2f39"></span>Oxblood</button>
+    </div>
+    <span class="hint">No blue. Same structure — only the accent changes. Click options to feel it.</span>
+  </div>
+
+  <div class="body">
+    <aside class="context">
+      <div class="ctx-h">Matter</div>
+      <div class="ctx-card"><div class="k">Court</div><div class="v">Sessions Court, Pune</div></div>
+      <div class="ctx-card"><div class="k">Stage</div><div class="v">Regular bail · u/s 439 CrPC</div></div>
+      <div class="ctx-h">Sources</div>
+      <div class="src"><span class="ic"><svg class="lic" viewBox="0 0 24 24"><use href="#ic-file"/></svg></span><span class="nm">FIR_No_212_2025.pdf<small>doc-1 · 4 pages</small></span></div>
+      <div class="src"><span class="ic"><svg class="lic" viewBox="0 0 24 24"><use href="#ic-file"/></svg></span><span class="nm">Remand_order.pdf<small>doc-2 · 2 pages</small></span></div>
+    </aside>
+
+    <div class="chat">
+      <div class="thread">
+        <div class="thread-in">
+          <div class="msg"><div class="ava-user">VM</div><div class="col"><div class="who">You</div><div class="bubble user">Draft a regular bail application for Rajesh Sharma.</div></div></div>
+
+          <div class="msg">
+            <div class="ava-mike"><svg class="mm"><use href="#mikeIcon"/></svg></div>
+            <div class="col">
+              <div class="who">Mike</div>
+              <div class="ask">Happy to. Two quick things first, so the petition is filed in the right place and asks for the right relief.</div>
+
+              <div class="card">
+                <span class="rail"></span>
+                <svg class="wm" viewBox="100 100 300 300"><use href="#mikeIcon"/></svg>
+                <div class="pad">
+                  <div class="chead"><span class="ic"><svg class="mm"><use href="#mikeIcon"/></svg></span><b>A quick check before I draft</b><span class="count">2 questions</span></div>
+
+                  <div class="qb" data-single>
+                    <div class="qtop"><span class="catpill">Jurisdiction</span><span class="hint">pick one</span></div>
+                    <div class="opts">
+                      <label class="opt on"><span class="ctrl r"><span class="pip"></span></span><span><span class="olbl">Sessions Court</span><span class="odesc">Regular bail u/s 439 CrPC — trial court.</span></span></label>
+                      <label class="opt"><span class="ctrl r"><span class="pip"></span></span><span><span class="olbl">High Court</span><span class="odesc">Writ or appellate jurisdiction — Art. 226 / 227.</span></span></label>
+                      <label class="opt"><span class="ctrl r"><span class="pip"></span></span><span><span class="olbl">Tribunal</span><span class="odesc">AFT, ITAT, consumer forum, MACT.</span></span></label>
+                    </div>
+                  </div>
+
+                  <div class="qb" data-multi>
+                    <div class="qtop"><span class="catpill">Relief sought</span><span class="hint">select all that apply</span></div>
+                    <div class="opts">
+                      <label class="opt on"><span class="ctrl s"><svg class="lic tk" viewBox="0 0 24 24"><use href="#ic-check"/></svg></span><span><span class="olbl">Release on bail</span><span class="odesc">Primary prayer — enlarge the applicant on bail.</span></span></label>
+                      <label class="opt"><span class="ctrl s"><svg class="lic tk" viewBox="0 0 24 24"><use href="#ic-check"/></svg></span><span><span class="olbl">Interim relief</span><span class="odesc">Interim bail pending the final hearing.</span></span></label>
+                    </div>
+                    <div class="minirow">
+                      <span class="mini on">Own surety</span><span class="mini">Personal bond</span><span class="mini">Passport surrender</span><span class="mini ghost">+ Other</span>
+                    </div>
+                  </div>
+
+                  <div class="cfoot"><button class="send">Send 2 answers <svg class="lic" viewBox="0 0 24 24"><use href="#ic-arrow"/></svg></button><span class="spacer"></span><button class="skip">Skip — draft now</button></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="composer">
+        <div class="composer-in">
+          <span class="pen"><svg class="lic" viewBox="0 0 24 24"><use href="#ic-pen"/></svg></span>
+          <span class="ph">Type your answer, or pick above…</span>
+          <button class="go"><svg class="lic" viewBox="0 0 24 24"><use href="#ic-arrow"/></svg></button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  const seg = document.getElementById('seg');
+  seg.addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    [...seg.children].forEach(x => x.classList.toggle('on', x === b));
+    document.body.dataset.p = b.dataset.go;
+  });
+  document.addEventListener('click', (e) => {
+    const opt = e.target.closest('.opt,.mini');
+    if (!opt || opt.classList.contains('ghost')) return;
+    const grp = opt.closest('[data-single],[data-multi]');
+    if (!grp) return;
+    if (grp.hasAttribute('data-single')) {
+      grp.querySelectorAll('.opt,.mini').forEach(x => x.classList.remove('on'));
+      opt.classList.add('on');
+    } else { opt.classList.toggle('on'); }
+  });
+</script>
+
+</body>
+</html>

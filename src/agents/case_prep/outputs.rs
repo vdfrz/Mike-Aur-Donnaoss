@@ -6,8 +6,11 @@
 use anyhow::{anyhow, Result};
 use sqlx::SqlitePool;
 
-use crate::llm::{self, types::{LocalConfig, Message, StreamParams}};
 use crate::pdf::docx_writer::markdown_to_docx;
+
+/// Config for the single-shot output-generation calls. Shared with corpus
+/// tagging via `crate::llm::oneshot`.
+pub use crate::llm::oneshot::OneshotConfig as OutputConfig;
 
 const NO_PROCESS_TEXT: &str = "\
 Your output goes directly to a client as-is. Every word is the deliverable. \
@@ -15,39 +18,81 @@ Do NOT include any preamble, commentary, meta-text, or sign-off. \
 Do NOT say things like 'Here is your document' or 'I have prepared'. \
 Output ONLY the requested Markdown content, starting with the first heading.";
 
-pub struct OutputConfig {
-    pub model: String,
-    pub local_config: Option<LocalConfig>,
-    pub claude_api_key: Option<String>,
-    pub gemini_api_key: Option<String>,
-    pub gemini_region: Option<String>,
-}
-
 struct GeneratedOutput {
     content_md: String,
     docx_bytes: Vec<u8>,
 }
 
 async fn call_llm(config: &OutputConfig, system: &str, user_msg: &str) -> Result<String> {
-    let params = StreamParams {
-        model: config.model.clone(),
-        system_prompt: system.to_string(),
-        system_volatile: String::new(),
-        messages: vec![Message::user(user_msg.to_string())],
-        tools: vec![],
-        max_iterations: 1,
-        enable_thinking: false,
-        local_config: config.local_config.clone(),
-        claude_api_key: config.claude_api_key.clone(),
-        gemini_api_key: config.gemini_api_key.clone(),
-        gemini_region: config.gemini_region.clone(),
+    crate::llm::oneshot::complete(config, system, user_msg).await
+}
+
+/// Score how strongly each candidate case actually supports a point of law.
+/// Returns one (confidence 0-100, reason) per case, in input order. Never fails:
+/// on any LLM/parse error it returns zeros so precedent resolution still succeeds.
+pub async fn score_precedent_cases(
+    config: &OutputConfig,
+    point_of_law: &str,
+    cases: &[serde_json::Value],
+) -> Vec<(i64, String)> {
+    if cases.is_empty() {
+        return Vec::new();
+    }
+
+    let mut list = String::new();
+    for (i, c) in cases.iter().enumerate() {
+        let title = c.get("title").and_then(|v| v.as_str()).unwrap_or("(untitled)");
+        let court = c.get("court").and_then(|v| v.as_str()).unwrap_or("");
+        let text = c
+            .get("relevant_paragraphs")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .or_else(|| c.get("snippet").and_then(|v| v.as_str()))
+            .unwrap_or("");
+        let snippet: String = text.chars().take(600).collect();
+        list.push_str(&format!("[{i}] {title} ({court})\n{snippet}\n\n"));
+    }
+
+    let system = "You are a skeptical legal-research verifier. For each candidate case, \
+judge how strongly it ACTUALLY supports the given point of law — a keyword match is NOT support. \
+Return ONLY a JSON array (no prose, no code fences), one object per case in the same order: \
+[{\"index\":0,\"confidence\":85,\"reason\":\"one short sentence\"}]. confidence is an integer 0-100.";
+    let user = format!("POINT OF LAW:\n{point_of_law}\n\nCANDIDATE CASES:\n{list}");
+
+    let raw = match call_llm(config, system, &user).await {
+        Ok(r) => r,
+        Err(_) => return cases.iter().map(|_| (0i64, String::new())).collect(),
     };
 
-    match llm::provider_for_model(&config.model) {
-        llm::Provider::Claude => llm::claude::complete(params).await,
-        llm::Provider::OpenAI => llm::local::complete(params).await,
-        llm::Provider::Gemini => llm::gemini::complete(params).await,
+    let cleaned = raw
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    let parsed: serde_json::Value =
+        serde_json::from_str(cleaned).unwrap_or(serde_json::Value::Null);
+
+    let mut out: Vec<(i64, String)> = vec![(0i64, String::new()); cases.len()];
+    if let Some(arr) = parsed.as_array() {
+        for item in arr {
+            let idx = item.get("index").and_then(|v| v.as_i64()).unwrap_or(-1);
+            if idx >= 0 && (idx as usize) < out.len() {
+                let conf = item
+                    .get("confidence")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0)
+                    .clamp(0, 100);
+                let reason = item
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                out[idx as usize] = (conf, reason);
+            }
+        }
     }
+    out
 }
 
 /// Strip markdown code fences and preamble that some models wrap around output.
@@ -92,6 +137,18 @@ fn format_findings_block(findings_json: &[serde_json::Value]) -> String {
         let ftype = f.get("finding_type").and_then(|v| v.as_str()).unwrap_or("");
         let content = f.get("content_json").and_then(|v| v.as_str()).unwrap_or("{}");
         out.push_str(&format!("\n--- Agent: {agent} | Type: {ftype} ---\n{content}\n"));
+    }
+    out
+}
+
+fn format_documents_block(documents: &[serde_json::Value]) -> String {
+    let mut out = String::new();
+    for (i, d) in documents.iter().enumerate() {
+        let filename = d.get("filename").and_then(|v| v.as_str()).unwrap_or("(unnamed)");
+        let dtype = d.get("document_type").and_then(|v| v.as_str()).unwrap_or("");
+        let pages = d.get("page_count").and_then(|v| v.as_i64());
+        let pages_str = pages.map(|p| format!(" | {p} page(s)")).unwrap_or_default();
+        out.push_str(&format!("{}. {filename} [{dtype}]{pages_str}\n", i + 1));
     }
     out
 }
@@ -202,7 +259,8 @@ pub async fn generate_case_brief(
         }
     };
 
-    let docx_bytes = markdown_to_docx("Case Brief", &content_md)?;
+    let resolved = crate::drafting::crossrefs::resolve_crossrefs(db, case_id, &content_md).await;
+    let docx_bytes = markdown_to_docx("Case Brief", &resolved.markdown)?;
     let generated = GeneratedOutput { content_md, docx_bytes };
 
     persist_output(db, case_id, user_id, "case_brief", "Case_Brief.docx", &generated).await
@@ -261,7 +319,8 @@ pub async fn generate_strategy_memo(
         }
     };
 
-    let docx_bytes = markdown_to_docx("Strategy Memo", &content_md)?;
+    let resolved = crate::drafting::crossrefs::resolve_crossrefs(db, case_id, &content_md).await;
+    let docx_bytes = markdown_to_docx("Strategy Memo", &resolved.markdown)?;
     let generated = GeneratedOutput { content_md, docx_bytes };
 
     persist_output(db, case_id, user_id, "strategy_memo", "Strategy_Memo.docx", &generated).await
@@ -326,8 +385,176 @@ pub async fn generate_hearing_prep(
         }
     };
 
-    let docx_bytes = markdown_to_docx("Hearing Preparation Brief", &content_md)?;
+    let resolved = crate::drafting::crossrefs::resolve_crossrefs(db, case_id, &content_md).await;
+    let docx_bytes = markdown_to_docx("Hearing Preparation Brief", &resolved.markdown)?;
     let generated = GeneratedOutput { content_md, docx_bytes };
 
     persist_output(db, case_id, user_id, "hearing_prep", "Hearing_Prep.docx", &generated).await
+}
+
+// ---------------------------------------------------------------------------
+// List of Dates (Synopsis)
+// ---------------------------------------------------------------------------
+
+pub async fn generate_list_of_dates(
+    db: &SqlitePool,
+    case_id: &str,
+    user_id: &str,
+    findings: &[serde_json::Value],
+    config: &OutputConfig,
+) -> Result<String> {
+    let system = format!(
+        "You are a litigation associate preparing a \"List of Dates\" in Markdown, \
+         in the exact format used in Indian court pleadings (writ petitions, tribunal applications).\n\n\
+         {NO_PROCESS_TEXT}\n\n\
+         FORMAT — output ONLY this table, with no synopsis, key points, or arguments:\n\
+         # List of Dates\n\
+         | Dates | Events |\n\
+         |---|---|\n\
+         One row per dated event, strictly chronological with the earliest first, Dates in DD.MM.YYYY format.\n\
+         - Begin with the statutory or contextual origin (when the governing Act, Rule or scheme came into force), \
+         then the specific events and impugned actions, ending with the filing of the present matter \
+         (e.g. \"Hence, the present Writ Petition / Original Application.\").\n\
+         - Write each event as a formal, factual full sentence in the third person, naming the relevant document \
+         by its exact identifier (Order No., Notification No., letter No. and date). State facts only — no argument.\n\
+         - Use the parties' roles as in the record (Applicant, Respondent No. 1, etc.), \
+         with an inline citation [Agent: quote] identifying the finding each event is drawn from.\n\
+         Do NOT invent dates or events. If the findings conflict on a date, note both."
+    );
+
+    let user_msg = format!(
+        "Produce a Synopsis and List of Dates for case {case_id} using these agent findings:\n{}",
+        format_findings_block(findings)
+    );
+
+    let raw = call_llm(config, &system, &user_msg).await?;
+    let md = clean_markdown(&raw);
+
+    let content_md = if validate_markdown(&md) {
+        md
+    } else {
+        let retry_system = format!(
+            "{system}\n\nCRITICAL: Your previous output was rejected. \
+             Start DIRECTLY with '# List of Dates'. No preamble."
+        );
+        let raw_retry = call_llm(config, &retry_system, &user_msg).await?;
+        let retry = clean_markdown(&raw_retry);
+        if validate_markdown(&retry) { retry } else {
+            return Err(anyhow!("LLM failed to produce valid Markdown after retry"));
+        }
+    };
+
+    let resolved = crate::drafting::crossrefs::resolve_crossrefs(db, case_id, &content_md).await;
+    let docx_bytes = markdown_to_docx("List of Dates", &resolved.markdown)?;
+    let generated = GeneratedOutput { content_md, docx_bytes };
+
+    persist_output(db, case_id, user_id, "list_of_dates", "List_of_Dates.docx", &generated).await
+}
+
+// ---------------------------------------------------------------------------
+// Annexure Index
+// ---------------------------------------------------------------------------
+
+pub async fn generate_annexure_index(
+    db: &SqlitePool,
+    case_id: &str,
+    user_id: &str,
+    documents: &[serde_json::Value],
+    config: &OutputConfig,
+) -> Result<String> {
+    let system = format!(
+        "You are a litigation associate preparing an Annexure Index in Markdown — the numbered list of \
+         annexures as they would be filed with a pleading or petition before an Indian court.\n\n\
+         {NO_PROCESS_TEXT}\n\n\
+         FORMAT:\n\
+         # Annexure Index\n\
+         | Annexure No. | Description of Document | Date of Document |\n\
+         |---|---|---|\n\
+         Number annexures sequentially as Annexure A-1, A-2, A-3 ... in the order listed. \
+         Write each description as \"A true copy of <document> dated <date>\". \
+         Use DD.MM.YYYY for dates; leave the Date cell blank if the document gives no date.\n\
+         ## Cross-references\n\
+         For each annexure, give the exact sentence to paste into the body of the pleading, e.g. \
+         \"A true copy of the ... dated 10.01.2024 is annexed hereto and marked as **Annexure A-1**.\"\n\n\
+         Use ONLY the documents listed below. Do NOT invent documents. \
+         Base each description on the document's file name and type; if the date is not evident, leave it blank."
+    );
+
+    let user_msg = format!(
+        "Prepare an Annexure Index for case {case_id} from these attached documents (in order):\n{}",
+        format_documents_block(documents)
+    );
+
+    let raw = call_llm(config, &system, &user_msg).await?;
+    let md = clean_markdown(&raw);
+
+    let content_md = if validate_markdown(&md) {
+        md
+    } else {
+        let retry_system = format!(
+            "{system}\n\nCRITICAL: Your previous output was rejected. \
+             Start DIRECTLY with '# Annexure Index'. No preamble."
+        );
+        let raw_retry = call_llm(config, &retry_system, &user_msg).await?;
+        let retry = clean_markdown(&raw_retry);
+        if validate_markdown(&retry) { retry } else {
+            return Err(anyhow!("LLM failed to produce valid Markdown after retry"));
+        }
+    };
+
+    let resolved = crate::drafting::crossrefs::resolve_crossrefs(db, case_id, &content_md).await;
+    let docx_bytes = markdown_to_docx("Annexure Index", &resolved.markdown)?;
+    let generated = GeneratedOutput { content_md, docx_bytes };
+
+    persist_output(db, case_id, user_id, "annexure_index", "Annexure_Index.docx", &generated).await
+}
+
+// ---------------------------------------------------------------------------
+// List of Cases Referred (deterministic — no LLM)
+// ---------------------------------------------------------------------------
+
+pub async fn generate_cases_referred(
+    db: &SqlitePool,
+    case_id: &str,
+    user_id: &str,
+) -> Result<String> {
+    let title = "List of Cases Referred";
+    let md = crate::drafting::citations::render_cases_referred(db, case_id).await?;
+    let docx_bytes = markdown_to_docx(title, &md)?;
+    let generated = GeneratedOutput { content_md: md, docx_bytes };
+
+    persist_output(
+        db,
+        case_id,
+        user_id,
+        "cases_referred",
+        &format!("{title}.docx"),
+        &generated,
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// List of Authorities (deterministic — no LLM)
+// ---------------------------------------------------------------------------
+
+pub async fn generate_authorities(
+    db: &SqlitePool,
+    case_id: &str,
+    user_id: &str,
+) -> Result<String> {
+    let title = "List of Authorities";
+    let md = crate::drafting::citations::render_authorities(db, case_id).await?;
+    let docx_bytes = markdown_to_docx(title, &md)?;
+    let generated = GeneratedOutput { content_md: md, docx_bytes };
+
+    persist_output(
+        db,
+        case_id,
+        user_id,
+        "list_of_authorities",
+        &format!("{title}.docx"),
+        &generated,
+    )
+    .await
 }

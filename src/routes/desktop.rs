@@ -26,13 +26,16 @@ struct OpenWordBody {
 /// Resolves the storage path from the DB, then shells out to `open -a`.
 async fn open_in_word(
     State(state): State<Arc<AppState>>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Json(body): Json<OpenWordBody>,
 ) -> ApiResult {
+    // Scope the lookup to the authenticated user so one user cannot open
+    // another user's document by guessing its id (IDOR).
     let row: Option<(String, Option<String>)> = sqlx::query_as(
-        "SELECT filename, storage_path FROM documents WHERE id = ?",
+        "SELECT filename, storage_path FROM documents WHERE id = ? AND user_id = ?",
     )
     .bind(&body.document_id)
+    .bind(&auth.user_id)
     .fetch_optional(&state.db)
     .await
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;

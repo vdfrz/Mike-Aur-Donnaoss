@@ -144,7 +144,14 @@ fn is_valid_name(name: &str) -> bool {
 }
 
 fn extract_party_names(text: &str) -> Vec<String> {
-    let header = if text.len() > 4000 { &text[..4000] } else { text };
+    let header = if text.len() > 4000 {
+        // Snap to a char boundary so multibyte input (₹, Devanagari,
+        // smart quotes) straddling byte 4000 doesn't panic the slice.
+        let cut = (0..=4000).rev().find(|&i| text.is_char_boundary(i)).unwrap_or(0);
+        &text[..cut]
+    } else {
+        text
+    };
     let mut names: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
@@ -501,6 +508,34 @@ mod tests {
         let input = "The hearing is scheduled for 15.03.2026 at 10:30 AM.";
         let r = scrub_pii(input);
         assert!(r.scrubbed_text.contains("15.03.2026"));
+    }
+
+    #[test]
+    fn test_multibyte_at_header_boundary_does_not_panic() {
+        // A multibyte char (₹) straddling byte 4000 must not panic the
+        // header slice in extract_party_names. (Before the fix this slice
+        // panicked with "byte index 4000 is not a char boundary".)
+        for offset in 3998..=4001 {
+            // Name BEFORE the boundary so it's inside the 4000-byte header.
+            let mut s = String::from("Shri Rajesh Kumar filed the petition. ");
+            while s.len() < offset {
+                s.push('a');
+            }
+            s.push('₹'); // 3-byte char crosses byte 4000 for most offsets
+            s.push_str(" trailing text continues.");
+            let r = scrub_pii(&s); // must not panic
+            assert!(!r.scrubbed_text.contains("Rajesh Kumar"));
+        }
+    }
+
+    #[test]
+    fn test_devanagari_and_smart_quotes_no_panic() {
+        // Devanagari + smart quotes straddling the 4000-byte cut must not panic.
+        let mut s = String::from("“Shri Rajesh Kumar” filed. ");
+        s.push_str(&"धारा ".repeat(900)); // multibyte, pushes well past 4000 bytes
+        let r = scrub_pii(&s); // must not panic
+        assert!(r.scrubbed_text.contains("धारा"));
+        assert!(!r.scrubbed_text.contains("Rajesh Kumar"));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 import ProjectAssistantChatPage from "./page-client";
 
 export const dynamic = "force-static";
-export const dynamicParams = false;
+export const dynamicParams = true;
 export function generateStaticParams() {
     return [{ id: "__ph__", chatId: "__ph__" }];
 }

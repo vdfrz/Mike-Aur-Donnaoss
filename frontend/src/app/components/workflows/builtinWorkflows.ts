@@ -2,6 +2,102 @@ import type { MikeWorkflow } from "../shared/types";
 
 export const BUILT_IN_WORKFLOWS: MikeWorkflow[] = [
     {
+        id: "builtin-list-of-dates",
+        user_id: null,
+        is_system: true,
+        created_at: "",
+        title: "List of Dates (Synopsis)",
+        type: "assistant",
+        practice: "Litigation",
+        prompt_md:
+            "## List of Dates\n\n" +
+            "Read the attached documents and produce a \"List of Dates\" in the exact format used in Indian court " +
+            "pleadings (High Court writ petitions, tribunal applications).\n\n" +
+            "Output ONLY a two-column table titled \"LIST OF DATES\". No synopsis, no key points, no arguments, " +
+            "no headings other than the title.\n\n" +
+            "| Dates | Events |\n" +
+            "|-------|--------|\n" +
+            "| 24.12.1986 | A formal sentence stating what happened, naming the exact document by its identifier. |\n\n" +
+            "Rules:\n" +
+            "- Strictly chronological, earliest first. Dates in DD.MM.YYYY format.\n" +
+            "- Begin with the statutory or contextual origin (e.g. when the governing Act, Rule or scheme came into force), " +
+            "then the specific events and impugned actions, ending with the filing of the present matter.\n" +
+            "- Write each event as a formal, factual full sentence in the third person " +
+            "(e.g. \"The Respondent No. 3 passed the Impugned Office Order No. 42 of 2022 ...\"). State facts only — no argument.\n" +
+            "- Refer to each document by its exact identifier as it appears (Order No., Notification No., letter No. and date). " +
+            "Do not write \"(source document)\".\n" +
+            "- Use the parties' roles as in the documents (Petitioner, Applicant, Respondent No. 1, etc.).\n" +
+            "- The final row records the filing of the present matter, e.g. \"Hence, the present Writ Petition / Original Application.\"\n" +
+            "- Do NOT invent dates or events. If a date is not stated, give the month and year (e.g. \"__.08.2022\").\n\n" +
+            "Deliver the table inline as Markdown.",
+        columns_config: null,
+    },
+    {
+        id: "builtin-annexure-index",
+        user_id: null,
+        is_system: true,
+        created_at: "",
+        title: "Annexure Index",
+        type: "assistant",
+        practice: "Litigation",
+        prompt_md:
+            "## Annexure Index\n\n" +
+            "Read the attached documents and prepare an Annexure Index — the numbered list of annexures " +
+            "as they would be filed with the main pleading or petition.\n\n" +
+            "Produce a table:\n\n" +
+            "| Annexure No. | Description of Document | Date of Document |\n" +
+            "|--------------|-------------------------|------------------|\n" +
+            "| Annexure A-1 | A true copy of … | DD.MM.YYYY |\n\n" +
+            "Rules:\n" +
+            "- Number annexures sequentially as Annexure A-1, A-2, A-3 … in the logical order they support the narrative " +
+            "(generally chronological, or the order in which they are first referred to). " +
+            "If the user specifies a different prefix (e.g. P-1 for a writ petition, R-1 for a reply), use that instead.\n" +
+            "- Write each description in the convention \"A true copy of <document> dated <date>\".\n" +
+            "- Use DD.MM.YYYY for dates; leave the date cell blank if the document is undated.\n" +
+            "- List one row per attached document. Do not invent documents.\n\n" +
+            "Below the table, output the exact cross-reference sentence to paste into the body of the pleading for each annexure, e.g.:\n" +
+            "> A true copy of the … dated 10.01.2024 is annexed hereto and marked as **Annexure A-1**.\n\n" +
+            "Deliver the result inline as Markdown. Only produce a downloadable Word document if the user explicitly asks for one.",
+        columns_config: null,
+    },
+    {
+        id: "builtin-limitation-check",
+        user_id: null,
+        is_system: true,
+        created_at: "",
+        title: "Limitation Check",
+        type: "assistant",
+        practice: "Litigation",
+        prompt_md:
+            "## Limitation Check\n\n" +
+            "Read the attached documents and the case's List of Dates (if available). Assess limitation — whether each claim, appeal, or application is within time under Indian law, and whether any limitation exploit is available against the other side.\n\n" +
+            "### 1. Causes of Action & Triggers\n" +
+            "| Cause of Action | Triggering Event | Date of Accrual | Source |\n" +
+            "|---|---|---|---|\n" +
+            "- Identify each right to sue, right to appeal, or right to apply.\n" +
+            "- State the date of accrual (DD.MM.YYYY) for each.\n" +
+            "- Cite the document or the List of Dates from which this date is drawn.\n\n" +
+            "### 2. Limitation Analysis\n" +
+            "| Cause of Action | Governing Statute or Act | Article/Section & Prescribed Period | Last Date to File | Position |\n" +
+            "|---|---|---|---|---|\n" +
+            "- Name the statute and the specific article or section you rely on, e.g. \"Limitation Act, 1963 — Article 58, 3 years\" or \"Article 137 (condonation of delay), Section 5\".\n" +
+            "- If the governing statute is not evident from the documents, state your assumption explicitly.\n" +
+            "- Compute the last date to file: count from the date of accrual, exclude the day of the event (per s.12, Limitation Act, 1963), account for any exclusion or stay (e.g. COVID bar from 15.03.2020–28.02.2022, or any stay by court order in the documents).\n" +
+            "- \"Position\": state as \"Within time\", \"Time-barred by [N days]\", or \"Borderline — verify\".\n\n" +
+            "### 3. Exploits & Risks\n" +
+            "- **Our side (claimed/respondent):** any limitation risk or delay on our claim — state the days of delay, whether a condonation of delay application (s.5, Limitation Act, 1963) is needed, and the likely grounds.\n" +
+            "- **Other side (opponent):** any opponent's claim, counter-claim, or relief that is time-barred and can be resisted on limitation.\n\n" +
+            "### 4. Critical Dates & Computations\n" +
+            "- List the key accrual dates identified, the computed last dates, and any exclusion periods applied.\n" +
+            "- If the List of Dates is attached, note any gaps or conflicts between the List and your own analysis.\n\n" +
+            "### Rules & Caveats\n" +
+            "- Do NOT assert a limitation period you are unsure of as fact — name the provision you believe applies and flag it for verification by counsel.\n" +
+            "- Do NOT invent dates; use only those stated in the documents or the List of Dates.\n" +
+            "- This is a first-pass analysis. Verification by counsel is required before relying on any limitation defence or condonation argument.\n\n" +
+            "Deliver the result inline as Markdown. Use tables, bullet points, and clear headings to organize the analysis.",
+        columns_config: null,
+    },
+    {
         id: "builtin-cp-checklist",
         user_id: null,
         is_system: true,

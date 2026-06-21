@@ -1,5 +1,8 @@
 pub mod docx_writer;
 
+#[cfg(feature = "pdf")]
+pub mod md_pdf;
+
 use anyhow::Result;
 
 // ---------------------------------------------------------------------------
@@ -15,6 +18,16 @@ use std::path::Path;
 
 #[cfg(feature = "pdf")]
 const OCR_FALLBACK_THRESHOLD: usize = 10;
+
+/// A page "needs OCR" when its extractable text has fewer alphanumeric
+/// characters than the fallback threshold — i.e. there is effectively no
+/// usable text layer (a scanned/image-only page). Used both to decide whether
+/// to *attempt* OCR and, after OCR, to record whether usable text was actually
+/// recovered so downstream consumers can detect a still-scanned document.
+#[cfg(feature = "pdf")]
+fn text_needs_ocr(text: &str) -> bool {
+    text.chars().filter(|c| c.is_alphanumeric()).count() < OCR_FALLBACK_THRESHOLD
+}
 
 /// Load pdfium from the bundled DLL in libs/pdfium/.
 ///
@@ -182,8 +195,7 @@ pub fn extract_text(path: &Path) -> Result<Vec<PageText>> {
     let mut pages = Vec::new();
     for (i, page) in doc.pages().iter().enumerate() {
         let text = page.text().map_err(|e| anyhow!("page text error: {e}"))?.all();
-        let alpha_count = text.chars().filter(|c| c.is_alphanumeric()).count();
-        let needs_ocr = alpha_count < OCR_FALLBACK_THRESHOLD;
+        let needs_ocr = text_needs_ocr(&text);
 
         let final_text = if needs_ocr {
             #[cfg(feature = "tesseract")]
@@ -214,10 +226,18 @@ pub fn extract_text(path: &Path) -> Result<Vec<PageText>> {
             text
         };
 
+        // Preserve the OCR signal: a page still counts as needing OCR if, after
+        // any OCR attempt, the final text is *still* below the threshold. This
+        // is true for scanned/image-only pages when OCR recovered nothing or
+        // when the `tesseract` feature is not compiled in. Downstream consumers
+        // (`is_scanned_pdf`, the case-prep orchestrator, the chat vision
+        // fallback) rely on this to detect scanned PDFs instead of silently
+        // shipping empty text as a successful extraction.
+        let still_needs_ocr = text_needs_ocr(&final_text);
         pages.push(PageText {
             page: i + 1,
             text: final_text,
-            needs_ocr: false, // resolved — OCR ran if needed
+            needs_ocr: still_needs_ocr,
         });
         if total > 10 && (i + 1) % 10 == 0 {
             tracing::info!(
@@ -740,5 +760,67 @@ mod docx_tests {
     fn empty_document_returns_empty_string() {
         let xml = wrap("");
         assert_eq!(extract_docx_body_text(&xml), "");
+    }
+}
+
+#[cfg(all(test, feature = "pdf"))]
+mod ocr_tests {
+    use super::{is_scanned_pdf, text_needs_ocr, PageText};
+
+    #[test]
+    fn empty_page_text_needs_ocr() {
+        assert!(text_needs_ocr(""), "an image-only page with no text layer needs OCR");
+        assert!(text_needs_ocr("   \n\t "), "whitespace-only page needs OCR");
+        assert!(text_needs_ocr("###"), "punctuation-only page (no alphanumerics) needs OCR");
+    }
+
+    #[test]
+    fn real_text_does_not_need_ocr() {
+        assert!(
+            !text_needs_ocr("This page has a real, extractable text layer."),
+            "a page with a genuine text layer must NOT be flagged for OCR"
+        );
+    }
+
+    #[test]
+    fn scanned_pdf_detected_from_image_only_pages() {
+        // Simulates extract_text's output for a scanned/image-only PDF: every
+        // page came back below the OCR threshold and OCR recovered nothing, so
+        // needs_ocr stays true. Before the fix needs_ocr was hardcoded false,
+        // so is_scanned_pdf could never return true and the vision fallback
+        // never fired.
+        let pages = vec![
+            PageText { page: 1, text: String::new(), needs_ocr: text_needs_ocr("") },
+            PageText { page: 2, text: " ".to_string(), needs_ocr: text_needs_ocr(" ") },
+        ];
+        assert!(
+            is_scanned_pdf(&pages),
+            "an image-only PDF (every page below threshold) must be reported as scanned"
+        );
+        assert!(
+            pages.iter().any(|p| p.needs_ocr),
+            "the orchestrator's `any(needs_ocr)` check must see the scanned pages"
+        );
+    }
+
+    #[test]
+    fn text_pdf_not_scanned() {
+        let body = "A paragraph with plenty of real extractable text on the page.";
+        let pages = vec![
+            PageText { page: 1, text: body.to_string(), needs_ocr: text_needs_ocr(body) },
+            PageText { page: 2, text: body.to_string(), needs_ocr: text_needs_ocr(body) },
+        ];
+        assert!(!is_scanned_pdf(&pages), "a normal text PDF must not be flagged as scanned");
+    }
+
+    #[test]
+    fn multibyte_text_layer_not_scanned() {
+        // Devanagari text must count as a real text layer (is_alphanumeric is
+        // true for these code points), not be mistaken for an image-only page.
+        let body = "यह एक वास्तविक पाठ परत है जिसमें पर्याप्त अक्षर हैं।";
+        assert!(
+            !text_needs_ocr(body),
+            "a multibyte (Devanagari) text layer must NOT be flagged for OCR"
+        );
     }
 }

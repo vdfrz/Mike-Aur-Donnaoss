@@ -1,8 +1,10 @@
 pub mod agents;
 pub mod auth;
-pub mod corpora;
+pub mod corpus;
 pub mod db;
+pub mod drafting;
 pub mod embeddings;
+pub mod harness;
 pub mod llm;
 pub mod mcp;
 pub mod mikeprj;
@@ -141,11 +143,11 @@ pub async fn run_server_with_bio_tx(
         .nest("/workflow",  routes::workflows::router())
         .nest("/tabular-review", routes::tabular_reviews::router())
         .nest("/sync",     routes::sync::router())
-        .nest("/eurlex",   routes::eurlex::router())
         .nest("/indian-kanoon", routes::indian_kanoon::router())
         .nest("/ecourts-verify", routes::ecourts::router())
         .nest("/cases", routes::cases::router())
-        .nest("/messy-doc", routes::messy_doc::router())
+        .nest("/corpus", routes::corpus::router())
+        .nest("/mike-feedback", routes::mike_feedback::router())
         .nest("/statutes", routes::statutes::router())
         .merge(routes::personalization::router())
         .nest("/desktop",  routes::desktop::router())

@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Mike aur Donna — Drafting Studio (Concept Mockup)</title>
+<!--
+  Concept mockup for the "Drafting Studio" inline-editing surface.
+  Self-contained, static walkthrough. Visual language matched to the live app:
+    · Brand mark = the real MikeIcon aperture + serif "Mike aur Donna" wordmark
+    · Tokens lifted from frontend/src/app/globals.css (azure rgb(0,136,255),
+      hover rgb(0,120,230); green #16a34a / red #dc2626 redline; border #e2e8f0)
+    · Type = Inter (UI) + EB Garamond (document), radius 10px, lucide icons
+  Panels are placed via document layout (in-flow + flex), so nothing ever
+  overlaps the caption bar.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=EB+Garamond:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet" />
+<style>
+  :root{
+    /* ——— pulled from frontend/src/app/globals.css ——— */
+    --blue:#0088ff;            /* rgb(0,136,255)  — brand / azure        */
+    --blue-700:#0078e6;        /* rgb(0,120,230)  — azure hover          */
+    --blue-50:rgba(0,136,255,.06);
+    --blue-100:rgba(0,136,255,.12);
+    --blue-200:rgba(0,136,255,.28);
+    --ink:#111827;
+    --ink-2:#1f2937;
+    --gray:#64748b;
+    --gray-light:#94a3b8;
+    --border:#e2e8f0;
+    --border-2:#eef2f6;
+    --bg:#f5f7fa;
+    --panel:#ffffff;
+    --green:#16a34a;
+    --green-text:#0f7a37;
+    --green-bg:rgba(22,163,74,.08);
+    --green-line:#bfe3c9;
+    --red:#dc2626;
+    --red-bg:rgba(220,38,38,.07);
+    --red-line:#f3c4c4;
+    --amber-text:#9a4a00;
+    --amber-bg:#fdeede;
+    --radius:10px;
+    --shadow-sm:0 1px 3px rgba(16,24,40,.06),0 1px 2px rgba(16,24,40,.04);
+    --shadow:0 8px 28px rgba(16,24,40,.12);
+    --shadow-lg:0 18px 48px rgba(16,24,40,.18);
+    --sans:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+    --serif:'EB Garamond','Times New Roman',Georgia,serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    font-family:var(--sans);
+    background:var(--bg);
+    color:var(--ink);
+    -webkit-font-smoothing:antialiased;
+    font-size:14px;line-height:1.5;
+  }
+  .lic{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:2;
+    stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}
+  .svg-defs{position:absolute;width:0;height:0;overflow:hidden}
+  .mm{display:block;flex-shrink:0}
+
+  /* ============ APP CHROME ============ */
+  .app{display:flex;flex-direction:column;height:100vh;overflow:hidden}
+
+  .topbar{
+    display:flex;align-items:center;gap:14px;height:54px;padding:0 18px;
+    background:var(--panel);border-bottom:1px solid var(--border);flex-shrink:0;z-index:40;
+  }
+  .brand{display:flex;align-items:center;gap:8px}
+  .brand .word{font-family:var(--serif);font-weight:400;font-size:19px;color:var(--ink);
+    letter-spacing:.01em;line-height:1;white-space:nowrap}
+  .crumb{display:flex;align-items:center;gap:8px;color:var(--gray);font-size:13px;
+    padding-left:6px;border-left:1px solid var(--border);margin-left:2px}
+  .crumb .sep{color:var(--gray-light)}
+  .crumb b{color:var(--ink-2);font-weight:600}
+  .pill{font-size:11px;font-weight:600;padding:3px 9px;border-radius:999px;
+    background:var(--blue-100);color:var(--blue-700)}
+  .topbar .spacer{flex:1}
+  .avatar{width:30px;height:30px;border-radius:50%;background:#dbe7f3;display:flex;
+    align-items:center;justify-content:center;font-weight:600;color:var(--blue-700);font-size:12px}
+  .btn{font-family:var(--sans);font-size:13px;font-weight:600;border:1px solid var(--border);
+    background:#fff;color:var(--ink-2);padding:7px 13px;border-radius:8px;cursor:pointer;
+    display:inline-flex;align-items:center;gap:6px;transition:.15s}
+  .btn:hover{border-color:var(--blue-200);color:var(--blue-700)}
+  .btn.primary{background:var(--blue);border-color:var(--blue);color:#fff}
+  .btn.primary:hover{background:var(--blue-700);border-color:var(--blue-700)}
+  .btn.accept{background:var(--green);border-color:var(--green);color:#fff}
+  .btn.accept:hover{filter:brightness(.96)}
+  .btn.reject{color:var(--red);border-color:var(--red-line);background:#fff}
+  .btn.reject:hover{background:var(--red-bg);border-color:var(--red)}
+
+  /* ============ STEP RAIL (walkthrough scaffolding) ============ */
+  .steprail{display:flex;align-items:center;gap:6px;padding:9px 18px;background:#fff;
+    border-bottom:1px solid var(--border);flex-shrink:0;overflow-x:auto}
+  .step{display:flex;align-items:center;gap:9px;padding:7px 13px 7px 9px;border-radius:9px;
+    cursor:pointer;border:1px solid transparent;white-space:nowrap;transition:.15s}
+  .step:hover{background:var(--blue-50)}
+  .step.active{background:var(--blue-50);border-color:var(--blue-200)}
+  .step .num{width:22px;height:22px;border-radius:50%;background:#eef2f6;color:var(--gray);
+    display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;
+    flex-shrink:0;transition:.15s}
+  .step.active .num{background:var(--blue);color:#fff}
+  .step .lbl{font-size:12.5px;font-weight:600;color:var(--gray)}
+  .step.active .lbl{color:var(--ink)}
+  .step .lbl small{display:block;font-weight:500;font-size:10.5px;color:var(--gray-light)}
+  .steprail .grow{flex:1}
+  .nav-hint{font-size:11px;color:var(--gray-light);display:flex;align-items:center;gap:5px;white-space:nowrap}
+  kbd{font-family:var(--sans);font-size:10px;font-weight:600;background:#f1f5f9;border:1px solid var(--border);
+    border-bottom-width:2px;border-radius:5px;padding:1px 5px;color:var(--gray)}
+
+  /* ============ BODY LAYOUT ============ */
+  .body{display:flex;flex:1;overflow:hidden}
+
+  /* ---- LEFT: case context ---- */
+  .context{width:262px;flex-shrink:0;background:var(--panel);border-right:1px solid var(--border);
+    padding:16px 14px;overflow-y:auto}
+  .ctx-h{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
+    color:var(--gray-light);margin:18px 4px 8px}
+  .ctx-h:first-child{margin-top:0}
+  .ctx-h .note{font-weight:500;color:var(--gray-light);text-transform:none;letter-spacing:0;font-size:10.5px}
+  .ctx-card{background:#fbfcfe;border:1px solid var(--border-2);border-radius:9px;padding:10px 11px;margin-bottom:7px}
+  .ctx-card .k{font-size:10.5px;color:var(--gray-light);font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+  .ctx-card .v{font-size:13px;color:var(--ink-2);font-weight:500;margin-top:1px}
+  .src{display:flex;align-items:center;gap:9px;padding:7px 9px;border-radius:8px;cursor:default;transition:.15s}
+  .src:hover{background:var(--blue-50)}
+  .src .ic{width:26px;height:26px;border-radius:7px;background:var(--blue-100);color:var(--blue-700);
+    display:flex;align-items:center;justify-content:center;flex-shrink:0}
+  .src .ic .lic{width:14px;height:14px}
+  .src .nm{font-size:12.5px;font-weight:500;color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .src .nm small{display:block;color:var(--gray-light);font-weight:400;font-size:10.5px}
+  .finding{display:flex;gap:8px;font-size:12px;color:var(--gray);padding:5px 4px;line-height:1.45}
+  .finding .tick{color:var(--green);flex-shrink:0;font-weight:700}
+  .finding b{color:var(--ink-2);font-weight:600}
+
+  /* ---- CENTER: document canvas ---- */
+  .canvas-wrap{flex:1;overflow-y:auto;overflow-x:hidden;padding:30px 24px 340px;position:relative}
+  .page{width:660px;max-width:100%;margin:0 auto;background:#fff;border:1px solid var(--border);
+    border-radius:6px;box-shadow:var(--shadow-sm);padding:54px 64px 70px;position:relative;
+    min-height:640px;font-family:var(--serif);color:#1a1a1a;font-size:16px;line-height:1.9}
+  .page .court{text-align:center;font-weight:600;letter-spacing:.02em;font-size:16px;margin-bottom:2px}
+  .page .court small{display:block;font-weight:500;font-size:13.5px;color:#444;letter-spacing:.06em;margin-top:2px}
+  .page .caseno{text-align:right;font-size:14px;color:#333;margin:14px 0 18px}
+  .party{margin:2px 0}
+  .party .role{text-align:right;font-style:italic;color:#444;font-size:14px;margin-top:-4px}
+  .vs{text-align:center;font-weight:600;margin:8px 0;font-size:15px}
+  .rule{border:none;border-top:1px solid #d8d8d8;margin:20px 0}
+  .title{text-align:center;font-weight:600;text-decoration:underline;text-underline-offset:3px;margin:18px 0 20px;font-size:16px}
+  .page p{margin:0 0 15px;text-align:justify}
+  .page p .lead{font-weight:600}
+  .ph{background:var(--amber-bg);color:var(--amber-text);padding:0 3px;border-radius:3px;font-style:italic}
+  [data-anchor]{scroll-margin-top:22px}
+
+  /* ---- ghost text (type-ahead) ---- */
+  .ghost{color:#9aa6b2;font-style:normal;transition:color .15s}
+  .caret{display:inline-block;width:1.5px;height:1.05em;background:var(--blue);vertical-align:-2px;
+    margin:0 1px;animation:blink 1.05s steps(1) infinite}
+  @keyframes blink{50%{opacity:0}}
+  .tab-chip{display:inline-flex;align-items:center;gap:5px;font-family:var(--sans);font-size:11px;
+    font-weight:600;color:var(--blue-700);background:var(--blue-50);border:1px solid var(--blue-200);
+    border-radius:7px;padding:3px 8px;margin-left:8px;vertical-align:middle;transform:translateY(-2px);
+    box-shadow:var(--shadow-sm);transition:.15s}
+
+  /* ---- highlight selection ---- */
+  .selected{background:rgba(0,136,255,.16);box-shadow:0 0 0 1px var(--blue-200);border-radius:3px;
+    padding:1px 2px}
+
+  /* ============ FLOATING AI SURFACES (placed in-flow → never overlap caption) ============ */
+  .ai-head{display:flex;align-items:center;gap:9px;padding:11px 13px;border-bottom:1px solid var(--border-2)}
+  .ai-head .mm{width:20px;height:20px}
+  .ai-head .t{font-family:var(--sans);font-size:12.5px;font-weight:600;color:var(--ink)}
+  .ai-head .t small{display:block;color:var(--gray-light);font-weight:500;font-size:11px;margin-top:1px}
+
+  /* rewrite panel — sits directly below the highlighted paragraph */
+  .float{font-family:var(--sans);background:#fff;border:1px solid var(--border);border-radius:13px;
+    box-shadow:var(--shadow-lg);width:430px;max-width:100%;overflow:hidden;margin:14px 0 6px;
+    animation:pop .18s ease-out}
+  @keyframes pop{from{opacity:0;transform:translateY(6px) scale(.985)}to{opacity:1;transform:none}}
+  .promptbox{display:flex;align-items:center;gap:8px;margin:11px 13px;padding:9px 11px;
+    border:1.5px solid var(--blue-200);border-radius:10px;background:var(--blue-50)}
+  .promptbox .pen{color:var(--blue-700);display:flex}
+  .promptbox input{flex:1;border:none;background:transparent;font-family:var(--sans);font-size:13px;
+    color:var(--ink);outline:none}
+  .promptbox input::placeholder{color:var(--gray-light)}
+  .promptbox .go{width:26px;height:26px;border-radius:7px;background:var(--blue);color:#fff;border:none;
+    cursor:pointer;display:flex;align-items:center;justify-content:center;transition:.15s}
+  .promptbox .go:hover{background:var(--blue-700)}
+  .chips{display:flex;flex-wrap:wrap;gap:5px;padding:0 12px 9px}
+  .chip{font-size:11.5px;font-weight:500;color:var(--ink-2);background:#f4f7fa;border:1px solid var(--border);
+    border-radius:999px;padding:4px 9px;cursor:pointer;transition:.15s;font-family:var(--sans)}
+  .chip:hover{background:var(--blue-50);border-color:var(--blue-200);color:var(--blue-700)}
+  .chip .i{color:var(--gray-light);margin-right:4px}
+  .chip:hover .i{color:var(--blue-700)}
+  .preview{margin:0 13px 13px;border:1px solid var(--border-2);border-radius:10px;overflow:hidden}
+  .preview .pv-h{font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;
+    color:var(--gray-light);padding:8px 12px;background:#fbfcfe;border-bottom:1px solid var(--border-2)}
+  .preview .pv-b{padding:11px 13px;font-family:var(--serif);font-size:14.5px;line-height:1.7;color:#1a1a1a}
+  .preview .add{background:var(--green-bg);color:var(--green-text);border-radius:3px;padding:0 2px}
+  .pv-actions{display:flex;gap:8px;padding:0 13px 13px}
+  .pv-actions .btn{flex:1;justify-content:center}
+
+  /* insert command bar — sits at the cursor line between paragraphs */
+  .insertbar{font-family:var(--sans);background:#fff;border:1px solid var(--border);border-radius:12px;
+    box-shadow:var(--shadow-lg);width:440px;max-width:100%;padding:4px;margin:8px 0;animation:pop .18s ease-out}
+  .insertbar .row{display:flex;align-items:center;gap:9px;padding:8px 10px}
+  .insertbar .row .mm{width:20px;height:20px}
+  .insertbar .row input{flex:1;border:none;outline:none;font-size:13.5px;font-family:var(--sans);
+    background:transparent;color:var(--ink)}
+  .insertbar .hintrow{border-top:1px solid var(--border-2);padding:7px 12px;font-size:11px;
+    color:var(--gray-light);display:flex;align-items:center;gap:6px}
+  .ins-result{background:var(--green-bg);border:1px solid var(--green-line);border-radius:6px;
+    padding:3px 8px;margin:0 0 15px}
+
+  /* tracked-change redline (real app ins/del styling) */
+  del{color:var(--red);background:var(--red-bg);text-decoration:line-through;
+    text-decoration-color:rgba(220,38,38,.7);padding:0 1px;border-radius:2px}
+  ins{color:var(--green-text);background:var(--green-bg);text-decoration:none;padding:0 1px;border-radius:2px}
+  .redcard{width:290px;flex-shrink:0;background:#fff;border:1px solid var(--border);border-radius:12px;
+    box-shadow:var(--shadow-lg);padding:13px;font-family:var(--sans);animation:pop .18s ease-out}
+  .redcard .rh{display:flex;align-items:center;gap:8px;font-size:12.5px;font-weight:600;margin-bottom:9px;color:var(--ink)}
+  .redcard .rh .mm{width:17px;height:17px}
+  .redcard .why{font-size:12px;color:var(--gray);line-height:1.55;background:#fbfcfe;border:1px solid var(--border-2);
+    border-radius:8px;padding:9px 10px;margin-bottom:11px}
+  .redcard .why b{color:var(--ink-2)}
+  .redcard .ra{display:flex;gap:8px}
+  .redcard .ra .btn{flex:1;justify-content:center;padding:7px}
+
+  /* ---- generate scene ---- */
+  .genbar{position:absolute;top:18px;left:50%;transform:translateX(-50%);z-index:30;width:560px;max-width:90%;
+    background:#fff;border:1px solid var(--blue-200);border-radius:13px;box-shadow:var(--shadow-lg);
+    font-family:var(--sans);overflow:hidden}
+  .genbar .gtop{display:flex;align-items:center;gap:11px;padding:13px 15px}
+  .genbar .gtop .mm{width:24px;height:24px}
+  .genbar .gtop .txt{flex:1}
+  .genbar .gtop .txt b{font-size:13.5px;display:block;color:var(--ink)}
+  .genbar .gtop .txt small{color:var(--gray);font-size:12px}
+  .genbar .ctxchips{display:flex;flex-wrap:wrap;gap:6px;padding:0 15px 13px}
+  .ctxchip{font-size:11.5px;font-weight:500;color:var(--blue-700);background:var(--blue-50);
+    border:1px solid var(--blue-200);border-radius:999px;padding:4px 10px;display:flex;align-items:center;gap:5px}
+  .shimmer{position:relative;overflow:hidden;background:#eef2f6;border-radius:5px;height:13px;margin:0 0 11px}
+  .shimmer::after{content:"";position:absolute;inset:0;transform:translateX(-100%);
+    background:linear-gradient(90deg,transparent,rgba(255,255,255,.85),transparent);animation:sh 1.4s infinite}
+  @keyframes sh{100%{transform:translateX(100%)}}
+  .writing-cursor{display:inline-block;width:7px;height:1.05em;background:var(--blue);vertical-align:-2px;
+    border-radius:1px;animation:blink 1s steps(1) infinite;flex-shrink:0}
+
+  /* ============ SCENE VISIBILITY ============ */
+  [data-show]{display:none}
+  body[data-scene="generate"] [data-show~="generate"],
+  body[data-scene="autocomplete"] [data-show~="autocomplete"],
+  body[data-scene="rewrite"] [data-show~="rewrite"],
+  body[data-scene="insert"] [data-show~="insert"],
+  body[data-scene="redline"] [data-show~="redline"]{display:revert}
+
+  body[data-scene="autocomplete"] #p-auto-static{display:none}
+  body[data-scene="generate"] #page>:not([data-show]){display:none}
+  body[data-scene="rewrite"] #p3-normal,
+  body[data-scene="redline"] #p3-normal{display:none}
+
+  /* redline: paragraph + card sit side-by-side via flex (pure layout, no overlap) */
+  #p3-row{margin:0 0 15px}
+  body[data-scene="redline"] #p3-row{display:flex;gap:16px;align-items:flex-start;
+    margin-left:-36px;margin-right:-36px}
+  #p3-row .p3-para{margin:0}
+  body[data-scene="redline"] #p3-row .p3-para{flex:1;min-width:0}
+
+  /* ---- caption (walkthrough scaffolding) ---- */
+  .caption{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:50;
+    background:rgba(17,24,39,.94);color:#fff;border-radius:12px;padding:12px 18px;max-width:680px;
+    width:calc(100% - 48px);box-shadow:var(--shadow-lg);display:flex;gap:13px;align-items:center;
+    backdrop-filter:blur(6px)}
+  .caption .cnum{background:var(--blue);color:#fff;font-weight:700;font-size:12px;border-radius:7px;
+    min-width:24px;height:24px;display:flex;align-items:center;justify-content:center;flex-shrink:0;align-self:flex-start;margin-top:1px}
+  .caption .ctext{font-size:13px;line-height:1.5;flex:1}
+  .caption .ctext b{color:#7cc4ff;font-weight:600}
+  .caption .cnav{display:flex;gap:6px;align-items:center;margin-left:6px}
+  .caption .cnav button{background:rgba(255,255,255,.12);border:none;color:#fff;width:28px;height:28px;
+    border-radius:7px;cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;transition:.15s}
+  .caption .cnav button:hover{background:rgba(255,255,255,.25)}
+  .tag{font-family:var(--sans);font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;
+    color:var(--blue-700);background:var(--blue-50);border:1px solid var(--blue-200);border-radius:6px;
+    padding:2px 7px;margin-right:6px;white-space:nowrap}
+
+  .watermark{position:fixed;top:60px;right:14px;z-index:60;font-size:10.5px;font-weight:600;
+    color:var(--gray-light);background:#fff;border:1px solid var(--border);border-radius:7px;
+    padding:4px 9px;box-shadow:var(--shadow-sm)}
+</style>
+</head>
+<body data-scene="generate">
+
+<!-- ===== Reusable brand mark: the real MikeIcon aperture (defined once) ===== -->
+<svg class="svg-defs" aria-hidden="true" focusable="false">
+  <symbol id="mikeIcon" viewBox="100 100 300 300">
+    <defs>
+      <clipPath id="mi-topClip"><rect x="30" y="-25" width="130" height="23" /></clipPath>
+      <path id="mi-blade" d="M 40,0 A 4,4 0 0 1 43,-3 Q 95,-22 147,-3 A 4,4 0 0 1 150,0 A 4,4 0 0 1 147,3 Q 95,22 43,3 A 4,4 0 0 1 40,0 Z" />
+      <linearGradient id="mi-specular" x1="0%" y1="0%" x2="0%" y2="100%">
+        <stop offset="0%" stop-color="#ffffff" stop-opacity="0.85" />
+        <stop offset="25%" stop-color="#ffffff" stop-opacity="0.4" />
+        <stop offset="50%" stop-color="#ffffff" stop-opacity="0" />
+        <stop offset="100%" stop-color="#ffffff" stop-opacity="0" />
+      </linearGradient>
+      <linearGradient id="mi-glassBorder" x1="0%" y1="0%" x2="0%" y2="100%">
+        <stop offset="0%" stop-color="#ffffff" stop-opacity="0.8" />
+        <stop offset="50%" stop-color="#6699cc" stop-opacity="0.5" />
+        <stop offset="100%" stop-color="#ffffff" stop-opacity="0.65" />
+      </linearGradient>
+      <filter id="mi-shadow" x="-20%" y="-20%" width="140%" height="140%">
+        <feDropShadow dx="0" dy="1.5" stdDeviation="3" flood-color="#111827" flood-opacity="0.35" />
+      </filter>
+      <linearGradient id="mi-glassFill" x1="0%" y1="0%" x2="100%" y2="100%">
+        <stop offset="0%" stop-color="#374151" stop-opacity="0.9" />
+        <stop offset="30%" stop-color="#4b5563" stop-opacity="0.8" />
+        <stop offset="70%" stop-color="#1f2937" stop-opacity="0.9" />
+        <stop offset="100%" stop-color="#374151" stop-opacity="0.9" />
+      </linearGradient>
+      <linearGradient id="mi-prism" x1="0%" y1="0%" x2="100%" y2="100%">
+        <stop offset="0%" stop-color="#111827" stop-opacity="0.95" />
+        <stop offset="20%" stop-color="#374151" stop-opacity="0.85" />
+        <stop offset="40%" stop-color="#0f172a" stop-opacity="0.95" />
+        <stop offset="60%" stop-color="#1f2937" stop-opacity="0.85" />
+        <stop offset="80%" stop-color="#111827" stop-opacity="0.95" />
+        <stop offset="100%" stop-color="#374151" stop-opacity="0.75" />
+      </linearGradient>
+      <linearGradient id="mi-innerLight" x1="100%" y1="0%" x2="0%" y2="100%">
+        <stop offset="0%" stop-color="#ffffff" stop-opacity="0" />
+        <stop offset="40%" stop-color="#6b7280" stop-opacity="0.3" />
+        <stop offset="60%" stop-color="#111827" stop-opacity="0.2" />
+        <stop offset="100%" stop-color="#ffffff" stop-opacity="0" />
+      </linearGradient>
+    </defs>
+    <g transform="translate(250,250)">
+      <g transform="rotate(0)" filter="url(#mi-shadow)"><use href="#mi-blade" fill="url(#mi-glassFill)"/><use href="#mi-blade" fill="url(#mi-innerLight)"/><use href="#mi-blade" fill="url(#mi-prism)" opacity="0.3"/><use href="#mi-blade" fill="url(#mi-specular)" clip-path="url(#mi-topClip)"/><use href="#mi-blade" fill="none" stroke="url(#mi-glassBorder)" stroke-width="1"/></g>
+      <g transform="rotate(30)" filter="url(#mi-shadow)"><use href="#mi-blade" fill="url(#mi-glassFill)"/><use href="#mi-blade" fill="url(#mi-innerLight)"/><use href="#mi-blade" fill="url(#mi-prism)" opacity="0.3"/><use href="#mi-blade" fill="url(#mi-specular)" clip-path="url(#mi-topClip)"/><use href="#mi-blade" fill="none" stroke="url(#mi-glassBorder)" stroke-width="1"/></g>
+      <g transform="rotate(60)" filter="url(#mi-shadow)"><use href="#mi-blade" fill="url(#mi-glassFill)"/><use href="#mi-blade" fill="url(#mi-innerLight)"/><use href="#mi-blade" fill="url(#mi-prism)" opacity="0.3"/><use href="#mi-blade" fill="url(#mi-specular)" clip-path="url(#mi-topClip)"/><use href="#mi-blade" fill="none" stroke="url(#mi-glassBorder)" stroke-width="1"/></g>
+      <g transform="rotate(90)" filter="url(#mi-shadow)"><use href="#mi-blade" fill="url(#mi-glassFill)"/><use href="#mi-blade" fill="url(#mi-innerLight)"/><use href="#mi-blade" fill="url(#mi-prism)" opacity="0.3"/><use href="#mi-blade" fill="url(#mi-specular)" clip-path="url(#mi-topClip)"/><use href="#mi-blade" fill="none" stroke="url(#mi-glassBorder)" stroke-width="1"/></g>
+      <g transform="rotate(120)" filter="url(#mi-shadow)"><use href="#mi-blade" fill="url(#mi-glassFill)"/><use href="#mi-blade" fill="url(#mi-innerLight)"/><use href="#mi-blade" fill="url(#mi-prism)" opacity="0.3"/><use href="#mi-blade" fill="url(#mi-specular)" clip-path="url(#mi-topClip)"/><use href="#mi-blade" fill="none" stroke="url(#mi-glassBorder)" stroke-width="1"/></g>
+      <g transform="rotate(150)" filter="url(#mi-shadow)"><use href="#mi-blade" fill="url(#mi-glassFill)"/><use href="#mi-blade" fill="url(#mi-innerLight)"/><use href="#mi-blade" fill="url(#mi-prism)" opacity="0.3"/><use href="#mi-blade" fill="url(#mi-specular)" clip-path="url(#mi-topClip)"/><use href="#mi-blade" fill="none" stroke="url(#mi-glassBorder)" stroke-width="1"/></g>
+      <g transform="rotate(180)" filter="url(#mi-shadow)"><use href="#mi-blade" fill="url(#mi-glassFill)"/><use href="#mi-blade" fill="url(#mi-innerLight)"/><use href="#mi-blade" fill="url(#mi-prism)" opacity="0.3"/><use href="#mi-blade" fill="url(#mi-specular)" clip-path="url(#mi-topClip)"/><use href="#mi-blade" fill="none" stroke="url(#mi-glassBorder)" stroke-width="1"/></g>
+      <g transform="rotate(210)" filter="url(#mi-shadow)"><use href="#mi-blade" fill="url(#mi-glassFill)"/><use href="#mi-blade" fill="url(#mi-innerLight)"/><use href="#mi-blade" fill="url(#mi-prism)" opacity="0.3"/><use href="#mi-blade" fill="url(#mi-specular)" clip-path="url(#mi-topClip)"/><use href="#mi-blade" fill="none" stroke="url(#mi-glassBorder)" stroke-width="1"/></g>
+      <g transform="rotate(240)" filter="url(#mi-shadow)"><use href="#mi-blade" fill="url(#mi-glassFill)"/><use href="#mi-blade" fill="url(#mi-innerLight)"/><use href="#mi-blade" fill="url(#mi-prism)" opacity="0.3"/><use href="#mi-blade" fill="url(#mi-specular)" clip-path="url(#mi-topClip)"/><use href="#mi-blade" fill="none" stroke="url(#mi-glassBorder)" stroke-width="1"/></g>
+      <g transform="rotate(270)" filter="url(#mi-shadow)"><use href="#mi-blade" fill="url(#mi-glassFill)"/><use href="#mi-blade" fill="url(#mi-innerLight)"/><use href="#mi-blade" fill="url(#mi-prism)" opacity="0.3"/><use href="#mi-blade" fill="url(#mi-specular)" clip-path="url(#mi-topClip)"/><use href="#mi-blade" fill="none" stroke="url(#mi-glassBorder)" stroke-width="1"/></g>
+      <g transform="rotate(300)" filter="url(#mi-shadow)"><use href="#mi-blade" fill="url(#mi-glassFill)"/><use href="#mi-blade" fill="url(#mi-innerLight)"/><use href="#mi-blade" fill="url(#mi-prism)" opacity="0.3"/><use href="#mi-blade" fill="url(#mi-specular)" clip-path="url(#mi-topClip)"/><use href="#mi-blade" fill="none" stroke="url(#mi-glassBorder)" stroke-width="1"/></g>
+      <g transform="rotate(330)" filter="url(#mi-shadow)"><use href="#mi-blade" fill="url(#mi-glassFill)"/><use href="#mi-blade" fill="url(#mi-innerLight)"/><use href="#mi-blade" fill="url(#mi-prism)" opacity="0.3"/><use href="#mi-blade" fill="url(#mi-specular)" clip-path="url(#mi-topClip)"/><use href="#mi-blade" fill="none" stroke="url(#mi-glassBorder)" stroke-width="1"/></g>
+    </g>
+  </symbol>
+
+  <!-- lucide icon paths (referenced via <use>) -->
+  <g id="ic-download"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></g>
+  <g id="ic-check"><polyline points="20 6 9 17 4 12"/></g>
+  <g id="ic-x"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></g>
+  <g id="ic-arrow"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></g>
+  <g id="ic-file"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></g>
+  <g id="ic-pen"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z"/></g>
+</svg>
+
+<div class="watermark">◆ Concept mockup — not a live product</div>
+
+<div class="app">
+
+  <!-- ===== TOP BAR ===== -->
+  <div class="topbar">
+    <div class="brand">
+      <svg class="mm" style="width:26px;height:26px"><use href="#mikeIcon"/></svg>
+      <span class="word">Mike aur Donna</span>
+    </div>
+    <div class="crumb">
+      <span>Cases</span><span class="sep">/</span><b>State v. R. Sharma</b><span class="sep">/</span><span>Drafts</span>
+    </div>
+    <span class="pill">Drafting Studio</span>
+    <div class="spacer"></div>
+    <button class="btn"><svg class="lic" viewBox="0 0 24 24"><use href="#ic-download"/></svg> Export .docx</button>
+    <button class="btn primary"><svg class="lic" viewBox="0 0 24 24"><use href="#ic-check"/></svg> Save draft</button>
+    <div class="avatar">VM</div>
+  </div>
+
+  <!-- ===== STEP RAIL ===== -->
+  <div class="steprail" id="rail">
+    <div class="step" data-go="generate"><span class="num">1</span><span class="lbl">Generate first draft<small>AI writes it for you</small></span></div>
+    <div class="step" data-go="autocomplete"><span class="num">2</span><span class="lbl">Type-ahead<small>AI finishes your sentence</small></span></div>
+    <div class="step" data-go="rewrite"><span class="num">3</span><span class="lbl">Highlight &amp; rewrite<small>fix just one part</small></span></div>
+    <div class="step" data-go="insert"><span class="num">4</span><span class="lbl">Insert a clause<small>add at the cursor</small></span></div>
+    <div class="step" data-go="redline"><span class="num">5</span><span class="lbl">Surgical redline<small>nothing else changes</small></span></div>
+    <div class="grow"></div>
+    <div class="nav-hint">Use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to walk through</div>
+  </div>
+
+  <!-- ===== BODY ===== -->
+  <div class="body">
+
+    <!-- LEFT: CASE CONTEXT -->
+    <aside class="context">
+      <div class="ctx-h">Matter</div>
+      <div class="ctx-card"><div class="k">Court</div><div class="v">Sessions Court, Pune</div></div>
+      <div class="ctx-card"><div class="k">Applicant</div><div class="v">Rajesh Sharma</div></div>
+      <div class="ctx-card"><div class="k">Stage</div><div class="v">Regular bail · u/s 439 CrPC</div></div>
+
+      <div class="ctx-h">Sources the AI uses</div>
+      <div class="src"><span class="ic"><svg class="lic" viewBox="0 0 24 24"><use href="#ic-file"/></svg></span><span class="nm">FIR_No_212_2025.pdf<small>doc-1 · 4 pages</small></span></div>
+      <div class="src"><span class="ic"><svg class="lic" viewBox="0 0 24 24"><use href="#ic-file"/></svg></span><span class="nm">Remand_order.pdf<small>doc-2 · 2 pages</small></span></div>
+      <div class="src"><span class="ic"><svg class="lic" viewBox="0 0 24 24"><use href="#ic-file"/></svg></span><span class="nm">Medical_report.pdf<small>doc-3 · 6 pages</small></span></div>
+
+      <div class="ctx-h">Case findings <span class="note">(already in your app)</span></div>
+      <div class="finding"><span class="tick">✓</span><span>Applicant in custody since <b>14 days</b></span></div>
+      <div class="finding"><span class="tick">✓</span><span>Offence <b>not punishable by death</b></span></div>
+      <div class="finding"><span class="tick">✓</span><span>No prior criminal antecedents</span></div>
+      <div class="finding"><span class="tick">✓</span><span>Chargesheet <b>not yet filed</b></span></div>
+    </aside>
+
+    <!-- CENTER: DOCUMENT CANVAS -->
+    <div class="canvas-wrap" id="canvas">
+      <div class="page" id="page">
+
+        <!-- ── STATE 1: GENERATE overlay ── -->
+        <div class="genbar" data-show="generate">
+          <div class="gtop">
+            <svg class="mm"><use href="#mikeIcon"/></svg>
+            <div class="txt"><b>Drafting a Regular Bail Application…</b><small>Mike is writing from your case facts &amp; sources</small></div>
+            <span class="writing-cursor"></span>
+          </div>
+          <div class="ctxchips">
+            <span class="ctxchip">📄 FIR_No_212_2025</span>
+            <span class="ctxchip">✓ 14 days custody</span>
+            <span class="ctxchip">✓ No antecedents</span>
+            <span class="ctxchip">⚖ u/s 439 CrPC</span>
+          </div>
+        </div>
+        <div data-show="generate" style="margin-top:120px">
+          <div class="shimmer" style="width:70%;margin-left:auto;margin-right:auto;height:16px"></div>
+          <div class="shimmer" style="width:40%;margin-left:auto;margin-right:auto"></div>
+          <div class="shimmer" style="width:100%;margin-top:24px"></div>
+          <div class="shimmer" style="width:96%"></div>
+          <div class="shimmer" style="width:88%"></div>
+          <div class="shimmer" style="width:100%;margin-top:18px"></div>
+          <div class="shimmer" style="width:92%"></div>
+          <div class="shimmer" style="width:60%"></div>
+        </div>
+
+        <!-- ── THE DOCUMENT ── -->
+        <div class="court" data-anchor="generate">IN THE COURT OF SESSIONS JUDGE<small>AT PUNE</small></div>
+        <div class="caseno">Bail Application No. <span class="ph">____</span> of 2026</div>
+
+        <div class="party"><b>Rajesh Sharma</b>, S/o Mohan Sharma,<br/>aged 34 years, R/o Kothrud, Pune</div>
+        <div class="party role">…Applicant / Accused</div>
+        <div class="vs">VERSUS</div>
+        <div class="party"><b>State of Maharashtra</b><br/>(through Kothrud Police Station)</div>
+        <div class="party role">…Respondent</div>
+        <hr class="rule" />
+        <div class="title">APPLICATION FOR REGULAR BAIL UNDER SECTION 439 OF THE CODE OF CRIMINAL PROCEDURE, 1973</div>
+
+        <p><span class="lead">MOST RESPECTFULLY SHOWETH:</span></p>
+
+        <p>1. That the applicant is a law-abiding citizen and has been falsely implicated in the above-mentioned case registered vide F.I.R. No. 212 of 2025 at Kothrud Police Station.</p>
+
+        <!-- STATE 2: type-ahead. Static copy (hidden during autocomplete) -->
+        <p id="p-auto-static">2. That the applicant has been in judicial custody since the date of his arrest and the continued detention of the applicant serves no useful purpose, as the investigation is substantially complete.</p>
+        <!-- STATE 2: ghost-text version -->
+        <p data-show="autocomplete" data-anchor="autocomplete" id="p-auto-ghost">2. That the applicant has been in judicial custody for the past fourteen days and<span class="caret"></span><span class="ghost" id="ghosttext">&nbsp;the continued detention of the applicant serves no useful purpose, as the investigation is substantially complete and no custodial interrogation is required.</span><span class="tab-chip" id="tabchip">Tab to accept ⇥</span></p>
+
+        <!-- STATE 3 + 5: target paragraph (paragraph + redline card live in one flex row) -->
+        <div id="p3-row" data-anchor="rewrite redline">
+          <p class="p3-para" id="p3">
+            <span id="p3-normal">3. That the applicant undertakes to cooperate with the investigation and shall not tamper with the evidence or influence the witnesses in any manner whatsoever.</span>
+            <span id="p3-selected" data-show="rewrite" class="selected">3. That the applicant undertakes to cooperate with the investigation and shall not tamper with the evidence or influence the witnesses in any manner whatsoever.</span>
+            <span id="p3-redline" data-show="redline">3. That the applicant undertakes to cooperate with the investigation and shall not tamper with the evidence or influence the witnesses in any manner whatsoever. <ins id="redline-ins">The applicant further undertakes to attend the trial on every date of hearing and to abide by all conditions imposed by this Hon'ble Court.</ins></span>
+          </p>
+
+          <!-- STATE 5: redline card (sits to the right of the paragraph) -->
+          <div class="redcard" data-show="redline" id="redCard">
+            <div class="rh"><svg class="mm"><use href="#mikeIcon"/></svg> Tracked change · 1 of 1</div>
+            <div class="why"><b>What changed:</b> Added an undertaking to attend hearings. <b>Everything else is byte-for-byte unchanged</b> — no dates, names, or section numbers were touched.</div>
+            <div class="ra">
+              <button class="btn reject" id="rejectBtn"><svg class="lic" viewBox="0 0 24 24"><use href="#ic-x"/></svg> Reject</button>
+              <button class="btn accept" id="acceptBtn"><svg class="lic" viewBox="0 0 24 24"><use href="#ic-check"/></svg> Accept</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- STATE 3: rewrite panel (sits directly below the highlighted paragraph) -->
+        <div class="float" data-show="rewrite" id="rewriteFloat">
+          <div class="ai-head">
+            <svg class="mm"><use href="#mikeIcon"/></svg>
+            <div class="t">Rewrite selection<small>AI changes only the highlighted text</small></div>
+          </div>
+          <div class="promptbox">
+            <span class="pen"><svg class="lic" viewBox="0 0 24 24"><use href="#ic-pen"/></svg></span>
+            <input id="rewritePrompt" value="make it firmer and add an undertaking to attend every hearing" />
+            <button class="go" title="Send"><svg class="lic" viewBox="0 0 24 24"><use href="#ic-arrow"/></svg></button>
+          </div>
+          <div class="chips">
+            <span class="chip" data-q="Make the tone more formal."><span class="i">⚖</span>Formal</span>
+            <span class="chip" data-q="Make it more concise."><span class="i">✂</span>Concise</span>
+            <span class="chip" data-q="Add a supporting citation."><span class="i">§</span>Citation</span>
+            <span class="chip" data-q="Strengthen the language."><span class="i">↑</span>Strengthen</span>
+          </div>
+          <div class="preview">
+            <div class="pv-h">Suggested rewrite</div>
+            <div class="pv-b">3. That the applicant undertakes to fully cooperate with the investigation and not influence any witness, <span class="add">and to remain present before this Hon'ble Court on every date of hearing.</span></div>
+          </div>
+          <div class="pv-actions">
+            <button class="btn">Discard</button>
+            <button class="btn primary" style="flex:2"><svg class="lic" viewBox="0 0 24 24"><use href="#ic-check"/></svg> Replace selection</button>
+          </div>
+        </div>
+
+        <!-- STATE 4: insert anchor + command bar -->
+        <p id="p4" data-anchor="insert">4. That the applicant is the sole bread-earner of his family, comprising his aged parents and two minor children, who are dependent upon him.</p>
+
+        <div class="insertbar" data-show="insert" id="insertBar">
+          <div class="row">
+            <svg class="mm"><use href="#mikeIcon"/></svg>
+            <input value="add a ground that the offence is not punishable by death and applicant has no antecedents" />
+            <button class="btn primary">Insert ↵</button>
+          </div>
+          <div class="hintrow">↳ Inserts a new numbered paragraph here — drawn from your case findings</div>
+        </div>
+        <p data-show="insert" id="p-inserted" class="ins-result">
+          <ins>5. That the offence alleged is not punishable with death or imprisonment for life, and the applicant has no prior criminal antecedents, rendering him entitled to the concession of bail.</ins>
+        </p>
+
+        <p>6. That the applicant undertakes to abide by any terms and conditions that this Hon'ble Court may deem fit to impose while granting bail.</p>
+
+        <p style="margin-top:26px"><span class="lead">PRAYER:</span> It is therefore most respectfully prayed that this Hon'ble Court may be pleased to release the applicant on regular bail in connection with F.I.R. No. 212 of 2025, and pass such other order as it may deem fit in the interest of justice.</p>
+
+        <p style="text-align:right;margin-top:30px">Place: Pune<br/>Date: <span class="ph">__/__/2026</span><br/><br/>Through Counsel<br/><span class="ph">[Advocate name]</span></p>
+
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== CAPTION (walkthrough scaffolding) ===== -->
+<div class="caption">
+  <span class="cnum" id="capNum">1</span>
+  <div class="ctext" id="capText"></div>
+  <div class="cnav">
+    <button id="prevBtn" title="Previous">‹</button>
+    <button id="nextBtn" title="Next">›</button>
+  </div>
+</div>
+
+<script>
+  const scenes = ["generate","autocomplete","rewrite","insert","redline"];
+  const captions = {
+    generate:     `<span class="tag">Step 1 · You already have this</span>Mike writes the <b>entire first draft</b> from your case facts and uploaded documents — a real bail application, formatted for an Indian court. This half is <b>already built</b> in your app.`,
+    autocomplete: `<span class="tag">Step 2 · The missing piece</span>As you type, the AI suggests the rest of your sentence in grey — like Gmail, but trained on <b>legal prose</b>. Press <b>Tab</b> to accept, or just keep typing to ignore it.`,
+    rewrite:      `<span class="tag">Step 3 · The missing piece</span>Highlight any passage, tell the AI what you want ("make it firmer"), and it rewrites <b>only that passage</b>. Pick a quick action or type your own instruction. You approve before anything changes.`,
+    insert:       `<span class="tag">Step 4 · The missing piece</span>Put your cursor anywhere and ask for a new clause. The AI drafts it <b>using your case findings</b> (here: "no antecedents", "not punishable by death") and drops it in as a new paragraph.`,
+    redline:      `<span class="tag">Step 5 · The safety rule</span>Every AI edit shows as a <b>redline you accept or reject</b> — and it changes <b>only the words it means to</b>. A date, a name, or a section number is never silently altered. This is how drafting stays trustworthy.`
+  };
+
+  const canvas = document.getElementById('canvas');
+  let idx = 0;
+
+  function resetState(){
+    // type-ahead
+    const gt = document.getElementById('ghosttext'), tc = document.getElementById('tabchip');
+    if(gt){ gt.style.color = '#9aa6b2'; }
+    if(tc){ tc.textContent = 'Tab to accept ⇥'; tc.style.background = 'var(--blue-50)';
+            tc.style.color = 'var(--blue-700)'; tc.style.borderColor = 'var(--blue-200)'; }
+    // redline
+    const ins = document.getElementById('redline-ins');
+    if(ins){ ins.style.background=''; ins.style.color=''; ins.style.textDecoration=''; ins.style.opacity=''; ins.textContent =
+      "The applicant further undertakes to attend the trial on every date of hearing and to abide by all conditions imposed by this Hon'ble Court."; }
+  }
+
+  function setScene(name){
+    idx = scenes.indexOf(name);
+    document.body.dataset.scene = name;
+    document.querySelectorAll('.step').forEach(s => s.classList.toggle('active', s.dataset.go === name));
+    document.getElementById('capNum').textContent = idx + 1;
+    document.getElementById('capText').innerHTML = captions[name];
+    resetState();
+
+    // bring the relevant region into view (panels are in-flow, so this only frames the scene)
+    const map = {
+      generate:     ['#page', 'start'],
+      autocomplete: ['#p-auto-ghost', 'center'],
+      rewrite:      ['#p3-row', 'start'],
+      insert:       ['#p4', 'start'],
+      redline:      ['#p3-row', 'center']
+    };
+    const [sel, block] = map[name];
+    if(name === 'generate'){ canvas.scrollTop = 0; }
+    else { const t = document.querySelector(sel); if(t) t.scrollIntoView({block, behavior:'instant'}); }
+  }
+
+  // step rail + caption nav
+  document.querySelectorAll('.step').forEach(s => s.addEventListener('click', () => setScene(s.dataset.go)));
+  document.getElementById('nextBtn').onclick = () => setScene(scenes[Math.min(idx + 1, scenes.length - 1)]);
+  document.getElementById('prevBtn').onclick = () => setScene(scenes[Math.max(idx - 1, 0)]);
+  window.addEventListener('keydown', (e) => {
+    if(e.key === 'ArrowRight'){ setScene(scenes[Math.min(idx + 1, scenes.length - 1)]); }
+    if(e.key === 'ArrowLeft'){ setScene(scenes[Math.max(idx - 1, 0)]); }
+    if(e.key === 'Tab' && document.body.dataset.scene === 'autocomplete'){
+      e.preventDefault();
+      const gt = document.getElementById('ghosttext'), tc = document.getElementById('tabchip');
+      gt.style.color = '#1a1a1a';
+      tc.textContent = '✓ Accepted'; tc.style.background = 'var(--green-bg)';
+      tc.style.color = 'var(--green-text)'; tc.style.borderColor = 'var(--green-line)';
+    }
+  });
+
+  // quick-action chips populate the prompt (per spec: "pick a quick action or type your own")
+  document.querySelectorAll('#rewriteFloat .chip').forEach(c =>
+    c.addEventListener('click', () => { document.getElementById('rewritePrompt').value = c.dataset.q; }));
+
+  // redline accept / reject (resets when you re-enter the scene)
+  const ins = () => document.getElementById('redline-ins');
+  document.getElementById('acceptBtn').addEventListener('click', () => {
+    const el = ins(); el.style.background = 'transparent'; el.style.color = 'inherit'; el.style.textDecoration = 'none';
+  });
+  document.getElementById('rejectBtn').addEventListener('click', () => {
+    const el = ins(); el.style.opacity = '0.35'; el.style.textDecoration = 'line-through';
+    el.style.color = 'var(--red)'; el.style.background = 'var(--red-bg)';
+  });
+
+  window.addEventListener('load', () => setScene('generate'));
+</script>
+</body>
+</html>

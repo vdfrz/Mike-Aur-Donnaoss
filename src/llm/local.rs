@@ -390,6 +390,14 @@ fn parse_sse_line_opt(line: &str) -> Option<StreamEvent> {
 }
 
 pub async fn complete(params: StreamParams) -> Result<String> {
+    complete_with_max(params, 512).await
+}
+
+/// Like `complete`, but with a caller-supplied output-token budget and a
+/// visible `[truncated]` marker when the model stops on `length`. Used by
+/// callers (e.g. the history summarizer) that need a larger budget than the
+/// 512-token default and must not silently ship a clipped result.
+pub async fn complete_with_max(params: StreamParams, max_tokens: u32) -> Result<String> {
     let (base, api_key, model) = resolve_endpoint(&params)?;
     tracing::info!("[llm/local] complete → base={base}, model={model}, key_present={}", !api_key.is_empty() && api_key != "local");
     let client = reqwest::Client::new();
@@ -399,7 +407,7 @@ pub async fn complete(params: StreamParams) -> Result<String> {
         "model": model,
         "messages": messages,
         "stream": false,
-        "max_tokens": 512,
+        "max_tokens": max_tokens,
     });
 
     let resp = client
@@ -420,7 +428,7 @@ pub async fn complete(params: StreamParams) -> Result<String> {
     #[derive(Deserialize)]
     struct Resp { choices: Vec<RespChoice> }
     #[derive(Deserialize)]
-    struct RespChoice { message: RespMessage }
+    struct RespChoice { message: RespMessage, finish_reason: Option<String> }
     #[derive(Deserialize)]
     struct RespMessage { content: Option<String> }
 
@@ -431,9 +439,19 @@ pub async fn complete(params: StreamParams) -> Result<String> {
             tracing::error!("[llm/local] complete parse error: {e} (body: {})", raw.chars().take(400).collect::<String>());
             anyhow!("Local LLM body parse error: {e}")
         })?;
-    Ok(data.choices.into_iter().next()
+    let choice = data.choices.into_iter().next();
+    let truncated = choice
+        .as_ref()
+        .and_then(|c| c.finish_reason.as_deref())
+        == Some("length");
+    let mut text = choice
         .and_then(|c| c.message.content)
-        .unwrap_or_default())
+        .unwrap_or_default();
+    if truncated {
+        tracing::warn!("[llm/local] complete truncated at max_tokens={max_tokens}");
+        text.push_str(" […truncated at token limit]");
+    }
+    Ok(text)
 }
 
 #[cfg(test)]

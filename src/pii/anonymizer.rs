@@ -174,9 +174,19 @@ async fn query_gliner(text: &str, base_url: &str) -> Vec<GlinerEntity> {
     };
 
     match client.post(format!("{base_url}/detect")).json(&req).send().await {
-        Ok(resp) => resp.json::<Vec<GlinerEntity>>().await.unwrap_or_default(),
+        Ok(resp) => match resp.json::<Vec<GlinerEntity>>().await {
+            Ok(entities) => entities,
+            Err(e) => {
+                // The sidecar is up but returned an unparseable body. Since
+                // ORG/Address (and GLiNER-only names) are detected ONLY here,
+                // silently treating this as "nothing found" would leak PII
+                // with no signal — surface it loudly.
+                tracing::warn!("[pii] GLiNER returned unparseable body: {e}");
+                Vec::new()
+            }
+        },
         Err(e) => {
-            tracing::debug!("[pii] GLiNER sidecar unreachable: {e}");
+            tracing::warn!("[pii] GLiNER sidecar unreachable: {e}");
             Vec::new()
         }
     }
@@ -197,25 +207,75 @@ fn is_non_name(w: &str) -> bool {
     NON_NAME_WORDS.contains(&w.to_lowercase().as_str())
 }
 
-fn clean_name(raw: &str) -> Option<String> {
-    let words: Vec<&str> = raw.split_whitespace().collect();
-    let meaningful: Vec<&&str> = words.iter().filter(|w| !is_non_name(w)).collect();
-    if meaningful.is_empty() || raw.len() < 3 {
+/// Build a case-insensitive regex that matches `original` but only as a whole
+/// token: a `\b` is added on each edge that abuts a word character so a short
+/// original (a single-token name, a short account number) cannot match inside
+/// a larger word/number or inside an inserted `PREFIX_NN` placeholder.
+fn anchored_pattern(original: &str) -> String {
+    let lead = original
+        .chars()
+        .next()
+        .map(|c| c.is_alphanumeric() || c == '_')
+        .unwrap_or(false);
+    let trail = original
+        .chars()
+        .next_back()
+        .map(|c| c.is_alphanumeric() || c == '_')
+        .unwrap_or(false);
+    format!(
+        "(?i){}{}{}",
+        if lead { r"\b" } else { "" },
+        regex::escape(original),
+        if trail { r"\b" } else { "" },
+    )
+}
+
+/// Strip leading/trailing non-name words from a captured name group and
+/// also return the byte offsets of the retained name *within `raw`* so
+/// callers can compute exact span boundaries when a
+/// leading/trailing word was dropped (e.g. "Court Rajesh Kumar" → the bytes
+/// covering only "Rajesh Kumar"). Returns `(start, end, cleaned_name)`.
+fn clean_name_spanned(raw: &str) -> Option<(usize, usize, String)> {
+    let words: Vec<(usize, &str)> = raw.split_whitespace_indices();
+    let meaningful = words.iter().any(|(_, w)| !is_non_name(w));
+    if !meaningful || raw.len() < 3 {
         return None;
     }
     // Drop trailing non-name words
     let mut end = words.len();
-    while end > 0 && is_non_name(words[end - 1]) {
+    while end > 0 && is_non_name(words[end - 1].1) {
         end -= 1;
     }
     let mut start = 0;
-    while start < end && is_non_name(words[start]) {
+    while start < end && is_non_name(words[start].1) {
         start += 1;
     }
     if start >= end {
         return None;
     }
-    Some(words[start..end].join(" "))
+    let byte_start = words[start].0;
+    let last = &words[end - 1];
+    let byte_end = last.0 + last.1.len();
+    let cleaned: String = words[start..end]
+        .iter()
+        .map(|(_, w)| *w)
+        .collect::<Vec<_>>()
+        .join(" ");
+    Some((byte_start, byte_end, cleaned))
+}
+
+/// `split_whitespace` that also yields each word's byte offset within `self`.
+trait SplitWhitespaceIndices {
+    fn split_whitespace_indices(&self) -> Vec<(usize, &str)>;
+}
+
+impl SplitWhitespaceIndices for str {
+    fn split_whitespace_indices(&self) -> Vec<(usize, &str)> {
+        let base = self.as_ptr() as usize;
+        self.split_whitespace()
+            .map(|w| (w.as_ptr() as usize - base, w))
+            .collect()
+    }
 }
 
 fn collect_regex_spans(text: &str) -> Vec<Span> {
@@ -313,10 +373,10 @@ fn collect_regex_spans(text: &str) -> Vec<Span> {
     // Names via title prefix (Shri X, Mr. Y)
     for caps in RE_TITLE_NAME.captures_iter(text) {
         if let Some(m) = caps.get(1) {
-            if let Some(name) = clean_name(m.as_str()) {
+            if let Some((rel_start, rel_end, name)) = clean_name_spanned(m.as_str()) {
                 spans.push(Span {
-                    start: m.start(),
-                    end: m.start() + name.len().min(m.len()),
+                    start: m.start() + rel_start,
+                    end: m.start() + rel_end,
                     original: name,
                     category: PiiCategory::Person,
                 });
@@ -327,10 +387,10 @@ fn collect_regex_spans(text: &str) -> Vec<Span> {
     // Names via relation (s/o, d/o, w/o)
     for caps in RE_RELATION_NAME.captures_iter(text) {
         if let Some(m) = caps.get(1) {
-            if let Some(name) = clean_name(m.as_str()) {
+            if let Some((rel_start, rel_end, name)) = clean_name_spanned(m.as_str()) {
                 spans.push(Span {
-                    start: m.start(),
-                    end: m.start() + name.len().min(m.len()),
+                    start: m.start() + rel_start,
+                    end: m.start() + rel_end,
                     original: name,
                     category: PiiCategory::Person,
                 });
@@ -341,16 +401,21 @@ fn collect_regex_spans(text: &str) -> Vec<Span> {
     spans
 }
 
-fn merge_gliner_spans(spans: &mut Vec<Span>, entities: Vec<GlinerEntity>) {
-    for ent in entities {
-        // Skip if this span is already covered by regex detection
-        let dominated = spans
-            .iter()
-            .any(|s| s.start <= ent.start && s.end >= ent.end);
-        if dominated {
-            continue;
-        }
+/// GLiNER (a Python service) reports entity offsets as Unicode **code-point**
+/// indices, not Rust UTF-8 byte offsets. Build a lookup from code-point index
+/// → byte offset for the given text so spans can be converted safely. The
+/// returned vec has `text.chars().count() + 1` entries (last = `text.len()`).
+fn codepoint_to_byte_map(text: &str) -> Vec<usize> {
+    let mut map: Vec<usize> = text.char_indices().map(|(i, _)| i).collect();
+    map.push(text.len());
+    map
+}
 
+fn merge_gliner_spans(spans: &mut Vec<Span>, entities: Vec<GlinerEntity>, text: &str) {
+    let cp_to_byte = codepoint_to_byte_map(text);
+    let max_cp = cp_to_byte.len() - 1; // number of code points
+
+    for ent in entities {
         let category = match ent.label.as_str() {
             "person name" => PiiCategory::Person,
             "organization" => PiiCategory::Organization,
@@ -358,9 +423,33 @@ fn merge_gliner_spans(spans: &mut Vec<Span>, entities: Vec<GlinerEntity>) {
             _ => continue,
         };
 
+        // GLiNER offsets are code-point indices and untrusted — validate the
+        // range and convert to byte offsets. Skip (with a signal) anything
+        // out of range or inverted so a bad span can never panic the slice
+        // or silently corrupt unrelated bytes.
+        if ent.start > ent.end || ent.end > max_cp {
+            tracing::warn!(
+                "[pii] GLiNER span out of range (start={}, end={}, code_points={}); skipping",
+                ent.start,
+                ent.end,
+                max_cp
+            );
+            continue;
+        }
+        let byte_start = cp_to_byte[ent.start];
+        let byte_end = cp_to_byte[ent.end];
+
+        // Skip if this span is already covered by regex detection
+        let dominated = spans
+            .iter()
+            .any(|s| s.start <= byte_start && s.end >= byte_end);
+        if dominated {
+            continue;
+        }
+
         spans.push(Span {
-            start: ent.start,
-            end: ent.end,
+            start: byte_start,
+            end: byte_end,
             original: ent.text,
             category,
         });
@@ -384,6 +473,45 @@ fn dedupe_spans(spans: &mut Vec<Span>) {
     *spans = keep;
 }
 
+/// Render `text` with `spans` (already deduped, byte offsets) replaced by
+/// placeholders, building the mapping in the same pass. Every slice is
+/// guarded against off-boundary / out-of-range offsets so a stray span can
+/// never panic — a span that doesn't sit on char boundaries is skipped.
+fn render_spans(text: &str, spans: &[Span]) -> (String, PiiMapping) {
+    let mut mapping = PiiMapping::new();
+    let mut result = String::with_capacity(text.len());
+    let mut cursor = 0usize;
+
+    for span in spans {
+        // Defensive: the span must be in-range, on char boundaries, and not
+        // overlap what we've already emitted.
+        if span.start < cursor
+            || span.end > text.len()
+            || span.start > span.end
+            || !text.is_char_boundary(span.start)
+            || !text.is_char_boundary(span.end)
+        {
+            tracing::warn!(
+                "[pii] skipping invalid span (start={}, end={}, len={})",
+                span.start,
+                span.end,
+                text.len()
+            );
+            continue;
+        }
+        if span.start > cursor {
+            result.push_str(&text[cursor..span.start]);
+        }
+        let placeholder = mapping.placeholder_for(&span.original, span.category);
+        result.push_str(&placeholder);
+        cursor = span.end;
+    }
+    if cursor < text.len() {
+        result.push_str(&text[cursor..]);
+    }
+    (result, mapping)
+}
+
 // ── public API ───────────────────────────────────────────────────────
 
 /// URL of the GLiNER sidecar. Set `GLINER_URL` env var to override.
@@ -401,29 +529,12 @@ pub async fn anonymize(text: &str) -> (String, PiiMapping) {
     // Boost with GLiNER (best-effort)
     let gliner_entities = query_gliner(text, &gliner_url()).await;
     if !gliner_entities.is_empty() {
-        merge_gliner_spans(&mut spans, gliner_entities);
+        merge_gliner_spans(&mut spans, gliner_entities, text);
     }
 
     dedupe_spans(&mut spans);
 
-    let mut mapping = PiiMapping::new();
-    let mut result = String::with_capacity(text.len());
-    let mut cursor = 0usize;
-
-    for span in &spans {
-        if span.start > cursor {
-            result.push_str(&text[cursor..span.start]);
-        }
-        let placeholder = mapping.placeholder_for(&span.original, span.category);
-        result.push_str(&placeholder);
-        cursor = span.end;
-    }
-    // Remainder
-    if cursor < text.len() {
-        result.push_str(&text[cursor..]);
-    }
-
-    (result, mapping)
+    render_spans(text, &spans)
 }
 
 /// Returns `true` if PII anonymization is enabled via `PII_ANONYMIZE=1`.
@@ -453,7 +564,7 @@ pub async fn anonymize_messages(
     let mut spans = collect_regex_spans(&combined);
     let gliner_entities = query_gliner(&combined, &gliner_url()).await;
     if !gliner_entities.is_empty() {
-        merge_gliner_spans(&mut spans, gliner_entities);
+        merge_gliner_spans(&mut spans, gliner_entities, &combined);
     }
     dedupe_spans(&mut spans);
 
@@ -476,8 +587,13 @@ pub async fn anonymize_messages(
             let mut entries: Vec<_> = mapping.to_placeholder.iter().collect();
             entries.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
             for (original_lower, placeholder) in entries {
-                // Case-insensitive replacement: find the original in content
-                if let Ok(re) = Regex::new(&format!(r"(?i){}", regex::escape(original_lower))) {
+                // Anchor with word boundaries so a short original can't match
+                // inside a larger word/number (e.g. "Singh" inside "Singhania",
+                // a 9-digit account inside a 14-digit one) or inside an
+                // already-inserted placeholder. `\b` is only meaningful next to
+                // a word char, so add it conditionally on each edge.
+                let pat = anchored_pattern(original_lower);
+                if let Ok(re) = Regex::new(&pat) {
                     content = re.replace_all(&content, placeholder.as_str()).into_owned();
                 }
             }
@@ -510,21 +626,16 @@ mod tests {
     fn anon_sync(text: &str) -> (String, PiiMapping) {
         let mut spans = collect_regex_spans(text);
         dedupe_spans(&mut spans);
-        let mut mapping = PiiMapping::new();
-        let mut result = String::with_capacity(text.len());
-        let mut cursor = 0usize;
-        for span in &spans {
-            if span.start > cursor {
-                result.push_str(&text[cursor..span.start]);
-            }
-            let placeholder = mapping.placeholder_for(&span.original, span.category);
-            result.push_str(&placeholder);
-            cursor = span.end;
-        }
-        if cursor < text.len() {
-            result.push_str(&text[cursor..]);
-        }
-        (result, mapping)
+        render_spans(text, &spans)
+    }
+
+    /// Helper: anonymize regex spans + injected (already code-point-indexed)
+    /// GLiNER entities, exercising the real merge/dedupe/render path.
+    fn anon_with_gliner(text: &str, entities: Vec<GlinerEntity>) -> (String, PiiMapping) {
+        let mut spans = collect_regex_spans(text);
+        merge_gliner_spans(&mut spans, entities, text);
+        dedupe_spans(&mut spans);
+        render_spans(text, &spans)
     }
 
     #[test]
@@ -604,5 +715,81 @@ mod tests {
         let input = "Filed under Section 138 of the Negotiable Instruments Act.";
         let (anon, _) = anon_sync(input);
         assert_eq!(anon, input); // nothing should be redacted
+    }
+
+    // ── new regression tests (Loop A findings) ───────────────────────────
+
+    #[test]
+    fn gliner_codepoint_offsets_on_multibyte_text() {
+        // Devanagari + ₹ before the entity push GLiNER's *code-point* offsets
+        // off the byte offsets. A naive byte slice would panic or replace the
+        // wrong bytes; the conversion must redact exactly "Acme Corp".
+        let text = "मामला ₹500 — Acme Corp filed.";
+        // Code-point indices of "Acme Corp" within `text`.
+        let prefix: String = "मामला ₹500 — ".to_string();
+        let start = prefix.chars().count();
+        let end = start + "Acme Corp".chars().count();
+        let ents = vec![GlinerEntity {
+            text: "Acme Corp".to_string(),
+            start,
+            end,
+            label: "organization".to_string(),
+            score: 0.9,
+        }];
+        let (anon, map) = anon_with_gliner(text, ents);
+        assert!(anon.contains("ORG_01"), "got: {anon}");
+        assert!(!anon.contains("Acme Corp"));
+        // Multibyte prefix preserved intact.
+        assert!(anon.contains("मामला ₹500"));
+        let restored = deanonymize(&anon, &map);
+        assert!(restored.contains("Acme Corp"));
+    }
+
+    #[test]
+    fn gliner_out_of_range_span_is_skipped_not_panics() {
+        // An offset past the end of the text (e.g. Python counted bytes
+        // differently, or schema drift) must be skipped, never panic.
+        let text = "Ravi met someone.";
+        let ents = vec![GlinerEntity {
+            text: "someone".to_string(),
+            start: 1000,
+            end: 1010,
+            label: "person name".to_string(),
+            score: 0.9,
+        }];
+        let (anon, _) = anon_with_gliner(text, ents);
+        assert_eq!(anon, text); // out-of-range span ignored
+    }
+
+    #[test]
+    fn person_span_does_not_leak_surname_after_dropped_leading_word() {
+        // "Court Rajesh Kumar": clean_name drops "Court"; the span must cover
+        // exactly "Rajesh Kumar", not "Court Rajesh", or "Kumar" leaks.
+        let input = "Mr. Court Rajesh Kumar appeared.";
+        let (anon, map) = anon_sync(input);
+        assert!(anon.contains("PERSON_01"), "got: {anon}");
+        assert!(!anon.contains("Kumar"), "surname leaked: {anon}");
+        assert!(!anon.contains("Rajesh"));
+        // "Court" was not part of the name and must survive.
+        assert!(anon.contains("Court"));
+        let restored = deanonymize(&anon, &map);
+        assert!(restored.contains("Rajesh Kumar"));
+    }
+
+    #[test]
+    fn anchored_pattern_does_not_match_superstrings() {
+        // Direct test of the boundary anchoring used by anonymize_messages:
+        // a short original must not match inside a larger word/number/placeholder.
+        let re = Regex::new(&anchored_pattern("singh")).unwrap();
+        assert!(!re.is_match("Singhania & Co."));
+        assert!(re.is_match("Mr. Singh appeared"));
+
+        let re = Regex::new(&anchored_pattern("123456789")).unwrap();
+        assert!(!re.is_match("a/c 12345678901234")); // 9-digit inside 14-digit
+        assert!(re.is_match("a/c 123456789 only"));
+
+        // Must not match inside an inserted PREFIX_NN placeholder.
+        let re = Regex::new(&anchored_pattern("pan")).unwrap();
+        assert!(!re.is_match("PAN_01"));
     }
 }

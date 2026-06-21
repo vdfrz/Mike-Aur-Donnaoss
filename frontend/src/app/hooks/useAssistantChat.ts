@@ -16,6 +16,8 @@ interface UseAssistantChatOptions {
     initialMessages?: MikeMessage[];
     chatId?: string;
     projectId?: string;
+    /** When "court_bundle", focuses the assistant on building a court bundle. */
+    intent?: string;
 }
 
 function findLastContentIndex(events: AssistantEvent[]): number {
@@ -29,6 +31,7 @@ export function useAssistantChat({
     initialMessages = [],
     chatId: initialChatId,
     projectId,
+    intent,
 }: UseAssistantChatOptions = {}) {
     const router = useRouter();
     const {
@@ -436,6 +439,7 @@ export function useAssistantChat({
                       messages: apiMessages,
                       chat_id: chatId,
                       model,
+                      intent,
                       signal: controller.signal,
                   }));
             console.log(
@@ -769,7 +773,39 @@ export function useAssistantChat({
                                 filename: data.filename as string,
                                 download_url: "",
                                 isStreaming: true,
+                                startedAt: Date.now(),
                             });
+                            continue;
+                        }
+
+                        // Court-bundle compile stage — attach to the in-flight
+                        // doc card so it can show a live timer + stage label.
+                        if (data.type === "bundle_progress") {
+                            updateMatchingEvent(
+                                (e) =>
+                                    e.type === "doc_created" && !!e.isStreaming,
+                                (e) => {
+                                    const prev = e as Extract<
+                                        AssistantEvent,
+                                        { type: "doc_created" }
+                                    >;
+                                    return {
+                                        ...prev,
+                                        stage:
+                                            typeof data.stage === "string"
+                                                ? (data.stage as string)
+                                                : prev.stage,
+                                        stageCurrent:
+                                            typeof data.current === "number"
+                                                ? (data.current as number)
+                                                : undefined,
+                                        stageTotal:
+                                            typeof data.total === "number"
+                                                ? (data.total as number)
+                                                : undefined,
+                                    };
+                                },
+                            );
                             continue;
                         }
 
@@ -811,6 +847,9 @@ export function useAssistantChat({
                                     ) {
                                         next.version_number =
                                             data.version_number as number;
+                                    }
+                                    if (typeof data.body === "string") {
+                                        next.body = data.body as string;
                                     }
                                     return next;
                                 },
@@ -968,6 +1007,14 @@ export function useAssistantChat({
                                         });
                                     }
                                 })();
+                            } else if (name === "ask_clarifying_questions") {
+                                const qs = (args?.questions ?? []).map((q: any) => ({
+                                    header: q.header,
+                                    text: q.question,
+                                    multiSelect: !!q.multiSelect,
+                                    options: q.options ?? [],
+                                }));
+                                pushEvent({ type: "clarification", request_id, questions: qs });
                             }
                             continue;
                         }

@@ -1,8 +1,19 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { HardDrive, Trash2, Loader2, ExternalLink, FileText } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { HardDrive, Trash2, Loader2, ExternalLink, FileText, RefreshCw } from "lucide-react";
 import PoweredByIKanoon from "@/app/components/shared/PoweredByIKanoon";
+import ReindexProgress from "@/app/components/shared/ReindexProgress";
+
+interface ReindexStatusOut {
+    status: "idle" | "running" | "done" | "failed";
+    total: number;
+    processed: number;
+    indexed: number;
+    current_file?: string | null;
+    current_step?: string | null;
+    last_error?: string | null;
+}
 
 const API_BASE =
     process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:3001";
@@ -71,6 +82,18 @@ export default function CaseSearchSettingsPage() {
     const [loading, setLoading] = useState(true);
     const [clearing, setClearing] = useState(false);
     const [confirmClear, setConfirmClear] = useState(false);
+    const [reindexing, setReindexing] = useState(false);
+    const [reindexNote, setReindexNote] = useState<string | null>(null);
+    const [reindexStatus, setReindexStatus] = useState<ReindexStatusOut | null>(null);
+    const [reindexStart, setReindexStart] = useState<number | null>(null);
+    const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+    // Stop polling on unmount.
+    useEffect(() => {
+        return () => {
+            if (pollRef.current) clearInterval(pollRef.current);
+        };
+    }, []);
 
     const totalBytes = docs.reduce((sum, d) => sum + (d.size_bytes || 0), 0);
     const count = docs.length;
@@ -116,6 +139,57 @@ export default function CaseSearchSettingsPage() {
             });
         } catch {
             refreshDocs(); // restore truth on failure
+        }
+    }
+
+    async function handleReindex() {
+        setReindexing(true);
+        setReindexNote(null);
+        try {
+            const r = await fetch(`${API_BASE}/indian-kanoon/reindex`, {
+                method: "POST",
+                headers: { Authorization: `Bearer ${getToken()}` },
+            });
+            if (!r.ok) {
+                setReindexNote("Couldn't start the rebuild — please try again.");
+                setReindexing(false);
+                return;
+            }
+            const data = await r.json();
+            setReindexStart(Date.now());
+            setReindexStatus({
+                status: "running",
+                total: data.count ?? count,
+                processed: 0,
+                indexed: 0,
+            });
+
+            // Poll the backend snapshot until the rebuild finishes. The
+            // <ReindexProgress> component renders the embedded count, a live
+            // timer and an ETA from this.
+            if (pollRef.current) clearInterval(pollRef.current);
+            pollRef.current = setInterval(async () => {
+                try {
+                    const sr = await fetch(
+                        `${API_BASE}/indian-kanoon/reindex-status`,
+                        { headers: { Authorization: `Bearer ${getToken()}` } },
+                    );
+                    if (!sr.ok) return;
+                    const s: ReindexStatusOut = await sr.json();
+                    setReindexStatus(s);
+                    if (s.status === "done" || s.status === "failed") {
+                        if (pollRef.current) clearInterval(pollRef.current);
+                        pollRef.current = null;
+                        setReindexing(false);
+                        refreshDocs();
+                    }
+                } catch {
+                    // transient — keep the previous snapshot
+                }
+            }, 1000);
+        } catch {
+            setReindexNote("Couldn't start the rebuild — please try again.");
+            setReindexing(false);
         }
     }
 
@@ -193,20 +267,62 @@ export default function CaseSearchSettingsPage() {
                             judgment{count !== 1 ? "s" : ""}
                         </p>
                     </div>
-                    <button
-                        onClick={handleClear}
-                        disabled={clearing || count === 0}
-                        className="inline-flex items-center gap-1.5 rounded-md border border-gray-200 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50 transition-colors"
-                    >
-                        {clearing ? (
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                            <Trash2 className="h-3.5 w-3.5" />
-                        )}
-                        {confirmClear ? "Are you sure?" : "Clear saved judgments"}
-                    </button>
+                    <div className="flex items-center gap-2">
+                        <div className="relative group">
+                            <button
+                                onClick={handleReindex}
+                                disabled={reindexing || count === 0}
+                                className="inline-flex items-center gap-1.5 rounded-md border border-gray-200 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50 transition-colors"
+                            >
+                                {reindexing ? (
+                                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                ) : (
+                                    <RefreshCw className="h-3.5 w-3.5" />
+                                )}
+                                Rebuild index
+                            </button>
+                            {/* Plain-language hover explainer. */}
+                            <div className="pointer-events-none absolute right-0 top-full mt-2 w-72 rounded-lg bg-gray-900 px-3 py-2.5 text-xs leading-relaxed text-white shadow-xl opacity-0 transition-opacity duration-150 group-hover:opacity-100 z-50">
+                                <span className="font-semibold">Helps Mike find the exact part of your saved cases when you search.</span>
+                                <br />
+                                <br />
+                                Press it once. It won&apos;t re-download anything, cost
+                                credits, or delete your cases.
+                            </div>
+                        </div>
+                        <button
+                            onClick={handleClear}
+                            disabled={clearing || count === 0}
+                            className="inline-flex items-center gap-1.5 rounded-md border border-gray-200 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50 transition-colors"
+                        >
+                            {clearing ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                                <Trash2 className="h-3.5 w-3.5" />
+                            )}
+                            {confirmClear ? "Are you sure?" : "Clear saved judgments"}
+                        </button>
+                    </div>
                 </div>
-                {totalBytes > 0 && limit > 0 && (
+                {reindexNote && (
+                    <p className="text-xs text-gray-500">{reindexNote}</p>
+                )}
+                {reindexStatus && reindexStatus.status !== "idle" && (
+                    <ReindexProgress
+                        indexed={reindexStatus.indexed}
+                        total={reindexStatus.total}
+                        status={reindexStatus.status}
+                        startedAt={reindexStart}
+                        currentFile={reindexStatus.current_file}
+                        currentStep={reindexStatus.current_step}
+                        errorText={reindexStatus.last_error}
+                        labels={{
+                            unit: "judgments",
+                            failedLabel: "Rebuild failed — please try again.",
+                        }}
+                    />
+                )}
+                {totalBytes > 0 && limit > 0 && reindexStatus?.status !== "running" && (
                     <div className="h-1.5 bg-gray-100 rounded overflow-hidden">
                         <div
                             className="h-full bg-gray-700 transition-all"

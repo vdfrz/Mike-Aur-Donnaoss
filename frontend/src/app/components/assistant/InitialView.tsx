@@ -84,6 +84,7 @@ export function InitialView({ onSubmit }: InitialViewProps) {
                         onCancel={() => {}}
                         isLoading={false}
                         onProjectsClick={() => setProjectModalOpen(true)}
+                        showOfflineToggle
                     />
 
                     <div className="text-center">

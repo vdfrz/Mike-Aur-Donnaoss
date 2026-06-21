@@ -1,9 +1,9 @@
 //! Indian Kanoon corpus routes.
 //!
-//! Mirrors the EUR-Lex citation-jump pattern: cases are fetched from the
-//! Indian Kanoon API, cached locally as plain-text files, embedded into
-//! the local RAG index, and cited with clickable links that jump to the
-//! exact cached document. Files never leave the lawyer's machine.
+//! Cases are fetched from the Indian Kanoon API, cached locally as
+//! plain-text files, embedded into the local RAG index, and cited with
+//! clickable links that jump to the exact cached document. Files never
+//! leave the lawyer's machine.
 //!
 //!   GET    /indian-kanoon/config              — user's IK API key / enable flag
 //!   PUT    /indian-kanoon/config              — save IK API key
@@ -53,6 +53,8 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/doc-html/{tid}", get(fetch_doc_html))
         .route("/docfragment/{tid}", get(doc_fragment))
         .route("/aws-verify", get(aws_verify))
+        .route("/reindex", post(reindex_documents))
+        .route("/reindex-status", get(reindex_status))
         .route("/documents", get(list_documents))
         .route("/documents/{id}", delete(delete_document))
         .route("/documents/{id}/resync", post(resync_document))
@@ -288,11 +290,15 @@ fn extract_legal_keywords(query: &str) -> String {
 
 /// Simple URL-encoding for query parameters (avoids pulling in a full crate).
 fn urlencoding(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
-            ' ' => "%20".to_string(),
-            other => format!("%{:02X}", other as u8),
+    // Percent-encode the UTF-8 bytes, not the char value: casting a multi-byte
+    // char to u8 keeps only the low byte and corrupts non-ASCII (Devanagari, é).
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            b' ' => "%20".to_string(),
+            other => format!("%{other:02X}"),
         })
         .collect()
 }
@@ -823,6 +829,165 @@ async fn aws_verify(
 }
 
 // ---------------------------------------------------------------------------
+// POST /indian-kanoon/reindex — re-embed every cached judgment with the
+// current chunker (small-to-big). Re-reads the locally cached text only —
+// no Indian Kanoon calls, no re-download. Used to upgrade an existing library
+// after a retrieval-strategy change.
+// ---------------------------------------------------------------------------
+
+async fn reindex_documents(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+) -> ApiResult {
+    #[cfg(feature = "rag")]
+    {
+        let emb = state.embeddings.clone().ok_or_else(|| {
+            err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Embedding service is not available.",
+            )
+        })?;
+
+        let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT id, extracted_text_path FROM documents \
+             WHERE user_id = ? AND corpus_id = ?",
+        )
+        .bind(&auth.user_id)
+        .bind(CORPUS_ID)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+        let total = rows.len();
+
+        // Seed the shared progress handle so the status endpoint reports
+        // "running" with the right total the instant the client polls.
+        {
+            use crate::sync::scanner::{ScanProgress, ScanStatus};
+            let mut p = state.ik_reindex.write().await;
+            *p = ScanProgress {
+                status: ScanStatus::Running,
+                total: total as u32,
+                ..Default::default()
+            };
+        }
+
+        // Re-embedding the whole library can take minutes — far longer than a
+        // browser will hold the request open. Run it in the background and
+        // return immediately so the client doesn't time out (and abort the job
+        // half-way). Progress is mirrored into `state.ik_reindex` for the
+        // status endpoint and statuses flip to 'ready'.
+        let db = state.db.clone();
+        let uid = auth.user_id.clone();
+        let progress = state.ik_reindex.clone();
+        tokio::spawn(async move {
+            use crate::sync::scanner::ScanStatus;
+            let storage = match make_storage() {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("[ik-reindex] storage init failed: {e}");
+                    let mut p = progress.write().await;
+                    p.status = ScanStatus::Failed;
+                    p.last_error = Some(e.to_string());
+                    return;
+                }
+            };
+            let mut done = 0usize;
+            let mut processed = 0u32;
+            for (doc_id, text_key) in rows {
+                processed += 1;
+                let Some(key) = text_key else {
+                    let mut p = progress.write().await;
+                    p.processed = processed;
+                    continue;
+                };
+                {
+                    let mut p = progress.write().await;
+                    p.current_file = Some(key.clone());
+                    p.current_step = Some("embedding".into());
+                }
+                let Ok(bytes) = storage.get(&key).await else {
+                    let mut p = progress.write().await;
+                    p.processed = processed;
+                    continue;
+                };
+                let text = String::from_utf8_lossy(&bytes).to_string();
+                let source_path = storage_root()
+                    .join(key.replace('/', std::path::MAIN_SEPARATOR_STR))
+                    .to_string_lossy()
+                    .to_string();
+                match emb
+                    .index_document(&uid, None, &doc_id, &source_path, &text)
+                    .await
+                {
+                    Ok(_) => {
+                        done += 1;
+                        let _ = sqlx::query("UPDATE documents SET status = 'ready' WHERE id = ?")
+                            .bind(&doc_id)
+                            .execute(&db)
+                            .await;
+                    }
+                    Err(e) => tracing::warn!("[ik-reindex] {doc_id} failed: {e}"),
+                }
+                let mut p = progress.write().await;
+                p.processed = processed;
+                p.indexed = done as u32;
+            }
+            {
+                let mut p = progress.write().await;
+                p.status = ScanStatus::Done;
+                p.indexed = done as u32;
+                p.processed = total as u32;
+                p.current_file = None;
+                p.current_step = None;
+            }
+            tracing::info!("[ik-reindex] completed {done}/{total} judgments");
+        });
+
+        Ok(Json(json!({ "started": true, "count": total })))
+    }
+    #[cfg(not(feature = "rag"))]
+    {
+        let _ = (&state, &auth);
+        Err(err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "RAG feature is disabled in this build.",
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GET /indian-kanoon/reindex-status — snapshot of the in-flight library
+// rebuild, used by the Case Search settings page to drive its progress bar.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "rag")]
+async fn reindex_status(State(state): State<Arc<AppState>>, _: AuthUser) -> ApiResult {
+    use crate::sync::scanner::ScanStatus;
+    let p = state.ik_reindex.read().await;
+    Ok(Json(json!({
+        "status": match p.status {
+            ScanStatus::Idle                => "idle",
+            ScanStatus::Running             => "running",
+            ScanStatus::Done                => "done",
+            ScanStatus::CompletedWithErrors => "completed_with_errors",
+            ScanStatus::Failed              => "failed",
+        },
+        "total":        p.total,
+        "processed":    p.processed,
+        "indexed":      p.indexed,
+        "current_file": p.current_file,
+        "current_step": p.current_step,
+        "last_error":   p.last_error,
+        "failures":     p.failures,
+    })))
+}
+
+#[cfg(not(feature = "rag"))]
+async fn reindex_status(State(_): State<Arc<AppState>>, _: AuthUser) -> ApiResult {
+    Ok(Json(json!({ "status": "idle" })))
+}
+
+// ---------------------------------------------------------------------------
 // GET /indian-kanoon/doc-html/:tid — proxy-fetch the IK doc and return HTML
 // for rendering in the side panel (avoids X-Frame-Options blocking).
 // ---------------------------------------------------------------------------
@@ -1064,7 +1229,7 @@ async fn resync_document(
         .to_string_lossy()
         .to_string();
 
-    // Re-run indexing (same pattern as EUR-Lex resync).
+    // Re-run indexing (same chunk+embed path as the initial fetch).
     #[cfg(feature = "rag")]
     let (chunks_indexed, indexing_error, final_status) = if let Some(emb) = state.embeddings.clone() {
         match emb.index_document(&auth.user_id, None, &id, &source_path, &text).await {
@@ -1095,4 +1260,63 @@ async fn resync_document(
         "chunks_indexed": chunks_indexed,
         "indexing_error": indexing_error,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::urlencoding;
+
+    #[test]
+    fn urlencoding_keeps_unreserved_and_space() {
+        assert_eq!(urlencoding("section 138"), "section%20138");
+        assert_eq!(urlencoding("a-b_c.d~e"), "a-b_c.d~e");
+    }
+
+    #[test]
+    fn urlencoding_devanagari_uses_utf8_bytes() {
+        // "धारा 138" must percent-encode the UTF-8 bytes of each Devanagari char,
+        // not a truncated low byte. Expected = %XX of each byte of the UTF-8 string.
+        let input = "धारा 138";
+        let expected: String = input
+            .bytes()
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    (b as char).to_string()
+                }
+                b' ' => "%20".to_string(),
+                other => format!("%{other:02X}"),
+            })
+            .collect();
+        assert_eq!(urlencoding(input), expected);
+        // Sanity: the encoding must round-trip back to the original UTF-8 bytes.
+        assert_eq!(percent_decode(&urlencoding(input)), input.as_bytes());
+    }
+
+    #[test]
+    fn urlencoding_accented_latin_uses_utf8_bytes() {
+        // 'é' is U+00E9 -> UTF-8 bytes C3 A9, NOT the truncated low byte E9.
+        assert_eq!(urlencoding("café"), "caf%C3%A9");
+    }
+
+    /// Minimal percent-decoder for test assertions only.
+    fn percent_decode(s: &str) -> Vec<u8> {
+        let bytes = s.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'%' => {
+                    let hi = (bytes[i + 1] as char).to_digit(16).unwrap() as u8;
+                    let lo = (bytes[i + 2] as char).to_digit(16).unwrap() as u8;
+                    out.push(hi << 4 | lo);
+                    i += 3;
+                }
+                b => {
+                    out.push(b);
+                    i += 1;
+                }
+            }
+        }
+        out
+    }
 }

@@ -51,9 +51,8 @@ export default function AccountLayout({
         {
             heading: tAccount("groupSources"),
             tabs: [
+                { id: "knowledge", label: tAccount("knowledgeLink"), href: "/account/knowledge" },
                 { id: "local-docs", label: tAccount("localDocsLink"), href: "/account/sync" },
-                { id: "eurlex", label: tAccount("eurlexLink"), href: "/account/eurlex" },
-                { id: "indian-kanoon", label: tAccount("indianKanoonLink"), href: "/account/indian-kanoon" },
                 { id: "case-search", label: tAccount("caseSearchLink"), href: "/account/case-search" },
             ],
         },

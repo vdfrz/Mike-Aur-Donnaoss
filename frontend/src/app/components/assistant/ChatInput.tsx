@@ -16,6 +16,8 @@ import {
     FolderOpen,
     Library,
     Square,
+    Wifi,
+    WifiOff,
     X,
 } from "lucide-react";
 import { useTranslations } from "next-intl";
@@ -25,6 +27,7 @@ import { AssistantWorkflowModal } from "./AssistantWorkflowModal";
 import { ApiKeyMissingModal } from "../shared/ApiKeyMissingModal";
 import { ModelToggle } from "./ModelToggle";
 import { useSelectedModel } from "@/app/hooks/useSelectedModel";
+import { useOfflineMode } from "@/app/hooks/useOfflineMode";
 import { useUserProfile } from "@/contexts/UserProfileContext";
 import {
     getModelProvider,
@@ -46,6 +49,10 @@ interface Props {
     onProjectsClick?: () => void;
     projectName?: string;
     projectCmNumber?: string | null;
+    /** Forwarded to AddDocButton — false skips text extraction/OCR on upload. */
+    cacheUploads?: boolean;
+    /** Show the "Go Offline" toggle beside the model selector (assistant only). */
+    showOfflineToggle?: boolean;
 }
 
 export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
@@ -58,6 +65,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
         onProjectsClick,
         projectName,
         projectCmNumber,
+        cacheUploads = true,
+        showOfflineToggle,
     }: Props,
     ref,
 ) {
@@ -67,8 +76,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
     const [selectedWorkflow, setSelectedWorkflow] = useState<{
         id: string;
         title: string;
+        prompt_md?: string | null;
     } | null>(null);
     const [model, setModel] = useSelectedModel();
+    const { isOffline, canGoOffline, goOffline, goOnline } = useOfflineMode();
     const { profile } = useUserProfile();
     // Memoize so child effects depending on `apiKeys` don't re-run every render.
     const apiKeys = useMemo(
@@ -164,6 +175,18 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
         }
     };
 
+    const handleOfflineToggle = () => {
+        if (!canGoOffline) return;
+        if (isOffline) {
+            goOnline();
+        } else {
+            // Switching away from the cloud — stop any in-flight cloud
+            // response so it can't keep streaming after we go offline.
+            if (isLoading) onCancel();
+            goOffline();
+        }
+    };
+
     return (
         <>
             <div className="w-full flex justify-center">
@@ -234,6 +257,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
                                     selectedDocIds={attachedDocs.map(
                                         (d) => d.id,
                                     )}
+                                    cacheUploads={cacheUploads}
                                 />
                             )}
                             {onProjectsClick && (
@@ -283,6 +307,36 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
                                 onChange={setModel}
                                 apiKeys={apiKeys}
                             />
+                            {showOfflineToggle && (
+                                <button
+                                    type="button"
+                                    onClick={handleOfflineToggle}
+                                    disabled={!canGoOffline}
+                                    title={
+                                        !canGoOffline
+                                            ? t("offlineNeedsLocal")
+                                            : undefined
+                                    }
+                                    className={`flex items-center gap-1.5 rounded-lg px-2 h-8 text-sm transition-colors ${
+                                        !canGoOffline
+                                            ? "text-gray-300 cursor-not-allowed"
+                                            : isOffline
+                                              ? "bg-[var(--blue-100)] text-[var(--blue-700)] hover:bg-[var(--blue-200)] cursor-pointer"
+                                              : "text-gray-400 hover:bg-gray-100 hover:text-gray-700 cursor-pointer"
+                                    }`}
+                                >
+                                    {isOffline ? (
+                                        <Wifi className="h-3.5 w-3.5 shrink-0" />
+                                    ) : (
+                                        <WifiOff className="h-3.5 w-3.5 shrink-0" />
+                                    )}
+                                    <span className="hidden sm:inline">
+                                        {isOffline
+                                            ? t("goOnline")
+                                            : t("goOffline")}
+                                    </span>
+                                </button>
+                            )}
                             <button
                                 type="button"
                                 className="relative bg-gradient-to-b from-neutral-700 to-black text-white rounded-full h-8 w-8 flex items-center justify-center cursor-pointer disabled:cursor-default disabled:from-neutral-400 disabled:to-neutral-500 backdrop-blur-xl shadow-sm active:enabled:scale-95 transition-all duration-150"
@@ -314,7 +368,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput(
                 open={workflowModalOpen}
                 onClose={() => setWorkflowModalOpen(false)}
                 onSelect={(wf) => {
-                    setSelectedWorkflow({ id: wf.id, title: wf.title });
+                    setSelectedWorkflow({ id: wf.id, title: wf.title, prompt_md: wf.prompt_md });
                     setWorkflowModalOpen(false);
                 }}
                 projectName={projectName}

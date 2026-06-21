@@ -1,7 +1,9 @@
 import ClientPage from "./page-client";
 
 export const dynamic = "force-static";
-export const dynamicParams = false;
+// true so web hard-loads work; scripts/build-tauri.js flips it to false
+// during static export, which forbids dynamicParams.
+export const dynamicParams = true;
 export function generateStaticParams() {
     return [{ id: "__ph__" }];
 }

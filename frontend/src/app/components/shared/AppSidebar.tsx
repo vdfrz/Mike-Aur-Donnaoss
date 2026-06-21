@@ -10,13 +10,13 @@ import {
     User,
     ChevronsUpDown,
     ChevronDown,
-    FileEdit,
     Briefcase,
 } from "lucide-react";
 import { useTranslations } from "next-intl";
 import { useAuth } from "@/contexts/AuthContext";
 import { useUserProfile } from "@/contexts/UserProfileContext";
 import { useChatHistoryContext } from "@/app/contexts/ChatHistoryContext";
+import { useOfflineMode } from "@/app/hooks/useOfflineMode";
 import { useRouter, usePathname } from "next/navigation";
 import Link from "next/link";
 import { MikeIcon } from "@/components/chat/mike-icon";
@@ -36,6 +36,7 @@ export function AppSidebar({ isOpen, onToggle }: AppSidebarProps) {
     const pathname = usePathname();
     const tSidebar = useTranslations("Sidebar");
     const tCommon = useTranslations("Common");
+    const { isOffline } = useOfflineMode();
 
     const navItems = [
         { href: "/assistant", label: tSidebar("assistant"), icon: MessageSquare },
@@ -43,7 +44,6 @@ export function AppSidebar({ isOpen, onToggle }: AppSidebarProps) {
         { href: "/projects", label: tSidebar("projects"), icon: FolderOpen },
         { href: "/tabular-reviews", label: tSidebar("tabularReviews"), icon: Table2 },
         { href: "/workflows", label: tSidebar("workflows"), icon: Library },
-        { href: "/messy-docx", label: tSidebar("messyWord"), icon: FileEdit },
     ];
     const [shouldAnimate, setShouldAnimate] = useState(false);
     const [isDropdownOpen, setIsDropdownOpen] = useState(false);
@@ -156,18 +156,32 @@ export function AppSidebar({ isOpen, onToggle }: AppSidebarProps) {
             {navItems.map(({ href, label, icon: Icon }) => {
                 const isActive =
                     pathname === href || pathname.startsWith(href + "/");
+                // Offline mode is assistant-chat only — Case Prep needs
+                // a cloud model, so block it until back online.
+                const blocked =
+                    isOffline &&
+                    (href === "/cases");
                 return (
                     <div key={href} className="py-1 px-2.5">
                         <button
                             onClick={() => router.push(href)}
-                            title={!isOpen ? label : ""}
-                            className={`w-full h-9 flex items-center gap-3 px-2.5 py-2 rounded-md transition-colors text-left ${isActive
-                                    ? "bg-gray-100 text-gray-900"
-                                    : "hover:bg-gray-100 text-gray-700"
+                            disabled={blocked}
+                            title={
+                                blocked
+                                    ? tCommon("offlineBlocked")
+                                    : !isOpen
+                                      ? label
+                                      : ""
+                            }
+                            className={`w-full h-9 flex items-center gap-3 px-2.5 py-2 rounded-md transition-colors text-left ${blocked
+                                    ? "text-gray-300 cursor-not-allowed"
+                                    : isActive
+                                        ? "bg-gray-100 text-gray-900"
+                                        : "hover:bg-gray-100 text-gray-700"
                                 } ${!isOpen ? "hidden md:flex" : "flex"}`}
                         >
                             <Icon
-                                className={`h-4 w-4 flex-shrink-0 ${isActive ? "text-gray-900" : "text-black"
+                                className={`h-4 w-4 flex-shrink-0 ${blocked ? "text-gray-300" : isActive ? "text-gray-900" : "text-black"
                                     }`}
                             />
                             {isOpen && (

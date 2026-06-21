@@ -141,11 +141,44 @@ pub async fn exec_statute_search(state: &AppState, arguments: &Value) -> String 
         for (os, osec, ns, nsec, mtype) in rows {
             let key = format!("{os}{osec}->{ns}{nsec}");
             if seen_maps.insert(key) {
-                mappings.push(json!({
+                // Pull the in-force successor section's verbatim text so the
+                // model is grounded on current law even when the OLD code's
+                // body was never loaded (e.g. a query for "IPC 420" resolves
+                // to BNS 318(4) and carries the BNS text to draft from).
+                // Sections are stored at the BASE number (e.g. "318"), with
+                // sub-clauses inside the body, while a mapping's new_section
+                // can be sub-clause-specific ("318(4)") — try the exact number
+                // first, then fall back to the base number before the "(".
+                let base_nsec: String =
+                    nsec.split('(').next().unwrap_or(nsec.as_str()).to_string();
+                let current_text: Option<String> = sqlx::query_scalar(
+                    "SELECT ss.body FROM statute_sections ss \
+                     JOIN statutes s ON s.id = ss.statute_id \
+                     WHERE s.short_name = ?1 AND (ss.section_number = ?2 OR ss.section_number = ?3) \
+                     ORDER BY CASE WHEN ss.section_number = ?2 THEN 0 ELSE 1 END LIMIT 1",
+                )
+                .bind(&ns)
+                .bind(&nsec)
+                .bind(&base_nsec)
+                .fetch_optional(&state.db)
+                .await
+                .ok()
+                .flatten()
+                .filter(|t: &String| !t.trim().is_empty());
+                let mut m = json!({
                     "old": if osec.is_empty() { Value::Null } else { json!(format!("{os} s.{osec}")) },
                     "new": format!("{ns} s.{nsec}"),
                     "mapping_type": mtype,
-                }));
+                });
+                if let Some(body) = current_text {
+                    let capped: String = if body.chars().count() > 6000 {
+                        body.chars().take(6000).collect()
+                    } else {
+                        body
+                    };
+                    m["current_text"] = json!(capped);
+                }
+                mappings.push(m);
             }
         }
     }
@@ -164,7 +197,7 @@ pub async fn exec_statute_search(state: &AppState, arguments: &Value) -> String 
         "results": results,
         "mappings": mappings,
         "count": results.len() + mappings.len(),
-        "instructions_for_model": "`results[].text` is the verbatim bare-act text of each section (BNS/BNSS/BSA fully loaded; if `truncated` is true the section was long and cut at 6000 chars). Quote it directly; never invent section text. `mappings` are authoritative old↔new section correspondences (e.g. IPC s.420 → BNS s.318(4)) — use these to answer 'what replaced X' and to note current equivalents. Cite sections as '<statute> s.<section>'."
+        "instructions_for_model": "`results[].text` (and a mapping's `current_text`) is the verbatim bare-act text of the section (BNS/BNSS/BSA fully loaded; if `truncated` is true the section was long and cut at 6000 chars). USE THIS TEXT TO GROUND YOURSELF — get the section NUMBER and the legal STANDARD right — but DO NOT block-quote it by default. When ANSWERING a question about what a section says, quote freely. When DRAFTING a document, cite the section inline (e.g. 'Section 318(4) BNS') and state the legal standard in your OWN prose; reproduce the bare-act words verbatim ONLY where the exact wording is itself at issue (a legal notice's formal demand, a ground that turns on the language, a contested element) — never paste '...which states \"...\"' after every section. Never invent section text. `mappings` are authoritative old↔new section correspondences (e.g. IPC s.420 → BNS s.318(4)); when a mapping carries `current_text`, that is the in-force successor's verbatim text — ground post-1-July-2024 drafting on it. Cite sections as '<statute> s.<section>'."
     })
     .to_string()
 }

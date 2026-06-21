@@ -117,6 +117,13 @@ pub struct AppState {
     #[cfg(feature = "rag")]
     pub scans: Arc<RwLock<HashMap<String, ScanProgressHandle>>>,
 
+    /// Progress of the single in-flight Case Search (Indian Kanoon)
+    /// re-index job. Unlike `scans` there's only ever one library-wide
+    /// rebuild at a time, so a lone handle is enough. Read by
+    /// `GET /indian-kanoon/reindex-status` to drive the progress bar.
+    #[cfg(feature = "rag")]
+    pub ik_reindex: ScanProgressHandle,
+
     /// In-flight client-side tool requests. When the model calls a
     /// "client tool" (e.g. vanga_search), the chat handler creates a
     /// oneshot channel, inserts the sender here keyed by a UUID
@@ -190,6 +197,10 @@ impl AppState {
             embeddings,
             #[cfg(feature = "rag")]
             scans: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(feature = "rag")]
+            ik_reindex: Arc::new(RwLock::new(
+                crate::sync::scanner::ScanProgress::default(),
+            )),
             client_tool_tx: Arc::new(std::sync::Mutex::new(HashMap::new())),
         })
     }

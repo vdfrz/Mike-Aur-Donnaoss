@@ -141,8 +141,8 @@ fn verify_with_window(
 /// opens them inside the same WebView, which makes the in-app shell
 /// behave like a mini-browser. Routing through the OS launcher (via
 /// the `open` crate) hands the URL to whatever the user's default
-/// browser is, which is what they expect when clicking "Apri su
-/// EUR-Lex".
+/// browser is, which is what they expect when clicking "Open on
+/// Indian Kanoon".
 ///
 /// Validates the scheme — only `http://` and `https://` URLs are
 /// accepted, so a malicious payload from a tool result can't

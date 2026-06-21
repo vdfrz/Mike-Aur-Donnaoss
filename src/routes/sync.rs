@@ -294,10 +294,11 @@ async fn scan_status(
     let p = handle.read().await;
     Ok(Json(json!({
         "status": match p.status {
-            crate::sync::ScanStatus::Idle    => "idle",
-            crate::sync::ScanStatus::Running => "running",
-            crate::sync::ScanStatus::Done    => "done",
-            crate::sync::ScanStatus::Failed  => "failed",
+            crate::sync::ScanStatus::Idle                => "idle",
+            crate::sync::ScanStatus::Running             => "running",
+            crate::sync::ScanStatus::Done                => "done",
+            crate::sync::ScanStatus::CompletedWithErrors => "completed_with_errors",
+            crate::sync::ScanStatus::Failed              => "failed",
         },
         "total":         p.total,
         "processed":     p.processed,
@@ -307,6 +308,7 @@ async fn scan_status(
         "current_file":  p.current_file,
         "current_step":  p.current_step,
         "last_error":    p.last_error,
+        "failures":      p.failures,
     })))
 }
 

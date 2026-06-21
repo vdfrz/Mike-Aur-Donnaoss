@@ -64,12 +64,12 @@ export default function GlobalError({
                         transition: all 0.15s ease;
                         text-decoration: none;
                         border: none;
-                        background-color: rgb(0, 136, 255);
+                        background-color: rgb(38, 45, 56);
                         color: white;
                     }
 
                     .btn-back:hover {
-                        background-color: rgb(0, 120, 230);
+                        background-color: rgb(15, 23, 42);
                     }
 
                     .btn-back:active {

@@ -28,6 +28,9 @@ const KANOON_SEARCH: &str = "kanoon_search";
 const KANOON_GET_FRAGMENT: &str = "kanoon_get_fragment";
 const KANOON_VERIFY_CASE: &str = "kanoon_verify_case";
 const STATUTE_SEARCH: &str = "statute_search";
+const SEARCH_FIRM_CORPUS: &str = "search_firm_corpus";
+const EXPAND_CHUNK: &str = "expand_chunk";
+const ASK_CLARIFYING: &str = "ask_clarifying_questions";
 
 pub fn is_builtin(name: &str) -> bool {
     matches!(
@@ -41,11 +44,13 @@ pub fn is_builtin(name: &str) -> bool {
             | KANOON_GET_FRAGMENT
             | KANOON_VERIFY_CASE
             | STATUTE_SEARCH
+            | SEARCH_FIRM_CORPUS
+            | EXPAND_CHUNK
     )
 }
 
 pub fn is_client_tool(name: &str) -> bool {
-    name == VANGA_SEARCH
+    name == VANGA_SEARCH || name == ASK_CLARIFYING
 }
 
 pub fn schemas() -> Vec<ToolSchema> {
@@ -272,6 +277,73 @@ pub fn schemas() -> Vec<ToolSchema> {
                 "required": ["query"]
             }),
         ),
+        fun(
+            SEARCH_FIRM_CORPUS,
+            "Search the firm's own uploaded knowledge base — its past petitions, written statements, judgments, skeleton arguments and templates — for language and arguments to reuse. Call this BEFORE drafting grounds, prayers, clauses or arguments, and PREFER the firm's own settled phrasing over generic boilerplate. Search broad, then narrow with filters; expand the best hit with expand_chunk before quoting. Returns matching chunks with their source file and metadata. Use at most 4 searches per turn.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Legal concept / phrasing to find in the firm's past work, e.g. 'ground for condonation medical', 'prayer interim maintenance', 'security cheque defence'." },
+                    "doc_type": { "type": "string", "description": "Optional filter: petition|written_statement|judgment|skeleton_argument|template|deed|notice|other" },
+                    "case_type": { "type": "string", "description": "Optional filter: matrimonial|consumer|criminal|writ|service|ni_act|civil|other" },
+                    "section_role": { "type": "string", "description": "Optional filter: ground|prayer|argument|clause|facts|verification" },
+                    "max_results": { "type": "integer", "description": "Results to return (1-20, default 8).", "minimum": 1, "maximum": 20 }
+                },
+                "required": ["query"]
+            }),
+        ),
+        fun(
+            EXPAND_CHUNK,
+            "Fetch the surrounding context of a chunk returned by search_firm_corpus — the neighbouring paragraphs from the same firm document — so you can read a passage in full before relying on it.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "chunk_id": { "type": "integer", "description": "The chunk_id from a search_firm_corpus result." },
+                    "before": { "type": "integer", "description": "Preceding chunks to include (0-5, default 2).", "minimum": 0, "maximum": 5 },
+                    "after": { "type": "integer", "description": "Following chunks to include (0-5, default 2).", "minimum": 0, "maximum": 5 }
+                },
+                "required": ["chunk_id"]
+            }),
+        ),
+        fun(
+            ASK_CLARIFYING,
+            "Ask the user 1-4 structured clarifying questions in a SINGLE call before drafting or searching case law. Fire this ONLY for a choice that changes the document's shape or strategy (the forum / type of proceeding; for a criminal complaint, the cognizance-vs-FIR track; the enabling provision or principal relief; the governing code when only the offence date is missing) AND only when two or more options are each genuinely viable and the answer cannot be inferred from context. If one option clearly dominates on the facts, do NOT ask — assume it, state it in one line, and proceed. NEVER ask for a missing fact (names, dates, amounts, addresses, case/FIR numbers, the exact section) — those are \"________\" placeholders, not questions. MAKE EACH QUESTION SMART: ground it in the SPECIFIC facts the user gave — name the detail the choice turns on, never boilerplate you could ask of any case — and make every option a genuinely distinct, viable path with a one-line why, recommended first. (Bad: \"What kind of complaint?\" with generic options. Good: \"The accused has reportedly absconded and ₹40L is untraced — which track?\" → \"Police/EOW complaint to register an FIR (best for tracing & arrest)\" vs \"Private complaint to the Magistrate\".) Each question has a short header, the question text, whether multiple options may be selected, and 2-5 options (put the recommended option first).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "questions": {
+                        "type": "array",
+                        "description": "1-4 clarifying questions to ask the user.",
+                        "minItems": 1,
+                        "maxItems": 4,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "header": { "type": "string", "description": "Very short label for the question (<=12 chars)." },
+                                "question": { "type": "string", "description": "The question text. Ends with '?'." },
+                                "multiSelect": { "type": "boolean", "description": "Whether multiple options may be selected." },
+                                "options": {
+                                    "type": "array",
+                                    "description": "2-5 answer options. Put the recommended option first.",
+                                    "minItems": 2,
+                                    "maxItems": 5,
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "label": { "type": "string", "description": "Short option label (1-5 words)." },
+                                            "description": { "type": "string", "description": "Optional one-line explanation." }
+                                        },
+                                        "required": ["label"]
+                                    }
+                                }
+                            },
+                            "required": ["header", "question", "options"]
+                        }
+                    }
+                },
+                "required": ["questions"]
+            }),
+        ),
     ]
 }
 
@@ -282,9 +354,14 @@ pub async fn dispatch(
     state: &AppState,
     user_id: &str,
     doc_label_map: &HashMap<String, String>,
+    case_id: Option<&str>,
     name: &str,
     arguments: &Value,
 ) -> String {
+    // `case_id` is Some only inside a case-scoped chat. Consumed by the arms
+    // that need case context (generate_docx cross-ref resolution, corpus
+    // tools); the no-op keeps it live until every such arm is wired in.
+    let _ = case_id;
     match name {
         READ_DOCUMENT => exec_read_document(state, user_id, doc_label_map, arguments).await,
         FIND_IN_DOCUMENT => exec_find_in_document(state, user_id, doc_label_map, arguments).await,
@@ -299,6 +376,10 @@ pub async fn dispatch(
             crate::llm::kanoon_tool::exec_kanoon_verify_case(state, user_id, arguments).await
         }
         STATUTE_SEARCH => crate::llm::statute_tool::exec_statute_search(state, arguments).await,
+        SEARCH_FIRM_CORPUS => {
+            crate::corpus::tools::exec_search_firm_corpus(state, user_id, arguments).await
+        }
+        EXPAND_CHUNK => crate::corpus::tools::exec_expand_chunk(state, user_id, arguments).await,
         other => json!({"error": format!("unknown builtin tool: {other}")}).to_string(),
     }
 }
@@ -313,16 +394,71 @@ async fn resolve_doc(
         .get(label_or_id)
         .cloned()
         .unwrap_or_else(|| label_or_id.to_string());
-    let row: Option<(String, String, Option<String>)> = sqlx::query_as(
+    if let Some(row) = fetch_doc_row(state, user_id, &real_id).await {
+        return Some(row);
+    }
+    // Models occasionally mistype one character of a UUID copied from an
+    // earlier tool result, then conclude the document vanished. Accept a
+    // unique near-miss (edit distance ≤ 2) among this user's documents —
+    // for UUIDs a false positive is practically impossible.
+    let ids: Vec<(String,)> = sqlx::query_as(
+        "SELECT id FROM documents WHERE user_id = ? ORDER BY created_at DESC LIMIT 200",
+    )
+    .bind(user_id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+    let close: Vec<&str> = ids
+        .iter()
+        .map(|(id,)| id.as_str())
+        .filter(|id| edit_distance_at_most(id, &real_id, 2))
+        .collect();
+    if let [only] = close[..] {
+        tracing::warn!("[tools] doc id near-miss accepted: {real_id} -> {only}");
+        return fetch_doc_row(state, user_id, only).await;
+    }
+    None
+}
+
+async fn fetch_doc_row(
+    state: &AppState,
+    user_id: &str,
+    doc_id: &str,
+) -> Option<(String, String, Option<String>)> {
+    sqlx::query_as(
         "SELECT filename, file_type, storage_path FROM documents WHERE id = ? AND user_id = ?",
     )
-    .bind(&real_id)
+    .bind(doc_id)
     .bind(user_id)
     .fetch_optional(&state.db)
     .await
     .ok()
-    .flatten();
-    row
+    .flatten()
+}
+
+/// Whether the Levenshtein distance between `a` and `b` is ≤ `max`.
+fn edit_distance_at_most(a: &str, b: &str, max: usize) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len().abs_diff(b.len()) > max {
+        return false;
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, &ca) in a.iter().enumerate() {
+        let mut cur = Vec::with_capacity(b.len() + 1);
+        cur.push(i + 1);
+        let mut row_min = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            let v = (prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1);
+            row_min = row_min.min(v);
+            cur.push(v);
+        }
+        if row_min > max {
+            return false;
+        }
+        prev = cur;
+    }
+    prev[b.len()] <= max
 }
 
 async fn exec_read_document(
@@ -403,7 +539,7 @@ async fn exec_find_in_document(
         let abs = start + idx;
         let ctx_lo = abs.saturating_sub(60);
         let ctx_hi = (abs + needle.len() + 60).min(haystack_norm.len());
-        let snippet = &haystack_norm[ctx_lo..ctx_hi];
+        let snippet = context_snippet(&haystack_norm, ctx_lo, ctx_hi);
         matches.push(json!({
             "offset": abs,
             "snippet": snippet,
@@ -418,6 +554,27 @@ async fn exec_find_in_document(
         "matches": matches,
     })
     .to_string()
+}
+
+/// Slice a context window out of `haystack`, snapping the raw ±byte offsets
+/// to char boundaries first. The ±60-byte context padding in
+/// `exec_find_in_document` can land mid-codepoint on multibyte UTF-8
+/// (Devanagari, the ₹ sign, en-dashes, curly quotes — all routine in Indian
+/// legal text), which would panic a raw `&haystack[lo..hi]` slice. Walk `lo`
+/// down and `hi` up to the nearest boundary so the slice is always valid.
+fn context_snippet(haystack: &str, mut lo: usize, mut hi: usize) -> &str {
+    lo = lo.min(haystack.len());
+    hi = hi.min(haystack.len());
+    while lo > 0 && !haystack.is_char_boundary(lo) {
+        lo -= 1;
+    }
+    while hi < haystack.len() && !haystack.is_char_boundary(hi) {
+        hi += 1;
+    }
+    if lo > hi {
+        return "";
+    }
+    &haystack[lo..hi]
 }
 
 async fn exec_read_workflow(state: &AppState, user_id: &str, arguments: &Value) -> String {
@@ -608,7 +765,9 @@ async fn exec_edit_document(
         .unwrap_or_else(|| label.to_string());
 
     let version_id = uuid::Uuid::new_v4().to_string();
-    let version_path = format!("{}/v/{}", storage_path.trim_end_matches("/docx"), &version_id);
+    // Versions live under their own prefix: nesting "<storage_path>/v/<id>"
+    // breaks when storage_path is itself a file (ENOTDIR on local storage).
+    let version_path = format!("versions/{real_id}/{version_id}");
     if let Err(e) = storage
         .put(
             &version_path,
@@ -824,6 +983,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn context_snippet_does_not_panic_on_multibyte_boundaries() {
+        // Build a haystack where the ±60-byte window offsets land mid-codepoint.
+        // ₹ (3 bytes), Devanagari धारा (12 bytes), em-dash — (3 bytes), curly
+        // quotes are all multibyte and routine in Indian legal text.
+        let haystack = "₹ धारा 138 — “notice” of dishonour परक्राम्य लिखत अधिनियम बैंक खाता संख्या";
+        // Walk every possible (lo, hi) byte pair; none may panic, all must
+        // return a valid substring of the haystack.
+        for lo in 0..=haystack.len() {
+            for hi in lo..=haystack.len() {
+                let snip = context_snippet(haystack, lo, hi);
+                assert!(haystack.contains(snip) || snip.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn context_snippet_returns_expected_window_on_ascii() {
+        let haystack = "the quick brown fox";
+        assert_eq!(context_snippet(haystack, 4, 9), "quick");
+        // Out-of-range hi is clamped to len.
+        assert_eq!(context_snippet(haystack, 16, 999), "fox");
+    }
+
+    #[test]
     fn is_builtin_recognises_each_tool() {
         for name in [
             "read_document",
@@ -842,6 +1025,7 @@ mod tests {
         // vanga_search is a client tool, not a builtin.
         assert!(!is_builtin("vanga_search"));
         assert!(is_client_tool("vanga_search"));
+        assert!(is_client_tool("ask_clarifying_questions"));
         assert!(!is_client_tool("read_document"));
         assert!(!is_client_tool("kanoon_search"));
         assert!(!is_client_tool("kanoon_verify_case"));
@@ -850,8 +1034,9 @@ mod tests {
     #[test]
     fn schemas_have_required_fields() {
         let s = schemas();
-        // 5 doc tools + vanga_search (client) + kanoon_search + kanoon_get_fragment + kanoon_verify_case = 9
-        assert_eq!(s.len(), 9);
+        // 5 doc tools + vanga_search (client) + kanoon_search + kanoon_get_fragment + kanoon_verify_case + statute_search = 10, + ask_clarifying_questions (client) = 11,
+        // + search_firm_corpus + expand_chunk = 13
+        assert_eq!(s.len(), 13);
         for sch in &s {
             assert_eq!(sch.kind, "function");
             assert!(!sch.function.name.is_empty());
@@ -868,6 +1053,9 @@ mod tests {
         assert!(names.contains(&"kanoon_search"));
         assert!(names.contains(&"kanoon_get_fragment"));
         assert!(names.contains(&"kanoon_verify_case"));
+        assert!(names.contains(&"ask_clarifying_questions"));
+        assert!(names.contains(&"search_firm_corpus"));
+        assert!(names.contains(&"expand_chunk"));
     }
 
     #[test]
@@ -929,5 +1117,23 @@ mod tests {
     fn extract_text_unknown_format_returns_empty() {
         assert_eq!(extract_text("zip", "x.zip", b"PK\x03\x04"), "");
         assert_eq!(extract_text("", "x", b"data"), "");
+    }
+
+    #[test]
+    fn edit_distance_catches_uuid_typos() {
+        // The real failure: one hex char flipped mid-UUID.
+        assert!(edit_distance_at_most(
+            "33c79981-a7da-461a-b8d9-835c4f600109",
+            "33c79981-a7da-461b-b8d9-835c4f600109",
+            2
+        ));
+        assert!(edit_distance_at_most("same", "same", 2));
+        assert!(!edit_distance_at_most(
+            "33c79981-a7da-461a-b8d9-835c4f600109",
+            "b27eca62-7475-4941-ae08-6a8610bd2ea6",
+            2
+        ));
+        // Length differs by more than the cap → early reject.
+        assert!(!edit_distance_at_most("doc-1", "33c79981-a7da", 2));
     }
 }

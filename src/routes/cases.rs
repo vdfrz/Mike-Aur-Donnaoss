@@ -5,7 +5,7 @@ use axum::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
     },
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     Json, Router,
 };
 use serde::Deserialize;
@@ -14,7 +14,8 @@ use std::{convert::Infallible, sync::Arc};
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::{auth::middleware::AuthUser, pii, AppState};
-use crate::llm::{LocalConfig, StreamParams};
+use crate::llm::StreamParams;
+use crate::llm::oneshot::resolve_analysis_model;
 use crate::routes::user::fetch_llm_settings;
 use crate::agents::case_prep::outputs::{self as case_outputs, OutputConfig};
 
@@ -32,11 +33,31 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/{id}/documents/{doc_id}", delete(detach_document))
         .route("/{id}/analyze", post(analyze_case))
         .route("/{id}/findings", get(get_findings))
+        .route("/{id}/resolve-precedents", post(resolve_precedents))
         .route("/{id}/outputs/brief", post(generate_brief))
         .route("/{id}/outputs/strategy-memo", post(generate_strategy_memo))
         .route("/{id}/outputs/hearing-prep", post(generate_hearing_prep))
+        .route("/{id}/outputs/list-of-dates", post(generate_list_of_dates))
+        .route("/{id}/outputs/annexure-index", post(generate_annexure_index))
         .route("/{id}/outputs", get(list_outputs))
         .route("/{id}/chat", post(case_chat))
+        // --- Drafting registry: parties ---
+        .route("/{id}/parties", get(list_parties).post(create_party))
+        .route("/{id}/parties/reorder", put(reorder_parties))
+        .route("/{id}/parties/ai-populate", post(ai_populate_parties))
+        .route("/{id}/parties/{party_id}", put(update_party).delete(delete_party))
+        // --- Drafting registry: annexures ---
+        .route("/{id}/annexures", get(list_annexures).post(create_annexure))
+        .route("/{id}/annexures/reorder", put(reorder_annexures))
+        .route("/{id}/annexures/ai-populate", post(ai_populate_annexures))
+        .route("/{id}/annexures/{annexure_id}", put(update_annexure).delete(delete_annexure))
+        // --- Drafting registry: citations ---
+        .route("/{id}/citations", get(list_citations))
+        .route("/{id}/citations/{citation_id}", delete(delete_citation))
+        // --- Cross-ref resolution + bibliographies + red team ---
+        .route("/{id}/resolve-refs", post(resolve_refs))
+        .route("/{id}/outputs/cases-referred", post(generate_cases_referred))
+        .route("/{id}/outputs/authorities", post(generate_authorities))
 }
 
 // ---------------------------------------------------------------------------
@@ -625,6 +646,12 @@ async fn run_case_analysis(
                     "original_tokens": original_tokens,
                     "target_tokens": target_tokens,
                 }),
+                ProgressEvent::Truncated { original_tokens, target_tokens, error } => json!({
+                    "type": "truncated",
+                    "original_tokens": original_tokens,
+                    "target_tokens": target_tokens,
+                    "error": error,
+                }),
                 ProgressEvent::Estimate { total_pages, estimated_seconds, has_ocr } => json!({
                     "type": "estimate",
                     "total_pages": total_pages,
@@ -709,95 +736,8 @@ async fn run_case_analysis(
     tracing::info!("[cases/analyze] case={} analysis complete (pii_redacted={})", case_id, redact_pii);
 }
 
-fn resolve_analysis_model(
-    settings: &Option<crate::routes::user::LlmSettings>,
-) -> (String, Option<LocalConfig>) {
-    // 1. Try user-configured provider from DB settings
-    if let Some(s) = settings {
-        if s.active_provider.as_deref() == Some("claude") {
-            if s.claude_api_key.as_deref().map(|k| !k.trim().is_empty()).unwrap_or(false) {
-                let m = s.main_model.clone().unwrap_or_else(|| "claude-sonnet-4-6".to_string());
-                return (m, None);
-            }
-        }
-
-        if s.active_provider.as_deref() == Some("gemini") {
-            if s.gemini_api_key.as_deref().map(|k| !k.trim().is_empty()).unwrap_or(false) {
-                return ("gemini-2.0-flash".to_string(), None);
-            }
-        }
-
-        if s.active_provider.as_deref() == Some("openai") {
-            if let (Some(m), Some(k)) = (&s.openai_model, &s.openai_api_key) {
-                if !k.trim().is_empty() {
-                    let cfg = LocalConfig {
-                        base_url: "https://api.openai.com/v1".to_string(),
-                        api_key: Some(k.clone()),
-                        model: m.clone(),
-                    };
-                    return (format!("openai:{m}"), Some(cfg));
-                }
-            }
-        }
-
-        if s.active_provider.as_deref() == Some("deepseek") {
-            if let Some(ref m) = s.local_model {
-                let cfg = LocalConfig {
-                    base_url: "https://api.deepseek.com/v1".to_string(),
-                    api_key: s.local_api_key.clone().filter(|k| !k.trim().is_empty()),
-                    model: m.clone(),
-                };
-                return (format!("local:{m}"), Some(cfg));
-            }
-        }
-
-        if let Some(ref m) = s.local_model {
-            if let Some(ref b) = s.local_base_url {
-                if !b.trim().is_empty() {
-                    let cfg = LocalConfig {
-                        base_url: b.clone(),
-                        api_key: s.local_api_key.clone(),
-                        model: m.clone(),
-                    };
-                    return (format!("local:{m}"), Some(cfg));
-                }
-            }
-        }
-    }
-
-    // 2. Fallback: check env vars for an available provider
-    if let Ok(key) = std::env::var("GEMINI_API_KEY") {
-        if !key.trim().is_empty() {
-            return ("gemini-2.0-flash".to_string(), None);
-        }
-    }
-
-    if let Ok(key) = std::env::var("DEEPSEEK_API_KEY") {
-        if !key.trim().is_empty() {
-            let model = "deepseek-chat".to_string();
-            let cfg = LocalConfig {
-                base_url: "https://api.deepseek.com/v1".to_string(),
-                api_key: Some(key),
-                model: model.clone(),
-            };
-            return (format!("local:{model}"), Some(cfg));
-        }
-    }
-
-    if let Ok(base) = std::env::var("VLLM_BASE_URL") {
-        if !base.trim().is_empty() {
-            let model = std::env::var("VLLM_MAIN_MODEL").unwrap_or_else(|_| "default".to_string());
-            let cfg = LocalConfig {
-                base_url: base,
-                api_key: std::env::var("VLLM_API_KEY").ok(),
-                model: model.clone(),
-            };
-            return (format!("local:{model}"), Some(cfg));
-        }
-    }
-
-    ("gemini-2.0-flash".to_string(), None)
-}
+// resolve_analysis_model moved to crate::llm::oneshot (imported above) so it
+// can be shared by case-prep and corpus tagging.
 
 // ---------------------------------------------------------------------------
 // GET /cases/:id/findings — all findings grouped by agent_name
@@ -834,6 +774,133 @@ async fn get_findings(
 }
 
 // ---------------------------------------------------------------------------
+// POST /cases/:id/resolve-precedents — turn precedent_finder SEARCH
+// SUGGESTIONS into real Indian Kanoon cases (tid + url) so the frontend
+// can show case text and a "verify in eCourts" badge.
+//
+// Additive: reads the existing precedent_finder finding, reuses the
+// existing kanoon_search tool. Does not touch analysis or any finding.
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct ResolvePrecedentsBody {
+    /// Top Kanoon hits to keep per suggested query (1-3). Defaults to 1.
+    results_per_query: Option<usize>,
+}
+
+async fn resolve_precedents(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+    Path(case_id): Path<String>,
+    Json(body): Json<ResolvePrecedentsBody>,
+) -> ApiResult {
+    verify_case_ownership(&state, &case_id, &auth.user_id).await?;
+
+    let per_query = body.results_per_query.unwrap_or(1).clamp(1, 3);
+
+    // LLM config for confidence scoring (same resolution as output generation).
+    let user_settings = fetch_llm_settings(&state.db, &auth.user_id).await.ok();
+    let (score_model, score_local) = resolve_analysis_model(&user_settings);
+    let score_config = OutputConfig {
+        model: score_model,
+        local_config: score_local,
+        claude_api_key: user_settings.as_ref().and_then(|s| s.claude_api_key.clone()).filter(|k| !k.trim().is_empty()),
+        gemini_api_key: user_settings.as_ref().and_then(|s| s.gemini_api_key.clone()).filter(|k| !k.trim().is_empty()),
+        gemini_region: user_settings.as_ref().and_then(|s| s.gemini_region.clone()),
+    };
+
+    // Load the most recent precedent_finder finding for this case.
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT content_json FROM case_findings \
+         WHERE case_id = ? AND agent_name = 'precedent_finder' \
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(&case_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let (content_json,) = row.ok_or_else(|| {
+        err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "No precedent findings available. Run analyze first.",
+        )
+    })?;
+
+    let content: Value = serde_json::from_str(&content_json).unwrap_or(Value::Null);
+    let required = content
+        .get("required_precedents")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut resolved: Vec<Value> = Vec::with_capacity(required.len());
+    for precedent in &required {
+        let query = precedent
+            .get("suggested_search_query")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+
+        let mut cases: Vec<Value> = if query.is_empty() {
+            Vec::new()
+        } else {
+            let args = json!({
+                "query": query,
+                "max_results": per_query,
+                "include_fragments": true,
+            });
+            // Reuse the existing Kanoon search tool. Returns a JSON string.
+            let raw = crate::llm::kanoon_tool::exec_kanoon_search(&state, &auth.user_id, &args).await;
+            let parsed: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+            parsed
+                .get("results")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .take(per_query)
+                        .map(|r| {
+                            json!({
+                                "tid": r.get("tid"),
+                                "title": r.get("title"),
+                                "court": r.get("court"),
+                                "decision_date": r.get("decision_date"),
+                                "snippet": r.get("snippet"),
+                                "relevant_paragraphs": r.get("relevant_paragraphs"),
+                                "kanoon_url": r.get("kanoon_url"),
+                                "relevance_score": r.get("relevance_score"),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        // AI-judged confidence: how strongly each case actually supports the point of law.
+        let point_of_law = precedent.get("point_of_law").and_then(|v| v.as_str()).unwrap_or("");
+        if !cases.is_empty() {
+            let scores = case_outputs::score_precedent_cases(&score_config, point_of_law, &cases).await;
+            for (i, case) in cases.iter_mut().enumerate() {
+                if let (Some(obj), Some((conf, reason))) = (case.as_object_mut(), scores.get(i)) {
+                    obj.insert("confidence".to_string(), json!(conf));
+                    obj.insert("reason".to_string(), json!(reason));
+                }
+            }
+        }
+
+        resolved.push(json!({
+            "point_of_law": precedent.get("point_of_law"),
+            "suggested_search_query": query,
+            "target_court": precedent.get("target_court"),
+            "grounding": precedent.get("grounding"),
+            "cases": cases,
+        }));
+    }
+
+    Ok(Json(json!({ "resolved_precedents": resolved })))
+}
+
+// ---------------------------------------------------------------------------
 // POST /cases/:id/outputs/brief
 // POST /cases/:id/outputs/strategy-memo
 // POST /cases/:id/outputs/hearing-prep
@@ -847,35 +914,6 @@ async fn generate_output(
     redact_pii: bool,
 ) -> ApiResult {
     verify_case_ownership(&state, case_id, user_id).await?;
-
-    let findings: Vec<(String, String)> = sqlx::query_as(
-        "SELECT agent_name, content_json FROM case_findings WHERE case_id = ? ORDER BY created_at ASC",
-    )
-    .bind(case_id)
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-
-    if findings.is_empty() {
-        return Err(err(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "No findings available. Run analyze first.",
-        ));
-    }
-
-    // Build findings as JSON values for the output generators
-    let findings_json: Vec<serde_json::Value> = findings
-        .iter()
-        .map(|(agent_name, content_json)| {
-            let parsed = serde_json::from_str::<serde_json::Value>(content_json)
-                .unwrap_or_else(|_| json!(content_json));
-            json!({
-                "agent_name": agent_name,
-                "finding_type": "analysis",
-                "content_json": parsed.to_string(),
-            })
-        })
-        .collect();
 
     // Resolve LLM settings (same pattern as analyze)
     let user_settings = fetch_llm_settings(&state.db, user_id).await.ok();
@@ -892,21 +930,88 @@ async fn generate_output(
         gemini_region,
     };
 
-    // Call the real LLM-backed output generator
-    let doc_id = match output_type {
-        "brief" => {
-            case_outputs::generate_case_brief(&state.db, case_id, user_id, &findings_json, &config)
-                .await
+    // Call the real LLM-backed output generator.
+    // The annexure index lists the attached documents; the others build on analysis findings.
+    let doc_id = if output_type == "annexure-index" {
+        let docs: Vec<(Option<String>, Option<String>, Option<i64>)> = sqlx::query_as(
+            "SELECT d.filename, cd.document_type, d.page_count \
+             FROM case_documents cd LEFT JOIN documents d ON d.id = cd.document_id \
+             WHERE cd.case_id = ?",
+        )
+        .bind(case_id)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+        if docs.is_empty() {
+            return Err(err(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "No documents attached to this case.",
+            ));
         }
-        "strategy-memo" => {
-            case_outputs::generate_strategy_memo(&state.db, case_id, user_id, &findings_json, &config)
-                .await
+
+        let documents_json: Vec<serde_json::Value> = docs
+            .into_iter()
+            .map(|(filename, doc_type, page_count)| {
+                json!({
+                    "filename": filename,
+                    "document_type": doc_type,
+                    "page_count": page_count,
+                })
+            })
+            .collect();
+
+        case_outputs::generate_annexure_index(&state.db, case_id, user_id, &documents_json, &config)
+            .await
+    } else {
+        let findings: Vec<(String, String)> = sqlx::query_as(
+            "SELECT agent_name, content_json FROM case_findings WHERE case_id = ? ORDER BY created_at ASC",
+        )
+        .bind(case_id)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+        if findings.is_empty() {
+            return Err(err(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "No findings available. Run analyze first.",
+            ));
         }
-        "hearing-prep" => {
-            case_outputs::generate_hearing_prep(&state.db, case_id, user_id, &findings_json, None, &config)
-                .await
+
+        // Build findings as JSON values for the output generators
+        let findings_json: Vec<serde_json::Value> = findings
+            .iter()
+            .map(|(agent_name, content_json)| {
+                let parsed = serde_json::from_str::<serde_json::Value>(content_json)
+                    .unwrap_or_else(|_| json!(content_json));
+                json!({
+                    "agent_name": agent_name,
+                    "finding_type": "analysis",
+                    "content_json": parsed.to_string(),
+                })
+            })
+            .collect();
+
+        match output_type {
+            "brief" => {
+                case_outputs::generate_case_brief(&state.db, case_id, user_id, &findings_json, &config)
+                    .await
+            }
+            "strategy-memo" => {
+                case_outputs::generate_strategy_memo(&state.db, case_id, user_id, &findings_json, &config)
+                    .await
+            }
+            "hearing-prep" => {
+                case_outputs::generate_hearing_prep(&state.db, case_id, user_id, &findings_json, None, &config)
+                    .await
+            }
+            "list-of-dates" => {
+                case_outputs::generate_list_of_dates(&state.db, case_id, user_id, &findings_json, &config)
+                    .await
+            }
+            _ => return Err(err(StatusCode::BAD_REQUEST, "Unknown output type")),
         }
-        _ => return Err(err(StatusCode::BAD_REQUEST, "Unknown output type")),
     }
     .map_err(|e| {
         tracing::error!("[cases] generate_output({output_type}) failed: {e}");
@@ -989,6 +1094,24 @@ async fn generate_hearing_prep(
     Json(body): Json<GenerateOutputBody>,
 ) -> ApiResult {
     generate_output(state, &auth.user_id, &case_id, "hearing-prep", body.redact_pii.unwrap_or(false)).await
+}
+
+async fn generate_list_of_dates(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+    Path(case_id): Path<String>,
+    Json(body): Json<GenerateOutputBody>,
+) -> ApiResult {
+    generate_output(state, &auth.user_id, &case_id, "list-of-dates", body.redact_pii.unwrap_or(false)).await
+}
+
+async fn generate_annexure_index(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+    Path(case_id): Path<String>,
+    Json(body): Json<GenerateOutputBody>,
+) -> ApiResult {
+    generate_output(state, &auth.user_id, &case_id, "annexure-index", body.redact_pii.unwrap_or(false)).await
 }
 
 // ---------------------------------------------------------------------------
@@ -1116,4 +1239,835 @@ async fn case_chat(
     }
 
     super::chat::stream_chat_root(state, auth, body, Some(case_ctx)).await
+}
+
+// ===========================================================================
+// Drafting registry: parties / annexures / citations
+//
+// Additive endpoints backing the drafting cross-reference registry
+// (migrations/0038). They reuse crate::drafting::{registry, crossrefs,
+// citations} for all serial/slug bookkeeping and bibliography rendering.
+// ===========================================================================
+
+/// Build a slug from `name` that doesn't collide with any slug already used by
+/// the case (parties or annexures share UNIQUE(case_id, slug) within their own
+/// table). On collision, append 2, 3, ... — mirrors registry::unique_slug.
+async fn unique_slug_for(
+    db: &sqlx::SqlitePool,
+    case_id: &str,
+    table: &str,
+    name: &str,
+) -> Result<String, (StatusCode, Json<Value>)> {
+    let mut base = crate::drafting::crossrefs::slugify(name);
+    if base.is_empty() {
+        base = "party".to_string();
+    }
+    let select = if table == "case_annexures" {
+        "SELECT slug FROM case_annexures WHERE case_id = ?"
+    } else {
+        "SELECT slug FROM case_parties WHERE case_id = ?"
+    };
+    let existing: std::collections::HashSet<String> = sqlx::query_as::<_, (String,)>(select)
+        .bind(case_id)
+        .fetch_all(db)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .into_iter()
+        .map(|(s,)| s)
+        .collect();
+
+    if !existing.contains(&base) {
+        return Ok(base);
+    }
+    let mut n = 2;
+    loop {
+        let candidate = format!("{base}{n}");
+        if !existing.contains(&candidate) {
+            return Ok(candidate);
+        }
+        n += 1;
+    }
+}
+
+/// Rebuild `cases.parties_json` from the current `case_parties` rows so the
+/// existing left-sidebar (which reads parties_json) stays in sync with the
+/// registry. Shape: a JSON array of {name, role} where role == side.
+async fn resync_parties_json(
+    db: &sqlx::SqlitePool,
+    case_id: &str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT name, side FROM case_parties WHERE case_id = ? ORDER BY side, serial_no",
+    )
+    .bind(case_id)
+    .fetch_all(db)
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let arr: Vec<Value> = rows
+        .into_iter()
+        .map(|(name, side)| json!({ "name": name, "role": side }))
+        .collect();
+    let parties_json = Value::Array(arr).to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    sqlx::query("UPDATE cases SET parties_json = ?, updated_at = ? WHERE id = ?")
+        .bind(&parties_json)
+        .bind(&now)
+        .bind(case_id)
+        .execute(db)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    Ok(())
+}
+
+/// Load all party rows for a case as JSON, ordered by side, serial_no.
+async fn fetch_parties(
+    db: &sqlx::SqlitePool,
+    case_id: &str,
+) -> Result<Vec<Value>, (StatusCode, Json<Value>)> {
+    let rows: Vec<(String, String, String, String, String, Option<String>, i64, String, String, String)> =
+        sqlx::query_as(
+            "SELECT id, case_id, slug, name, side, role_label, serial_no, source, created_at, updated_at \
+             FROM case_parties WHERE case_id = ? ORDER BY side, serial_no",
+        )
+        .bind(case_id)
+        .fetch_all(db)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(id, cid, slug, name, side, role_label, serial_no, source, created_at, updated_at)| {
+            json!({
+                "id": id,
+                "case_id": cid,
+                "slug": slug,
+                "name": name,
+                "side": side,
+                "role_label": role_label,
+                "serial_no": serial_no,
+                "source": source,
+                "created_at": created_at,
+                "updated_at": updated_at,
+            })
+        })
+        .collect())
+}
+
+/// Load all annexure rows for a case as JSON, ordered by side, serial_no.
+async fn fetch_annexures(
+    db: &sqlx::SqlitePool,
+    case_id: &str,
+) -> Result<Vec<Value>, (StatusCode, Json<Value>)> {
+    let rows: Vec<(String, String, String, String, Option<String>, Option<String>, String, i64, String, String)> =
+        sqlx::query_as(
+            "SELECT id, case_id, document_id, slug, description, doc_date, side, serial_no, created_at, updated_at \
+             FROM case_annexures WHERE case_id = ? ORDER BY side, serial_no",
+        )
+        .bind(case_id)
+        .fetch_all(db)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(id, cid, document_id, slug, description, doc_date, side, serial_no, created_at, updated_at)| {
+            json!({
+                "id": id,
+                "case_id": cid,
+                "document_id": document_id,
+                "slug": slug,
+                "description": description,
+                "doc_date": doc_date,
+                "side": side,
+                "serial_no": serial_no,
+                "created_at": created_at,
+                "updated_at": updated_at,
+            })
+        })
+        .collect())
+}
+
+// ---------------------------------------------------------------------------
+// GET /cases/:id/parties
+// ---------------------------------------------------------------------------
+
+async fn list_parties(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+    Path(case_id): Path<String>,
+) -> ApiResult {
+    verify_case_ownership(&state, &case_id, &auth.user_id).await?;
+    let parties = fetch_parties(&state.db, &case_id).await?;
+    Ok(Json(json!({ "parties": parties })))
+}
+
+// ---------------------------------------------------------------------------
+// POST /cases/:id/parties
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct CreatePartyBody {
+    name: String,
+    side: String,
+    role_label: Option<String>,
+}
+
+async fn create_party(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+    Path(case_id): Path<String>,
+    Json(body): Json<CreatePartyBody>,
+) -> ApiResult {
+    verify_case_ownership(&state, &case_id, &auth.user_id).await?;
+
+    let name = body.name.trim();
+    if name.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "name cannot be empty"));
+    }
+    if body.side != "petitioner" && body.side != "respondent" {
+        return Err(err(StatusCode::BAD_REQUEST, "side must be 'petitioner' or 'respondent'"));
+    }
+
+    let slug = unique_slug_for(&state.db, &case_id, "case_parties", name).await?;
+    let serial_no = crate::drafting::registry::next_serial(&state.db, &case_id, "case_parties", &body.side)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    sqlx::query(
+        "INSERT INTO case_parties \
+         (id, case_id, slug, name, side, role_label, serial_no, details_json, source, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 'manual', ?, ?)",
+    )
+    .bind(&id)
+    .bind(&case_id)
+    .bind(&slug)
+    .bind(name)
+    .bind(&body.side)
+    .bind(&body.role_label)
+    .bind(serial_no)
+    .bind(&now)
+    .bind(&now)
+    .execute(&state.db)
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    resync_parties_json(&state.db, &case_id).await?;
+
+    Ok(Json(json!({
+        "id": id,
+        "case_id": case_id,
+        "slug": slug,
+        "name": name,
+        "side": body.side,
+        "role_label": body.role_label,
+        "serial_no": serial_no,
+        "source": "manual",
+        "created_at": now,
+        "updated_at": now,
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// PUT /cases/:id/parties/:party_id
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct UpdatePartyBody {
+    name: Option<String>,
+    role_label: Option<String>,
+    slug: Option<String>,
+}
+
+async fn update_party(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+    Path((case_id, party_id)): Path<(String, String)>,
+    Json(body): Json<UpdatePartyBody>,
+) -> ApiResult {
+    verify_case_ownership(&state, &case_id, &auth.user_id).await?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let result = sqlx::query(
+        "UPDATE case_parties SET \
+         name = COALESCE(?, name), \
+         role_label = COALESCE(?, role_label), \
+         slug = COALESCE(?, slug), \
+         updated_at = ? \
+         WHERE id = ? AND case_id = ?",
+    )
+    .bind(&body.name)
+    .bind(&body.role_label)
+    .bind(&body.slug)
+    .bind(&now)
+    .bind(&party_id)
+    .bind(&case_id)
+    .execute(&state.db)
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    if result.rows_affected() == 0 {
+        return Err(err(StatusCode::NOT_FOUND, "Party not found"));
+    }
+
+    resync_parties_json(&state.db, &case_id).await?;
+    let parties = fetch_parties(&state.db, &case_id).await?;
+    let party = parties.into_iter().find(|p| p.get("id").and_then(|v| v.as_str()) == Some(party_id.as_str()));
+    Ok(Json(json!({ "party": party })))
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /cases/:id/parties/:party_id
+// ---------------------------------------------------------------------------
+
+async fn delete_party(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+    Path((case_id, party_id)): Path<(String, String)>,
+) -> ApiResult {
+    verify_case_ownership(&state, &case_id, &auth.user_id).await?;
+
+    let side: Option<(String,)> = sqlx::query_as(
+        "SELECT side FROM case_parties WHERE id = ? AND case_id = ?",
+    )
+    .bind(&party_id)
+    .bind(&case_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let (side,) = side.ok_or_else(|| err(StatusCode::NOT_FOUND, "Party not found"))?;
+
+    sqlx::query("DELETE FROM case_parties WHERE id = ? AND case_id = ?")
+        .bind(&party_id)
+        .bind(&case_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    crate::drafting::registry::compact_serials(&state.db, &case_id, "case_parties", &side)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    resync_parties_json(&state.db, &case_id).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ---------------------------------------------------------------------------
+// PUT /cases/:id/parties/reorder
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct ReorderBody {
+    side: String,
+    ordered_ids: Vec<String>,
+}
+
+async fn reorder_parties(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+    Path(case_id): Path<String>,
+    Json(body): Json<ReorderBody>,
+) -> ApiResult {
+    verify_case_ownership(&state, &case_id, &auth.user_id).await?;
+
+    crate::drafting::registry::reorder(&state.db, &case_id, "case_parties", &body.side, &body.ordered_ids)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let parties = fetch_parties(&state.db, &case_id).await?;
+    Ok(Json(json!({ "parties": parties })))
+}
+
+// ---------------------------------------------------------------------------
+// POST /cases/:id/parties/ai-populate
+// ---------------------------------------------------------------------------
+
+async fn ai_populate_parties(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+    Path(case_id): Path<String>,
+) -> ApiResult {
+    verify_case_ownership(&state, &case_id, &auth.user_id).await?;
+
+    let seeded = crate::drafting::registry::seed_parties_from_findings(&state.db, &case_id)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    resync_parties_json(&state.db, &case_id).await?;
+    let parties = fetch_parties(&state.db, &case_id).await?;
+    Ok(Json(json!({ "seeded": seeded, "parties": parties })))
+}
+
+// ---------------------------------------------------------------------------
+// GET /cases/:id/annexures
+// ---------------------------------------------------------------------------
+
+async fn list_annexures(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+    Path(case_id): Path<String>,
+) -> ApiResult {
+    verify_case_ownership(&state, &case_id, &auth.user_id).await?;
+    let annexures = fetch_annexures(&state.db, &case_id).await?;
+    Ok(Json(json!({ "annexures": annexures })))
+}
+
+// ---------------------------------------------------------------------------
+// POST /cases/:id/annexures
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct CreateAnnexureBody {
+    document_id: String,
+    side: Option<String>,
+    description: Option<String>,
+    doc_date: Option<String>,
+}
+
+async fn create_annexure(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+    Path(case_id): Path<String>,
+    Json(body): Json<CreateAnnexureBody>,
+) -> ApiResult {
+    verify_case_ownership(&state, &case_id, &auth.user_id).await?;
+
+    let side = body.side.clone().unwrap_or_else(|| "P".to_string());
+    if side != "P" && side != "R" && side != "C" {
+        return Err(err(StatusCode::BAD_REQUEST, "side must be 'P', 'R', or 'C'"));
+    }
+
+    // The document must be attached to this case; pull its filename for the slug.
+    let filename: Option<(String,)> = sqlx::query_as(
+        "SELECT d.filename FROM case_documents cd JOIN documents d ON d.id = cd.document_id \
+         WHERE cd.case_id = ? AND cd.document_id = ?",
+    )
+    .bind(&case_id)
+    .bind(&body.document_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let (filename,) = filename
+        .ok_or_else(|| err(StatusCode::UNPROCESSABLE_ENTITY, "Document is not attached to this case"))?;
+
+    let slug = unique_slug_for(&state.db, &case_id, "case_annexures", &filename).await?;
+    let serial_no = crate::drafting::registry::next_serial(&state.db, &case_id, "case_annexures", &side)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    sqlx::query(
+        "INSERT INTO case_annexures \
+         (id, case_id, document_id, slug, description, doc_date, side, serial_no, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(&case_id)
+    .bind(&body.document_id)
+    .bind(&slug)
+    .bind(&body.description)
+    .bind(&body.doc_date)
+    .bind(&side)
+    .bind(serial_no)
+    .bind(&now)
+    .bind(&now)
+    .execute(&state.db)
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    Ok(Json(json!({
+        "id": id,
+        "case_id": case_id,
+        "document_id": body.document_id,
+        "slug": slug,
+        "description": body.description,
+        "doc_date": body.doc_date,
+        "side": side,
+        "serial_no": serial_no,
+        "created_at": now,
+        "updated_at": now,
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// PUT /cases/:id/annexures/:annexure_id
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct UpdateAnnexureBody {
+    description: Option<String>,
+    doc_date: Option<String>,
+    side: Option<String>,
+    slug: Option<String>,
+}
+
+async fn update_annexure(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+    Path((case_id, annexure_id)): Path<(String, String)>,
+    Json(body): Json<UpdateAnnexureBody>,
+) -> ApiResult {
+    verify_case_ownership(&state, &case_id, &auth.user_id).await?;
+
+    if let Some(side) = &body.side {
+        if side != "P" && side != "R" && side != "C" {
+            return Err(err(StatusCode::BAD_REQUEST, "side must be 'P', 'R', or 'C'"));
+        }
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let result = sqlx::query(
+        "UPDATE case_annexures SET \
+         description = COALESCE(?, description), \
+         doc_date = COALESCE(?, doc_date), \
+         side = COALESCE(?, side), \
+         slug = COALESCE(?, slug), \
+         updated_at = ? \
+         WHERE id = ? AND case_id = ?",
+    )
+    .bind(&body.description)
+    .bind(&body.doc_date)
+    .bind(&body.side)
+    .bind(&body.slug)
+    .bind(&now)
+    .bind(&annexure_id)
+    .bind(&case_id)
+    .execute(&state.db)
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    if result.rows_affected() == 0 {
+        return Err(err(StatusCode::NOT_FOUND, "Annexure not found"));
+    }
+
+    let annexures = fetch_annexures(&state.db, &case_id).await?;
+    let annexure = annexures.into_iter().find(|a| a.get("id").and_then(|v| v.as_str()) == Some(annexure_id.as_str()));
+    Ok(Json(json!({ "annexure": annexure })))
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /cases/:id/annexures/:annexure_id
+// ---------------------------------------------------------------------------
+
+async fn delete_annexure(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+    Path((case_id, annexure_id)): Path<(String, String)>,
+) -> ApiResult {
+    verify_case_ownership(&state, &case_id, &auth.user_id).await?;
+
+    let side: Option<(String,)> = sqlx::query_as(
+        "SELECT side FROM case_annexures WHERE id = ? AND case_id = ?",
+    )
+    .bind(&annexure_id)
+    .bind(&case_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let (side,) = side.ok_or_else(|| err(StatusCode::NOT_FOUND, "Annexure not found"))?;
+
+    sqlx::query("DELETE FROM case_annexures WHERE id = ? AND case_id = ?")
+        .bind(&annexure_id)
+        .bind(&case_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    crate::drafting::registry::compact_serials(&state.db, &case_id, "case_annexures", &side)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ---------------------------------------------------------------------------
+// PUT /cases/:id/annexures/reorder
+// ---------------------------------------------------------------------------
+
+async fn reorder_annexures(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+    Path(case_id): Path<String>,
+    Json(body): Json<ReorderBody>,
+) -> ApiResult {
+    verify_case_ownership(&state, &case_id, &auth.user_id).await?;
+
+    crate::drafting::registry::reorder(&state.db, &case_id, "case_annexures", &body.side, &body.ordered_ids)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let annexures = fetch_annexures(&state.db, &case_id).await?;
+    Ok(Json(json!({ "annexures": annexures })))
+}
+
+// ---------------------------------------------------------------------------
+// POST /cases/:id/annexures/ai-populate
+// ---------------------------------------------------------------------------
+
+async fn ai_populate_annexures(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+    Path(case_id): Path<String>,
+) -> ApiResult {
+    verify_case_ownership(&state, &case_id, &auth.user_id).await?;
+
+    let seeded = crate::drafting::registry::seed_annexures_from_documents(&state.db, &case_id)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let annexures = fetch_annexures(&state.db, &case_id).await?;
+    Ok(Json(json!({ "seeded": seeded, "annexures": annexures })))
+}
+
+// ---------------------------------------------------------------------------
+// GET /cases/:id/citations
+// ---------------------------------------------------------------------------
+
+async fn list_citations(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+    Path(case_id): Path<String>,
+) -> ApiResult {
+    verify_case_ownership(&state, &case_id, &auth.user_id).await?;
+
+    let judgment_rows: Vec<(String, String, Option<i64>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, i64, String, String)> =
+        sqlx::query_as(
+            "SELECT id, status, kanoon_tid, title, court, decision_date, kanoon_url, canonical_citation, \
+                    times_cited, first_cited_at, last_cited_at \
+             FROM case_citations WHERE case_id = ? AND kind = 'judgment' \
+             ORDER BY title COLLATE NOCASE",
+        )
+        .bind(&case_id)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let judgments: Vec<Value> = judgment_rows
+        .into_iter()
+        .map(|(id, status, tid, title, court, decision_date, url, citation, times_cited, first, last)| {
+            json!({
+                "id": id,
+                "kind": "judgment",
+                "status": status,
+                "kanoon_tid": tid,
+                "title": title,
+                "court": court,
+                "decision_date": decision_date,
+                "kanoon_url": url,
+                "canonical_citation": citation,
+                "times_cited": times_cited,
+                "first_cited_at": first,
+                "last_cited_at": last,
+            })
+        })
+        .collect();
+
+    let statute_rows: Vec<(String, String, Option<String>, Option<String>, i64, String, String)> =
+        sqlx::query_as(
+            "SELECT id, status, statute, section_number, times_cited, first_cited_at, last_cited_at \
+             FROM case_citations WHERE case_id = ? AND kind = 'statute' \
+             ORDER BY statute COLLATE NOCASE, section_number",
+        )
+        .bind(&case_id)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let statutes: Vec<Value> = statute_rows
+        .into_iter()
+        .map(|(id, status, statute, section, times_cited, first, last)| {
+            json!({
+                "id": id,
+                "kind": "statute",
+                "status": status,
+                "statute": statute,
+                "section_number": section,
+                "times_cited": times_cited,
+                "first_cited_at": first,
+                "last_cited_at": last,
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({ "judgments": judgments, "statutes": statutes })))
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /cases/:id/citations/:citation_id
+// ---------------------------------------------------------------------------
+
+async fn delete_citation(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+    Path((case_id, citation_id)): Path<(String, String)>,
+) -> ApiResult {
+    verify_case_ownership(&state, &case_id, &auth.user_id).await?;
+
+    let result = sqlx::query("DELETE FROM case_citations WHERE id = ? AND case_id = ?")
+        .bind(&citation_id)
+        .bind(&case_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    if result.rows_affected() == 0 {
+        return Err(err(StatusCode::NOT_FOUND, "Citation not found"));
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ---------------------------------------------------------------------------
+// POST /cases/:id/resolve-refs — substitute @party / #annexure handles
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct ResolveRefsBody {
+    markdown: String,
+}
+
+async fn resolve_refs(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+    Path(case_id): Path<String>,
+    Json(body): Json<ResolveRefsBody>,
+) -> ApiResult {
+    verify_case_ownership(&state, &case_id, &auth.user_id).await?;
+
+    let resolved =
+        crate::drafting::crossrefs::resolve_crossrefs(&state.db, &case_id, &body.markdown).await;
+
+    Ok(Json(json!({
+        "markdown": resolved.markdown,
+        "unresolved": resolved.unresolved,
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// Persist a deterministic bibliography (cases-referred / authorities) as a
+// case_outputs row + a .docx document, mirroring outputs.rs::persist_output.
+// ---------------------------------------------------------------------------
+
+async fn persist_bibliography(
+    state: &AppState,
+    user_id: &str,
+    case_id: &str,
+    output_type: &str,
+    title: &str,
+    content_md: &str,
+) -> ApiResult {
+    let docx_bytes = crate::pdf::docx_writer::markdown_to_docx(title, content_md)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let doc_id = uuid::Uuid::new_v4().to_string();
+    let output_id = uuid::Uuid::new_v4().to_string();
+    let storage_path = format!("documents/{user_id}/{doc_id}");
+
+    let storage = crate::storage::make_storage()
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    storage
+        .put(
+            &storage_path,
+            &docx_bytes,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let size = docx_bytes.len() as i64;
+    let now = chrono::Utc::now().to_rfc3339();
+    let filename = format!("{title}.docx");
+
+    sqlx::query(
+        "INSERT INTO documents (id, user_id, project_id, filename, file_type, size_bytes, storage_path, status) \
+         VALUES (?, ?, NULL, ?, 'docx', ?, ?, 'ready')",
+    )
+    .bind(&doc_id)
+    .bind(user_id)
+    .bind(&filename)
+    .bind(size)
+    .bind(&storage_path)
+    .execute(&state.db)
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    sqlx::query(
+        "INSERT INTO case_outputs (id, case_id, output_type, content_md, docx_document_id, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&output_id)
+    .bind(case_id)
+    .bind(output_type)
+    .bind(content_md)
+    .bind(&doc_id)
+    .bind(&now)
+    .execute(&state.db)
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    Ok(Json(json!({
+        "output_id": output_id,
+        "doc_id": doc_id,
+        "content_md": content_md,
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// POST /cases/:id/outputs/cases-referred
+// ---------------------------------------------------------------------------
+
+async fn generate_cases_referred(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+    Path(case_id): Path<String>,
+) -> ApiResult {
+    verify_case_ownership(&state, &case_id, &auth.user_id).await?;
+
+    let md = crate::drafting::citations::render_cases_referred(&state.db, &case_id)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    persist_bibliography(
+        &state,
+        &auth.user_id,
+        &case_id,
+        "cases_referred",
+        "List of Cases Referred",
+        &md,
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// POST /cases/:id/outputs/authorities
+// ---------------------------------------------------------------------------
+
+async fn generate_authorities(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+    Path(case_id): Path<String>,
+) -> ApiResult {
+    verify_case_ownership(&state, &case_id, &auth.user_id).await?;
+
+    let md = crate::drafting::citations::render_authorities(&state.db, &case_id)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    persist_bibliography(
+        &state,
+        &auth.user_id,
+        &case_id,
+        "list_of_authorities",
+        "List of Authorities",
+        &md,
+    )
+    .await
 }

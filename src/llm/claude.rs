@@ -157,19 +157,51 @@ fn parse_claude_sse_opt(line: &str) -> Option<StreamEvent> {
             }
             None
         }
+        "message_delta" => {
+            // `message_delta` carries the final `stop_reason`. When the answer
+            // was cut off at the token limit (`max_tokens`) the consumer would
+            // otherwise see a clean `message_stop` → `Done` and treat the
+            // partial draft as a finished deliverable. Surface it as a visible
+            // truncation notice (and log) so a clipped affidavit/petition is
+            // not handed over as final.
+            let stop_reason = v
+                .get("delta")
+                .and_then(|d| d.get("stop_reason"))
+                .and_then(|s| s.as_str());
+            if stop_reason == Some("max_tokens") {
+                tracing::warn!(
+                    "[claude] response truncated: stop_reason=max_tokens (hit the {} token output cap)",
+                    8192
+                );
+                return Some(StreamEvent::ContentDelta(
+                    "\n\n⚠️ Response truncated at the model's token limit — \
+                     ask me to continue to get the rest."
+                        .to_string(),
+                ));
+            }
+            None
+        }
         "message_stop" => Some(StreamEvent::Done),
         _ => None,
     }
 }
 
 pub async fn complete(params: StreamParams) -> Result<String> {
+    complete_with_max(params, 512).await
+}
+
+/// Like `complete`, but with a caller-supplied output-token budget and a
+/// visible `[truncated]` marker when the model stops on `max_tokens`. Used by
+/// callers (e.g. the history summarizer) that need a larger budget than the
+/// 512-token default and must not silently ship a clipped result.
+pub async fn complete_with_max(params: StreamParams, max_tokens: u32) -> Result<String> {
     let key = api_key(&params)?;
     let client = reqwest::Client::new();
 
     let wire_messages = to_wire_messages(&params.messages);
     let mut body = json!({
         "model": params.model,
-        "max_tokens": 512,
+        "max_tokens": max_tokens,
         "temperature": 0.5,
         "messages": wire_messages,
     });
@@ -194,16 +226,22 @@ pub async fn complete(params: StreamParams) -> Result<String> {
     }
 
     #[derive(Deserialize)]
-    struct Resp { content: Vec<ContentBlock> }
+    struct Resp { content: Vec<ContentBlock>, stop_reason: Option<String> }
     #[derive(Deserialize)]
     struct ContentBlock { #[serde(rename = "type")] kind: String, text: Option<String> }
 
     let data: Resp = resp.json().await?;
-    Ok(data.content.into_iter()
+    let truncated = data.stop_reason.as_deref() == Some("max_tokens");
+    let mut text = data.content.into_iter()
         .filter(|b| b.kind == "text")
         .filter_map(|b| b.text)
         .collect::<Vec<_>>()
-        .join(""))
+        .join("");
+    if truncated {
+        tracing::warn!("[claude] complete truncated at max_tokens={max_tokens}");
+        text.push_str(" […truncated at token limit]");
+    }
+    Ok(text)
 }
 
 #[cfg(test)]
@@ -241,6 +279,31 @@ mod tests {
     #[test]
     fn ignores_non_text_delta() {
         let line = r#"data: {"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{}"}}"#;
+        assert!(parse_claude_sse_opt(line).is_none());
+    }
+
+    #[test]
+    fn surfaces_max_tokens_truncation_as_visible_notice() {
+        // A message_delta carrying stop_reason "max_tokens" means the answer
+        // was cut off at the token limit. The parser must surface this as a
+        // visible content delta rather than dropping it (which would make a
+        // truncated draft look complete).
+        let line = r#"data: {"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":8192}}"#;
+        match parse_claude_sse_opt(line) {
+            Some(StreamEvent::ContentDelta(s)) => {
+                assert!(
+                    s.to_lowercase().contains("truncat"),
+                    "expected a truncation notice, got {s:?}"
+                );
+            }
+            other => panic!("expected a visible truncation ContentDelta, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn normal_end_turn_message_delta_is_silent() {
+        // A normal end_turn must NOT emit a spurious truncation notice.
+        let line = r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":42}}"#;
         assert!(parse_claude_sse_opt(line).is_none());
     }
 }

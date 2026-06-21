@@ -35,8 +35,21 @@ pub struct ScanProgress {
     /// inferring from log lines. One of:
     /// `extracting`, `extracting page N/M`, `embedding`, `loading-model`.
     pub current_step: Option<String>,
+    /// The most recent per-file failure. Kept for back-compat; the full
+    /// list is in `failures` so earlier failures aren't lost.
     pub last_error: Option<String>,
+    /// Every per-file failure ("path: reason"), so a partial-failure scan
+    /// can show *all* the files that failed — not just the last one.
+    /// Capped at `MAX_TRACKED_FAILURES`; once full, further failures are
+    /// counted (`failed`) but their messages are dropped to bound memory.
+    pub failures: Vec<String>,
 }
+
+/// Upper bound on the number of failure messages we retain in
+/// `ScanProgress::failures`. A scan over a large tree could otherwise
+/// accumulate one string per file; the `failed` counter still reflects
+/// the true total even after this cap is hit.
+const MAX_TRACKED_FAILURES: usize = 500;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ScanStatus {
@@ -44,6 +57,9 @@ pub enum ScanStatus {
     Idle,
     Running,
     Done,
+    /// The scan finished, but one or more files failed to index. The
+    /// caller must inspect `failed` / `failures` — this is NOT a success.
+    CompletedWithErrors,
     Failed,
 }
 
@@ -139,8 +155,12 @@ pub async fn scan_folder(
             Err(e) => {
                 tracing::warn!("[sync] {} failed: {e}", path.display());
                 failed += 1;
+                let msg = format!("{}: {e}", path.display());
                 let mut p = progress.write().await;
-                p.last_error = Some(format!("{}: {e}", path.display()));
+                if p.failures.len() < MAX_TRACKED_FAILURES {
+                    p.failures.push(msg.clone());
+                }
+                p.last_error = Some(msg);
             }
         }
 
@@ -166,7 +186,15 @@ pub async fn scan_folder(
     };
     {
         let mut p = progress.write().await;
-        p.status = ScanStatus::Done;
+        // Only report a clean `Done` when nothing failed. A partial
+        // failure must surface as its own terminal status so a UI keying
+        // off status alone can't render success while files silently
+        // failed to index.
+        p.status = if failed > 0 {
+            ScanStatus::CompletedWithErrors
+        } else {
+            ScanStatus::Done
+        };
         p.current_file = None;
         p.current_step = None;
     }
@@ -192,7 +220,15 @@ async fn process_one(
     path: &Path,
     progress: &ScanProgressHandle,
 ) -> Result<ProcessOutcome> {
-    let metadata = std::fs::metadata(path).context("stat")?;
+    // `metadata` is a blocking syscall; run it off the async worker so a
+    // scan can't park a runtime thread that also serves HTTP.
+    let metadata = {
+        let path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || std::fs::metadata(&path))
+            .await
+            .context("stat task")?
+            .context("stat")?
+    };
     let mtime: DateTime<Utc> = metadata
         .modified()
         .map(DateTime::<Utc>::from)
@@ -221,11 +257,21 @@ async fn process_one(
 
     // mtime changed (or no prior record) — read + hash to decide if
     // content really changed. Cheaper than re-embedding when the file
-    // was just touched.
-    let bytes = std::fs::read(path).context("read")?;
-    let mut hasher = Sha256::new();
-    hasher.update(&bytes);
-    let sha = format!("{:x}", hasher.finalize());
+    // was just touched. The whole-file read and the CPU-bound sha256 are
+    // both blocking, so run them on a blocking thread to keep the async
+    // runtime responsive for concurrent HTTP requests during a scan.
+    let (bytes, sha) = {
+        let path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || -> Result<(Vec<u8>, String)> {
+            let bytes = std::fs::read(&path).context("read")?;
+            let mut hasher = Sha256::new();
+            hasher.update(&bytes);
+            let sha = format!("{:x}", hasher.finalize());
+            Ok((bytes, sha))
+        })
+        .await
+        .context("read task")??
+    };
 
     if let Some((id, document_id, prev_sha, _, _)) = &prior {
         if prev_sha == &sha {
@@ -522,5 +568,128 @@ mod tests {
             assert!(skip.is_none(), ".{ext} must not be skipped");
             assert_eq!(text, "hello\nworld");
         }
+    }
+
+    // --- partial-failure terminal status (scanner.rs:160-173) ------------
+
+    /// In-memory pool with just the two tables `process_one` touches.
+    /// `max_connections(1)` keeps the `:memory:` DB alive across queries.
+    async fn test_pool() -> sqlx::SqlitePool {
+        use sqlx::sqlite::SqlitePoolOptions;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE sync_folders (id TEXT PRIMARY KEY, user_id TEXT, \
+             path TEXT, recursive INTEGER, enabled INTEGER, last_scan_at TEXT, \
+             label TEXT, created_at TEXT)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE synced_files (id TEXT PRIMARY KEY, user_id TEXT, \
+             folder_id TEXT, project_id TEXT, path TEXT, sha256 TEXT, \
+             size_bytes INTEGER, mtime TEXT, document_id TEXT UNIQUE, \
+             status TEXT, skip_reason TEXT, chunk_count INTEGER, indexed_at TEXT)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool
+    }
+
+    /// A file with a supported extension that fails to extract must:
+    ///  - be counted in `failed`,
+    ///  - record its reason in `failures` (not just overwrite `last_error`),
+    ///  - flip the terminal status to `CompletedWithErrors`, NOT `Done`,
+    /// so a UI keying off status alone can't render the scan as a success.
+    /// Uses multibyte (Devanagari + ₹) garbage bytes to also prove the
+    /// failure path doesn't panic on non-ASCII content.
+    #[tokio::test]
+    async fn partial_failure_yields_completed_with_errors_status() {
+        let db = test_pool().await;
+        let embeddings = Arc::new(EmbeddingService::new(db.clone()));
+
+        let dir = tempfile::tempdir().unwrap();
+        // Two .docx files whose bytes are NOT a valid ZIP → extraction
+        // errors before any embedding/model load is reached.
+        for name in ["धारा-१३८.docx", "contract-₹.docx"] {
+            std::fs::write(
+                dir.path().join(name),
+                "not a real docx — धारा ₹500 \u{2014} curly “quote”".as_bytes(),
+            )
+            .unwrap();
+        }
+
+        let progress: ScanProgressHandle =
+            Arc::new(RwLock::new(ScanProgress::default()));
+
+        let report = scan_folder(
+            db,
+            embeddings,
+            "user-1".to_string(),
+            "folder-1".to_string(),
+            None,
+            dir.path().to_path_buf(),
+            false,
+            progress.clone(),
+        )
+        .await
+        .expect("scan task itself should not error on per-file failures");
+
+        assert_eq!(report.failed, 2, "both garbage docx must be counted failed");
+        assert_eq!(report.indexed, 0);
+
+        let p = progress.read().await;
+        assert_eq!(
+            p.status,
+            ScanStatus::CompletedWithErrors,
+            "partial failure must NOT report a clean Done"
+        );
+        assert_eq!(p.failed, 2);
+        assert_eq!(
+            p.failures.len(),
+            2,
+            "every failure must be retained, not just the last one"
+        );
+        assert!(
+            p.failures.iter().any(|f| f.contains("धारा")),
+            "failure list should name the failing files: {:?}",
+            p.failures
+        );
+    }
+
+    /// The clean path must still terminate as `Done` (here: an empty
+    /// folder, so no embedding model is loaded) — the new variant only
+    /// fires when something actually failed.
+    #[tokio::test]
+    async fn clean_scan_yields_done_status() {
+        let db = test_pool().await;
+        let embeddings = Arc::new(EmbeddingService::new(db.clone()));
+        let dir = tempfile::tempdir().unwrap();
+
+        let progress: ScanProgressHandle =
+            Arc::new(RwLock::new(ScanProgress::default()));
+
+        let report = scan_folder(
+            db,
+            embeddings,
+            "user-1".to_string(),
+            "folder-1".to_string(),
+            None,
+            dir.path().to_path_buf(),
+            false,
+            progress.clone(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.failed, 0);
+        let p = progress.read().await;
+        assert_eq!(p.status, ScanStatus::Done);
+        assert!(p.failures.is_empty());
     }
 }

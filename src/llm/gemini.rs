@@ -298,6 +298,14 @@ fn parse_gemini_sse_opt(line: &str, tc_counter: &mut u64) -> Option<StreamEvent>
 }
 
 pub async fn complete(params: StreamParams) -> Result<String> {
+    complete_with_max(params, 8192).await
+}
+
+/// Like `complete`, but with a caller-supplied output-token budget and a
+/// visible `[truncated]` marker when the model stops on `MAX_TOKENS`. Used by
+/// callers (e.g. the history summarizer) that must not silently ship a
+/// clipped result.
+pub async fn complete_with_max(params: StreamParams, max_tokens: u32) -> Result<String> {
     let key = api_key(&params)?;
     let client = reqwest::Client::new();
     let url = format!(
@@ -306,10 +314,13 @@ pub async fn complete(params: StreamParams) -> Result<String> {
         key,
     );
 
+    let mut body = build_body(&params);
+    body["generationConfig"]["maxOutputTokens"] = json!(max_tokens);
+
     let resp = client
         .post(&url)
         .header("content-type", "application/json")
-        .json(&build_body(&params))
+        .json(&body)
         .send()
         .await?;
 
@@ -320,9 +331,12 @@ pub async fn complete(params: StreamParams) -> Result<String> {
     }
 
     let v: Value = resp.json().await?;
-    let text = v
-        .get("candidates")
-        .and_then(|c| c.get(0))
+    let candidate = v.get("candidates").and_then(|c| c.get(0));
+    let truncated = candidate
+        .and_then(|c| c.get("finishReason"))
+        .and_then(|r| r.as_str())
+        == Some("MAX_TOKENS");
+    let mut text = candidate
         .and_then(|c| c.get("content"))
         .and_then(|c| c.get("parts"))
         .and_then(|p| p.as_array())
@@ -333,6 +347,10 @@ pub async fn complete(params: StreamParams) -> Result<String> {
                 .join("")
         })
         .unwrap_or_default();
+    if truncated {
+        tracing::warn!("[gemini] complete truncated at maxOutputTokens={max_tokens}");
+        text.push_str(" […truncated at token limit]");
+    }
 
     Ok(text)
 }

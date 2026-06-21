@@ -104,11 +104,26 @@ pub fn context_window_tokens(model: &str) -> usize {
 }
 
 /// Should we summarize given the running history and target model?
-pub fn should_summarize(messages: &[Message], model: &str) -> bool {
+///
+/// `extra_payload_chars` is the size (in chars) of the non-message portion of
+/// the outbound request — the assembled system prompt, attached-document
+/// bodies, and the per-query RAG/KB block. These are the real overflow source
+/// (often far larger than the conversational turns) yet are sent to the model
+/// alongside the messages, so they must count toward the window budget; a chat
+/// with a huge attached doc but short recent history would otherwise never
+/// trip the trigger and overflow the model server-side.
+pub fn should_summarize(messages: &[Message], model: &str, extra_payload_chars: usize) -> bool {
     let window = context_window_tokens(model);
-    let used = estimate_messages_tokens(messages);
+    let used = estimate_messages_tokens(messages) + estimate_tokens_from_chars(extra_payload_chars);
     let trigger = (window as f32 * TRIGGER_RATIO) as usize;
     used > trigger && messages.len() > KEEP_RECENT_TURNS * 2 + 2
+}
+
+/// Same heuristic as `estimate_tokens` but for a pre-counted char length
+/// (the system prompt / RAG / attached-doc block, whose char count the caller
+/// already knows via `.len()`/`.chars().count()`).
+fn estimate_tokens_from_chars(chars: usize) -> usize {
+    chars.div_ceil(CHARS_PER_TOKEN)
 }
 
 /// Split a message list into (older, newer) where `newer` is the last
@@ -203,10 +218,17 @@ pub async fn summarize_old_turns(
         gemini_region: creds.gemini_region.clone(),
     };
 
+    // The prompt asks for 1–3 compact paragraphs preserving names, dates,
+    // decisions, facts, and open questions — that routinely exceeds the
+    // 512-token default of `complete`, which would clip the tail (the open
+    // questions) that this summary permanently replaces the older turns with.
+    // Use a budget sized to the prompt and surface a length-stop as a visible
+    // marker (see complete_with_max) rather than silently shipping a clip.
+    const SUMMARY_MAX_TOKENS: u32 = 2000;
     let summary = match super::provider_for_model(target_model) {
-        super::Provider::Claude => super::claude::complete(params).await?,
-        super::Provider::OpenAI => super::local::complete(params).await?,
-        super::Provider::Gemini => super::gemini::complete(params).await?,
+        super::Provider::Claude => super::claude::complete_with_max(params, SUMMARY_MAX_TOKENS).await?,
+        super::Provider::OpenAI => super::local::complete_with_max(params, SUMMARY_MAX_TOKENS).await?,
+        super::Provider::Gemini => super::gemini::complete_with_max(params, SUMMARY_MAX_TOKENS).await?,
     };
 
     Ok(Message::system(format!(
@@ -225,8 +247,9 @@ pub async fn maybe_compress_history(
     messages: Vec<Message>,
     target_model: &str,
     creds: &SummarizerCreds,
+    extra_payload_chars: usize,
 ) -> Vec<Message> {
-    if !should_summarize(&messages, target_model) {
+    if !should_summarize(&messages, target_model, extra_payload_chars) {
         return messages;
     }
     let (older, newer) = split_at_recent_window(&messages);
@@ -270,7 +293,7 @@ mod tests {
             Message::user("Ciao"),
             Message::assistant("Salve"),
         ];
-        assert!(!should_summarize(&msgs, "gemini-2.5-flash"));
+        assert!(!should_summarize(&msgs, "gemini-2.5-flash", 0));
     }
 
     #[test]
@@ -282,7 +305,30 @@ mod tests {
             msgs.push(Message::assistant("ok"));
         }
         // gpt-4 → 8k window → should trigger
-        assert!(should_summarize(&msgs, "gpt-4"));
+        assert!(should_summarize(&msgs, "gpt-4", 0));
+    }
+
+    #[test]
+    fn large_attached_doc_payload_triggers_even_with_short_history() {
+        // Short conversational turns that on their own would never trip the
+        // 0.7×8k gpt-4 trigger, but a huge attached-doc system prompt pushes
+        // the *total* outbound payload over budget. Pre-fix this returned
+        // false (the real overflow source was uncounted); now it must trip.
+        let mut msgs = vec![];
+        for i in 0..6 {
+            msgs.push(Message::user(format!("short u{i}")));
+            msgs.push(Message::assistant(format!("short a{i}")));
+        }
+        // ~30k chars ≈ 7.5k tokens of attached-doc/RAG content > 0.7×8192.
+        let extra_payload_chars = 30_000;
+        assert!(
+            !should_summarize(&msgs, "gpt-4", 0),
+            "message-only payload alone must stay under the trigger"
+        );
+        assert!(
+            should_summarize(&msgs, "gpt-4", extra_payload_chars),
+            "large attached-doc payload must trip the trigger"
+        );
     }
 
     #[test]
@@ -391,7 +437,9 @@ mod tests {
         // Even with a tiny window, a 2-message conversation must not trigger.
         let big = "x".repeat(100_000);
         let msgs = vec![Message::user(big), Message::assistant("ok")];
-        assert!(!should_summarize(&msgs, "gpt-4"));
+        assert!(!should_summarize(&msgs, "gpt-4", 0));
+        // Even a huge extra payload must not trip with too few messages.
+        assert!(!should_summarize(&msgs, "gpt-4", 1_000_000));
     }
 
     #[test]
@@ -410,6 +458,7 @@ mod tests {
             msgs.clone(),
             "gemini-2.5-flash",
             &creds,
+            0,
         ));
         assert_eq!(out.len(), msgs.len());
     }

@@ -4,6 +4,7 @@ pub mod gemini;
 pub mod local;
 pub mod builtin_tools;
 pub mod kanoon_tool;
+pub mod oneshot;
 pub mod statute_tool;
 pub mod aws_verification;
 pub mod summarize;

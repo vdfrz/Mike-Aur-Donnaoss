@@ -1,0 +1,23 @@
+[package]
+name = "mike-telegram-bot"
+version = "0.1.0"
+edition = "2021"
+description = "Thin Telegram front-end for the Mike aur Donna /chat endpoint"
+
+# Standalone crate. The empty [workspace] table detaches it from the parent
+# `mike` workspace so it resolves/builds on its own and touches no shared
+# files (the parent Cargo.toml is left untouched). It depends only on the
+# backend's HTTP contract — never on the `mike` crate itself.
+[workspace]
+
+[dependencies]
+# Local Teloxide checkout (v0.17). `macros` is needed for #[derive(BotCommands)]
+# and is not in Teloxide's default feature set; ctrlc_handler + native-tls are.
+teloxide = { path = "../../teloxide-master/crates/teloxide", features = ["macros"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
+serde_json = "1"
+futures-util = "0.3"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

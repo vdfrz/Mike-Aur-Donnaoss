@@ -20,6 +20,11 @@ import { PreResponseWrapper } from "../shared/PreResponseWrapper";
 import { THINKING_SNIPPETS, getRandomSnippet } from "../../data/thinkingSnippets";
 import KanoonVerifyBadge, { extractKanoonTid } from "./KanoonVerifyBadge";
 import PoweredByIKanoon from "../shared/PoweredByIKanoon";
+import { ToolActivityStream } from "./ToolActivityStream";
+import { DocumentCard } from "./DocumentCard";
+import InlineClarification from "./InlineClarification";
+import { MessageSkeleton } from "./MessageSkeleton";
+import { MOTION_KEYFRAMES } from "./MotionTokens";
 
 /**
  * Card rendered above the per-edit EditCards when a message produced
@@ -545,6 +550,94 @@ function DocFindBlock({
                     <span className="ml-1 text-gray-400">in {filename}</span>
                     {isStreaming && "..."}
                 </span>
+            </div>
+        </div>
+    );
+}
+
+// Lawyerly, calm one-liners shown under the bundle timer so a long compile
+// reads as work-in-progress, not a hang. No emoji, no exclamations (design rule).
+const BUNDLE_THINKING = [
+    "Cleaning up scanned pages so they merge without errors.",
+    "Recomputing the index — page numbers shift as documents are added.",
+    "Placing each annexure in the order you confirmed.",
+    "Flattening malformed PDFs through the rendering engine.",
+    "Stamping continuous page numbers across the bundle.",
+];
+
+function formatElapsed(seconds: number): string {
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+/**
+ * Live court-bundle compile card: a spinning Mike mark, the current stage, an
+ * elapsed timer + soft remaining estimate, and a rotating "thinking" line —
+ * font and format mirror the case-prep AnalysisStatsBar (text-[11px], gray-500,
+ * tabular-nums, M:SS) inside the in-chat ToolActivityStream box style.
+ */
+function BundleProgressBlock({
+    stage,
+    stageCurrent,
+    stageTotal,
+    startedAt,
+    showConnector,
+}: {
+    stage?: string;
+    stageCurrent?: number;
+    stageTotal?: number;
+    startedAt?: number;
+    showConnector?: boolean;
+}) {
+    const [now, setNow] = useState(() => Date.now());
+    useEffect(() => {
+        const id = setInterval(() => setNow(Date.now()), 1000);
+        return () => clearInterval(id);
+    }, []);
+
+    const elapsed = Math.max(0, Math.floor((now - (startedAt ?? now)) / 1000));
+    const frac =
+        stageCurrent && stageTotal ? ` — ${stageCurrent} of ${stageTotal}` : "";
+    let remaining: number | null = null;
+    if (stageCurrent && stageTotal && stageCurrent > 0 && elapsed > 1) {
+        const per = elapsed / stageCurrent;
+        remaining = Math.max(0, Math.round(per * (stageTotal - stageCurrent)));
+    }
+    const thinking =
+        BUNDLE_THINKING[Math.floor(elapsed / 6) % BUNDLE_THINKING.length];
+
+    return (
+        <div className="flex items-start relative">
+            {showConnector && (
+                <div className="absolute left-0 top-0 bottom-0 w-[1px] bg-gray-300 top-[13px] left-[2.5px] h-[calc(100%+11px)]" />
+            )}
+            <div className="ml-2 flex-1 min-w-0 rounded-lg border border-gray-200 bg-white overflow-hidden">
+                <div className="flex items-center gap-2 px-3 py-2.5 font-serif text-sm text-gray-600">
+                    <MikeIcon spin size={14} />
+                    <span className="font-medium">Compiling court bundle…</span>
+                </div>
+                <div className="px-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-gray-500 tabular-nums">
+                    <span className="text-gray-700">
+                        {stage ?? "Preparing"}
+                        {frac}
+                    </span>
+                    <span className="text-gray-300">|</span>
+                    <span>{formatElapsed(elapsed)} elapsed</span>
+                    {remaining != null && (
+                        <>
+                            <span className="text-gray-300">|</span>
+                            <span>
+                                {remaining > 0
+                                    ? `~${remaining}s remaining`
+                                    : "Almost done…"}
+                            </span>
+                        </>
+                    )}
+                </div>
+                <div className="px-3 pb-2.5 pt-1 text-[11px] italic text-gray-400">
+                    {thinking}
+                </div>
             </div>
         </div>
     );
@@ -1181,6 +1274,185 @@ function MarkdownContent({
 }
 
 // ---------------------------------------------------------------------------
+// Structured clarification question renderer for ask_clarifying_questions tool
+// ---------------------------------------------------------------------------
+
+function StructuredClarificationRenderer({
+    event,
+}: {
+    event: Extract<AssistantEvent, { type: "clarification" }>;
+}) {
+    const [selectedByQuestion, setSelectedByQuestion] = useState<
+        Record<number, string[]>
+    >({});
+    const [submitted, setSubmitted] = useState(false);
+    const [error, setError] = useState(false);
+
+    const handleOptionClick = (
+        qi: number,
+        label: string,
+        multiSelect?: boolean,
+    ) => {
+        setSelectedByQuestion((prev) => {
+            const current = prev[qi] ?? [];
+            if (multiSelect) {
+                // Toggle: add if not present, remove if present
+                const next = current.includes(label)
+                    ? current.filter((x) => x !== label)
+                    : [...current, label];
+                return { ...prev, [qi]: next };
+            } else {
+                // Single select: replace with this option
+                return { ...prev, [qi]: [label] };
+            }
+        });
+    };
+
+    // proceed=true is the "Draft now" escape (no answers); proceed=false submits selections.
+    const submit = async (proceed: boolean) => {
+        setError(false);
+        const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:3001";
+        const token =
+            typeof window !== "undefined"
+                ? localStorage.getItem("mike_auth_token")
+                : null;
+
+        const answers = proceed
+            ? []
+            : event.questions.map((q, qi) => ({
+                  question: q.text,
+                  selected: selectedByQuestion[qi] ?? [],
+              }));
+
+        try {
+            await fetch(`${apiBase}/chat/client-tool-result`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                },
+                body: JSON.stringify({
+                    request_id: event.request_id,
+                    result: JSON.stringify({ answers, proceed }),
+                }),
+            });
+            setSubmitted(true);
+        } catch (err) {
+            console.error("[clarification] submit error:", err);
+            setError(true);
+        }
+    };
+
+    const isDisabled = submitted;
+
+    // Once answered, collapse the whole form into a compact confirmation so
+    // it doesn't linger as a live, clickable form above the draft.
+    if (submitted) {
+        const anySelected = event.questions.some(
+            (_, qi) => (selectedByQuestion[qi] ?? []).length > 0,
+        );
+        return (
+            <div className="mt-2 p-3 bg-gray-50 rounded-lg border border-gray-200">
+                <p className="text-xs font-semibold text-gray-600">✓ Answered</p>
+                {anySelected ? (
+                    event.questions.map((q, qi) => {
+                        const sel = selectedByQuestion[qi] ?? [];
+                        if (sel.length === 0) return null;
+                        return (
+                            <p key={qi} className="text-xs text-gray-500 mt-1">
+                                {q.header ? `${q.header}: ` : ""}
+                                {sel.join(", ")}
+                            </p>
+                        );
+                    })
+                ) : (
+                    <p className="text-xs text-gray-500 mt-1">
+                        Proceeding with placeholders for any unknown details.
+                    </p>
+                )}
+            </div>
+        );
+    }
+
+    return (
+        <div className="flex flex-col gap-4 mt-2 p-4 bg-gray-50 rounded-lg border border-gray-200">
+            {event.questions.map((q, qi) => (
+                <div key={qi} className="flex flex-col gap-2">
+                    {q.header && (
+                        <p className="text-xs font-bold text-gray-600 uppercase tracking-wide">
+                            {q.header}
+                        </p>
+                    )}
+                    <p className="text-sm font-medium text-gray-800">{q.text}</p>
+                    {q.options && q.options.length > 0 && (
+                        <div className="flex flex-col gap-2">
+                            {q.options.map((opt) => {
+                                const isSelected = (
+                                    selectedByQuestion[qi] ?? []
+                                ).includes(opt.label);
+                                const isMulti = !!q.multiSelect;
+                                return (
+                                    <div key={opt.label} className="flex flex-col">
+                                        <button
+                                            disabled={isDisabled}
+                                            onClick={() =>
+                                                handleOptionClick(
+                                                    qi,
+                                                    opt.label,
+                                                    isMulti,
+                                                )
+                                            }
+                                            className={`relative px-3 py-2 text-sm rounded-md border transition-colors text-left ${
+                                                isSelected
+                                                    ? "bg-blue-100 border-blue-300 text-blue-900"
+                                                    : "bg-white border-gray-300 text-gray-700 hover:bg-gray-50"
+                                            } ${isDisabled ? "opacity-50 cursor-not-allowed" : ""}`}
+                                        >
+                                            <span>{opt.label}</span>
+                                            {isMulti && isSelected && (
+                                                <span className="ml-1 text-xs">
+                                                    ✓
+                                                </span>
+                                            )}
+                                        </button>
+                                        {opt.description && (
+                                            <p className="text-xs text-gray-500 mt-1 ml-1">
+                                                {opt.description}
+                                            </p>
+                                        )}
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )}
+                </div>
+            ))}
+            <div className="flex gap-2 mt-2">
+                <button
+                    disabled={isDisabled}
+                    onClick={() => submit(false)}
+                    className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                    Submit
+                </button>
+                <button
+                    disabled={isDisabled}
+                    onClick={() => submit(true)}
+                    className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                    Draft now
+                </button>
+            </div>
+            {error && (
+                <p className="text-xs text-red-600 mt-1">
+                    Couldn't submit — please try again.
+                </p>
+            )}
+        </div>
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Main component
 // ---------------------------------------------------------------------------
 
@@ -1206,6 +1478,7 @@ interface Props {
         filename: string;
         versionId: string | null;
         versionNumber: number | null;
+        editableText?: string | null;
     }) => void;
     /**
      * Fires immediately when the user clicks Accept / Reject (single card
@@ -1390,6 +1663,11 @@ export function AssistantMessage({
             if (e.type === "content" && suppressContent) {
                 return;
             }
+            // Tool-call steps are rendered by ToolActivityStream (above), not
+            // in a PreResponseWrapper here — skip them to avoid double-render.
+            if (e.type === "tool_call_start") {
+                return;
+            }
             if (e.type === "content") {
                 if (current) {
                     groups.push(current);
@@ -1525,6 +1803,24 @@ export function AssistantMessage({
             );
         }
         if (event.type === "doc_created") {
+            // While a court bundle is compiling, show the live timer/stage card
+            // instead of the one-line "creating…" row.
+            const isBundleCompiling =
+                event.isStreaming &&
+                (event.stage !== undefined ||
+                    event.filename.includes("Court_Bundle"));
+            if (isBundleCompiling) {
+                return (
+                    <BundleProgressBlock
+                        key={globalIdx}
+                        stage={event.stage}
+                        stageCurrent={event.stageCurrent}
+                        stageTotal={event.stageTotal}
+                        startedAt={event.startedAt}
+                        showConnector={showConnector}
+                    />
+                );
+            }
             return (
                 <DocCreatedBlock
                     key={globalIdx}
@@ -1574,21 +1870,78 @@ export function AssistantMessage({
                 />
             );
         }
+        if (event.type === "doc_download") {
+            const API_BASE =
+                process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:3001";
+            const isSafeHref = event.download_url.startsWith("/");
+            const href = isSafeHref ? `${API_BASE}${event.download_url}` : null;
+
+            const handleDownload = async () => {
+                if (!href) return;
+                try {
+                    const token =
+                        typeof window !== "undefined"
+                            ? localStorage.getItem("mike_auth_token")
+                            : null;
+                    const resp = await fetch(href, {
+                        headers: token ? { Authorization: `Bearer ${token}` } : {},
+                    });
+                    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                    const blob = await resp.blob();
+                    const blobUrl = URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    a.href = blobUrl;
+                    a.download = event.filename;
+                    document.body.appendChild(a);
+                    a.click();
+                    a.remove();
+                    setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+                } catch (err) {
+                    console.error("[AssistantMessage] download error:", err);
+                }
+            };
+
+            return (
+                <DocumentCard
+                    key={globalIdx}
+                    filename={event.filename}
+                    downloadUrl={event.download_url}
+                    onDownload={handleDownload}
+                />
+            );
+        }
         return null;
     };
 
     return (
         <div style={{ minHeight }}>
+            <style>{MOTION_KEYFRAMES}</style>
             <ResponseStatus status={status} />
             <div className="w-full font-inter relative mt-2">
+                {/* Tool activity stream — single owner of tool-call steps;
+                    persists after streaming as a collapsed summary */}
+                {events?.some((e) => e.type === "tool_call_start") && (
+                    <div className="mb-4">
+                        <ToolActivityStream events={events} isStreaming={isStreaming} />
+                    </div>
+                )}
                 {events && events.length > 0 ? (
                     <div className="flex flex-col gap-4">
+                        {/* Show skeleton while waiting for first content token */}
+                        {isStreaming && lastContentIdx < 0 && (
+                            <MessageSkeleton />
+                        )}
                         {groups.map((g, gIdx) => {
                             if (g.kind === "content") {
                                 const isLastContent =
                                     g.index === lastContentIdx;
                                 return (
-                                    <div key={`c-${g.index}`}>
+                                    <div
+                                        key={`c-${g.index}`}
+                                        style={{
+                                            animation: "slideInUp 180ms ease-out backwards",
+                                        }}
+                                    >
                                         <MarkdownContent
                                             text={processedTexts[g.index]}
                                             citationsList={citationsList}
@@ -1628,16 +1981,31 @@ export function AssistantMessage({
                             );
                         })}
                         {/* Clarification chips — rendered directly without
-                            PreResponseWrapper so they're always visible. */}
+                            PreResponseWrapper so they're always visible.
+                            NOTE: Structured clarifications (with request_id) are now
+                            rendered as a floating modal in ChatView, so we only render
+                            the legacy [INTAKE] path here. */}
                         {events.filter((e) => e.type === "clarification").map((e, i) => {
                             if (e.type !== "clarification") return null;
+                            // Structured clarifications (with request_id) render inline
+                            // in the thread as the Concept B card. Legacy [INTAKE]
+                            // events fall through to the quick-reply chips below.
+                            if (e.request_id) {
+                                return (
+                                    <InlineClarification
+                                        key={`clarify-${i}`}
+                                        event={e}
+                                    />
+                                );
+                            }
+                            // Legacy [INTAKE] path with chips
                             return (
                                 <div key={`clarify-${i}`} className="flex flex-col gap-3 mt-2">
                                     {e.questions.map((q, qi) => (
                                         <div key={qi}>
                                             <p className="text-sm font-medium text-gray-700 mb-1.5">{q.text}</p>
                                             <div className="flex flex-wrap gap-1.5">
-                                                {q.chips.map((chip) => (
+                                                {(q.chips ?? []).map((chip) => (
                                                     <button
                                                         key={chip}
                                                         className="px-3 py-1 text-sm rounded-full border border-gray-300 bg-white text-gray-700 hover:bg-gray-100 hover:border-gray-400 transition-colors"
@@ -1856,6 +2224,8 @@ export function AssistantMessage({
                                                           filename: e.filename,
                                                           versionId,
                                                           versionNumber,
+                                                          editableText:
+                                                              e.body ?? null,
                                                       })
                                                 : undefined
                                         }

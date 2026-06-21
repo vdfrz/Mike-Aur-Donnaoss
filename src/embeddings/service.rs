@@ -64,9 +64,9 @@ pub struct EmbeddingService {
     status: Arc<RwLock<ModelStatus>>,
     /// Live progress of any document currently being chunk+embed'd.
     /// `None` between jobs; populated for the duration of a single
-    /// `embed_passages_with_progress` call. Read by the
-    /// `/eurlex/embed-progress` endpoint to drive the per-row
-    /// progress bar in the EUR-Lex settings panel.
+    /// `embed_passages_with_progress` call. Exposed via
+    /// `embed_progress()` for a progress-polling endpoint to drive a
+    /// per-row progress bar.
     pub active_embed: Arc<RwLock<Option<EmbedProgress>>>,
 }
 
@@ -145,8 +145,8 @@ impl EmbeddingService {
         }
     }
 
-    /// Public read of the active-embed snapshot, used by the
-    /// `/eurlex/embed-progress` route.
+    /// Public read of the active-embed snapshot, for a progress-polling
+    /// endpoint.
     pub async fn embed_progress(&self) -> Option<EmbedProgress> {
         self.active_embed.read().await.clone()
     }
@@ -299,7 +299,7 @@ impl EmbeddingService {
             all_vectors.extend(batch_vectors);
             // Update the shared progress snapshot if any caller has
             // populated it — the route layer reads this via
-            // `/eurlex/embed-progress` to drive the UI bar.
+            // `embed_progress()` to drive the UI bar.
             if let Some(p) = self.active_embed.write().await.as_mut() {
                 p.current = all_vectors.len();
                 p.total = total;
@@ -360,15 +360,39 @@ impl EmbeddingService {
         source_path: &str,
         text: &str,
     ) -> Result<usize> {
-        let chunks = chunk_text(text, ChunkConfig::default());
+        // Small-to-big retrieval. Chunk into SMALL children (~150 words, no
+        // overlap) so each embedding captures a single idea → precise matching.
+        // We embed each child, but STORE a larger "parent" window (the child
+        // plus its immediate neighbours) in the text column, so the model still
+        // receives full surrounding context to answer from. The query matches a
+        // needle; the model reads the paragraph.
+        const CHILD_CHUNK_CHARS: usize = 900;
+        let cfg = ChunkConfig {
+            target_chars: CHILD_CHUNK_CHARS,
+            overlap_chars: 0,
+        };
+        let chunks = chunk_text(text, cfg);
         if chunks.is_empty() {
             return Ok(0);
         }
+        // Embedded text = the small child.
         let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
+        // Stored/served text = the parent window (prev + current + next child).
+        let parent_texts: Vec<String> = (0..chunks.len())
+            .map(|i| {
+                let lo = i.saturating_sub(1);
+                let hi = (i + 2).min(chunks.len());
+                chunks[lo..hi]
+                    .iter()
+                    .map(|c| c.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
+            })
+            .collect();
 
         // Stamp the active-embed snapshot before the long blocking
-        // embed call so the `/eurlex/embed-progress` poll has a doc
-        // id to display from the very first frame. The clearing
+        // embed call so a progress poll has a doc id to display from
+        // the very first frame. The clearing
         // happens in a guard so it runs even on error.
         *self.active_embed.write().await = Some(EmbedProgress {
             document_id: document_id.to_string(),
@@ -393,7 +417,7 @@ impl EmbeddingService {
         // them to be reachable by KNN queries.
         let partition_pid: &str = project_id.unwrap_or(GLOBAL_PARTITION);
 
-        for (chunk, vec) in chunks.iter().zip(vectors.iter()) {
+        for (idx, (chunk, vec)) in chunks.iter().zip(vectors.iter()).enumerate() {
             if vec.len() != EMBEDDING_DIM {
                 return Err(anyhow!(
                     "embedding dim mismatch: expected {EMBEDDING_DIM}, got {}",
@@ -413,7 +437,7 @@ impl EmbeddingService {
             .bind(document_id)
             .bind(source_path)
             .bind(chunk.index as i64)
-            .bind(&chunk.text)
+            .bind(&parent_texts[idx])
             .bind(page)
             .execute(&mut *tx)
             .await?;

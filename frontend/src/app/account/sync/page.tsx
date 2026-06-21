@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { listProjects } from "@/app/lib/mikeApi";
 import type { MikeProject } from "@/app/components/shared/types";
+import ReindexProgress from "@/app/components/shared/ReindexProgress";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:3001";
 
@@ -181,6 +182,9 @@ export default function SyncPage() {
 
     // Per-folder live status, keyed by folder id.
     const [statuses, setStatuses] = useState<Record<string, ScanStatusOut>>({});
+    // Epoch-ms timestamp a scan was kicked off, keyed by folder id. Drives
+    // the elapsed timer / ETA in <ReindexProgress>.
+    const [scanStart, setScanStart] = useState<Record<string, number>>({});
     const [expanded, setExpanded] = useState<string | null>(null);
     const [files, setFiles] = useState<Record<string, SyncedFile[]>>({});
 
@@ -354,6 +358,7 @@ export default function SyncPage() {
         try {
             await api(`/sync/folders/${id}/scan`, { method: "POST" });
             // Optimistic — show "running" immediately so the bar appears.
+            setScanStart((m) => ({ ...m, [id]: Date.now() }));
             setStatuses((s) => ({
                 ...s,
                 [id]: {
@@ -368,6 +373,17 @@ export default function SyncPage() {
         } catch (e) {
             console.error(`[sync] scan id=${id.slice(0, 8)} failed:`, e);
             setError(String(e));
+        }
+    };
+
+    // Re-index every configured folder at once. Skips folders already
+    // running so a double-click doesn't restart in-flight scans.
+    const handleScanAll = async () => {
+        const targets = folders.filter(
+            (f) => statuses[f.id]?.status !== "running",
+        );
+        for (const f of targets) {
+            await handleScan(f.id);
         }
     };
 
@@ -405,15 +421,34 @@ export default function SyncPage() {
     const projectName = (pid: string | null) =>
         pid ? projects.find((p) => p.id === pid)?.name ?? pid : null;
 
+    const anyRunning = Object.values(statuses).some(
+        (s) => s.status === "running",
+    );
+
     if (loading) {
         return <div className="text-sm text-gray-400">{tCommon("loading")}</div>;
     }
 
     return (
         <div className="space-y-6 max-w-4xl">
-            <div>
-                <h2 className="text-2xl font-medium font-serif mb-2">{t("title")}</h2>
-                <p className="text-sm text-gray-500 leading-relaxed">{t("subtitle")}</p>
+            <div className="flex items-start justify-between gap-4">
+                <div>
+                    <h2 className="text-2xl font-medium font-serif mb-2">{t("title")}</h2>
+                    <p className="text-sm text-gray-500 leading-relaxed">{t("subtitle")}</p>
+                </div>
+                {folders.length > 0 && (
+                    <button
+                        type="button"
+                        onClick={handleScanAll}
+                        disabled={anyRunning}
+                        className="shrink-0 inline-flex items-center gap-1.5 rounded-md border border-gray-200 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50 transition-colors"
+                    >
+                        <RefreshCw
+                            className={`h-3.5 w-3.5 ${anyRunning ? "animate-spin" : ""}`}
+                        />
+                        {anyRunning ? t("reindexingAll") : t("reindexAll")}
+                    </button>
+                )}
             </div>
 
             {error && (
@@ -539,7 +574,7 @@ export default function SyncPage() {
                                             <RefreshCw
                                                 className={`h-3.5 w-3.5 ${isRunning ? "animate-spin" : ""}`}
                                             />
-                                            {isRunning ? t("scanning") : t("scan")}
+                                            {isRunning ? t("reindexing") : t("reindex")}
                                         </button>
                                         <button
                                             type="button"
@@ -552,56 +587,23 @@ export default function SyncPage() {
                                     </div>
                                 </div>
 
-                                {status && (
-                                    <div className="mt-3 text-xs text-gray-600">
-                                        <div className="flex items-center justify-between mb-1">
-                                            <span>
-                                                {status.processed}/{status.total} ·{" "}
-                                                {t("indexed")}: {status.indexed} ·{" "}
-                                                {t("skipped")}: {status.skipped}
-                                                {status.failed > 0 && (
-                                                    <>
-                                                        {" "}· {t("failed")}: {status.failed}
-                                                    </>
-                                                )}
-                                            </span>
-                                            {status.status === "done" && (
-                                                <span className="text-green-700">
-                                                    {t("scanDone")}
-                                                </span>
-                                            )}
-                                            {status.status === "failed" && (
-                                                <span className="text-red-600">
-                                                    {t("scanFailed")}
-                                                </span>
-                                            )}
-                                        </div>
-                                        {status.total > 0 && (
-                                            <div className="h-1 bg-gray-100 rounded overflow-hidden">
-                                                <div
-                                                    className={`h-full ${status.status === "failed" ? "bg-red-500" : "bg-gray-700"} transition-all`}
-                                                    style={{
-                                                        width: `${Math.min(100, (status.processed / Math.max(1, status.total)) * 100)}%`,
-                                                    }}
-                                                />
-                                            </div>
-                                        )}
-                                        {status.current_file && (
-                                            <div className="mt-1 text-gray-400 truncate">
-                                                {t("current")}: {status.current_file}
-                                                {status.current_step && (
-                                                    <span className="ml-2 inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-600">
-                                                        {status.current_step}
-                                                    </span>
-                                                )}
-                                            </div>
-                                        )}
-                                        {status.last_error && (
-                                            <div className="mt-1 text-red-600 truncate">
-                                                {status.last_error}
-                                            </div>
-                                        )}
-                                    </div>
+                                {status && status.status !== "idle" && (
+                                    <ReindexProgress
+                                        indexed={status.indexed}
+                                        total={status.total}
+                                        status={status.status}
+                                        startedAt={scanStart[f.id] ?? null}
+                                        currentFile={status.current_file}
+                                        currentStep={status.current_step}
+                                        skipped={status.skipped}
+                                        errorText={status.last_error}
+                                        labels={{
+                                            embedded: t("embedded"),
+                                            remaining: t("remaining"),
+                                            unit: t("documentsUnit"),
+                                            failedLabel: t("scanFailed"),
+                                        }}
+                                    />
                                 )}
 
                                 <button

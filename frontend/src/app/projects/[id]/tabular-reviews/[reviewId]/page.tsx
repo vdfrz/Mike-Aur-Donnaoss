@@ -1,7 +1,7 @@
 import ClientPage from "./page-client";
 
 export const dynamic = "force-static";
-export const dynamicParams = false;
+export const dynamicParams = true;
 export function generateStaticParams() {
     return [{ id: "__ph__", reviewId: "__ph__" }];
 }
