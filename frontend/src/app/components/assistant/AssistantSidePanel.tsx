@@ -111,6 +111,8 @@ interface Props {
     }) => void;
     onWarningDismiss?: (tabId: string) => void;
     onScrollChange?: (tabId: string, scrollTop: number) => void;
+    /** Called when "Render Word" button is clicked to convert markdown to DOCX. */
+    onRenderWord?: (documentId: string) => void;
 }
 
 const API_BASE =
@@ -390,6 +392,7 @@ export function AssistantSidePanel({
     onEditError,
     onWarningDismiss,
     onScrollChange,
+    onRenderWord,
 }: Props) {
     const tA = useTranslations("Assistant");
     const panelRef = useRef<HTMLDivElement>(null);
@@ -595,6 +598,12 @@ export function AssistantSidePanel({
                                 initialScrollTop={tab.initialScrollTop ?? null}
                                 onScrollChange={(scrollTop) =>
                                     onScrollChange?.(tab.id, scrollTop)
+                                }
+                                editableText={tab.editableText ?? null}
+                                onRenderWord={
+                                    onRenderWord
+                                        ? () => onRenderWord(tab.documentId)
+                                        : undefined
                                 }
                             />
                         </div>

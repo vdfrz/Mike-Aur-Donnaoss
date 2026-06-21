@@ -126,6 +126,8 @@ export type AssistantEvent =
         version_number?: number | null;
         /** Source markdown the model used to generate the .docx; seeds the inline AI editor. */
         body?: string;
+        /** True if the document has been rendered to DOCX; false if still draft markdown. */
+        rendered?: boolean;
         isStreaming?: boolean;
         /** Court-bundle compile progress: current stage label (e.g. "Preparing Annexure P-1"). */
         stage?: string;

@@ -1,9 +1,11 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { HardDrive, Trash2, Loader2, ExternalLink, FileText, RefreshCw } from "lucide-react";
+import { HardDrive, Trash2, Loader2, ExternalLink, FileText, RefreshCw, Check, Eye, EyeOff, ShieldCheck } from "lucide-react";
+import { useTranslations } from "next-intl";
 import PoweredByIKanoon from "@/app/components/shared/PoweredByIKanoon";
 import ReindexProgress from "@/app/components/shared/ReindexProgress";
+import { getIndianKanoonConfig, putIndianKanoonConfig, type IndianKanoonConfig } from "@/app/lib/mikeApi";
 
 interface ReindexStatusOut {
     status: "idle" | "running" | "done" | "failed";
@@ -77,6 +79,9 @@ interface CachedJudgment {
 }
 
 export default function CaseSearchSettingsPage() {
+    const t = useTranslations("IndianKanoon");
+    const tCommon = useTranslations("Common");
+
     const [limit, setLimit] = useState(DEFAULT_LIMIT);
     const [docs, setDocs] = useState<CachedJudgment[]>([]);
     const [loading, setLoading] = useState(true);
@@ -88,6 +93,15 @@ export default function CaseSearchSettingsPage() {
     const [reindexStart, setReindexStart] = useState<number | null>(null);
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+    // BYOK state
+    const [ikConfig, setIkConfig] = useState<IndianKanoonConfig | null>(null);
+    const [ikLoading, setIkLoading] = useState(true);
+    const [ikSaving, setIkSaving] = useState(false);
+    const [ikSaveError, setIkSaveError] = useState<string | null>(null);
+    const [ikSaved, setIkSaved] = useState(false);
+    const [ikReveal, setIkReveal] = useState(false);
+    const ikKeyRef = useRef<HTMLInputElement>(null);
+
     // Stop polling on unmount.
     useEffect(() => {
         return () => {
@@ -98,6 +112,19 @@ export default function CaseSearchSettingsPage() {
     const totalBytes = docs.reduce((sum, d) => sum + (d.size_bytes || 0), 0);
     const count = docs.length;
 
+    async function loadIkConfig() {
+        setIkLoading(true);
+        try {
+            const config = await getIndianKanoonConfig();
+            setIkConfig(config);
+        } catch (err) {
+            console.error("Failed to load Indian Kanoon config:", err);
+            setIkConfig({ enabled: false, has_key: false });
+        } finally {
+            setIkLoading(false);
+        }
+    }
+
     useEffect(() => {
         const raw = localStorage.getItem(CACHE_LIMIT_KEY);
         if (raw) {
@@ -105,6 +132,7 @@ export default function CaseSearchSettingsPage() {
             if (!isNaN(n)) setLimit(n);
         }
         refreshDocs();
+        loadIkConfig();
     }, []);
 
     async function refreshDocs() {
@@ -217,8 +245,175 @@ export default function CaseSearchSettingsPage() {
         }
     }
 
+    async function handleIkSave() {
+        if (!ikConfig) return;
+        setIkSaving(true);
+        setIkSaveError(null);
+        try {
+            const typed = ikKeyRef.current?.value ?? "";
+            await putIndianKanoonConfig({
+                enabled: ikConfig.enabled,
+                ik_api_key: typed || undefined,
+            });
+            if (ikKeyRef.current) ikKeyRef.current.value = "";
+            setIkConfig((prev) =>
+                prev
+                    ? {
+                        ...prev,
+                        has_key: prev.has_key || !!typed,
+                    }
+                    : prev,
+            );
+            setIkSaved(true);
+            setTimeout(() => setIkSaved(false), 2000);
+        } catch (err) {
+            setIkSaveError((err as Error).message || t("byokSaveError"));
+        } finally {
+            setIkSaving(false);
+        }
+    }
+
+    async function handleIkClear() {
+        if (!ikConfig) return;
+        setIkSaving(true);
+        try {
+            await putIndianKanoonConfig({
+                enabled: ikConfig.enabled,
+                ik_api_key: "",
+            });
+            setIkConfig((prev) =>
+                prev ? { ...prev, has_key: false } : prev,
+            );
+        } catch (err) {
+            setIkSaveError((err as Error).message || t("byokSaveError"));
+        } finally {
+            setIkSaving(false);
+        }
+    }
+
     return (
         <div className="space-y-8">
+            {/* BYOK Configuration */}
+            {ikLoading ? (
+                <div className="text-sm text-gray-400">{tCommon("loading")}</div>
+            ) : ikConfig ? (
+                <section className="border border-gray-200 rounded-lg p-4 space-y-4">
+                    <div>
+                        <h3 className="text-sm font-medium text-gray-900">
+                            {t("byokTitle")}
+                        </h3>
+                        <p className="text-xs text-gray-500 mt-1">
+                            {t("byokSubtitle")}
+                        </p>
+                    </div>
+
+                    <div className="space-y-3">
+                        {/* Enable toggle */}
+                        <label className="flex items-center gap-3 cursor-pointer">
+                            <input
+                                type="checkbox"
+                                checked={ikConfig.enabled}
+                                onChange={(e) =>
+                                    setIkConfig((prev) =>
+                                        prev
+                                            ? { ...prev, enabled: e.target.checked }
+                                            : prev,
+                                    )
+                                }
+                                className="accent-gray-900 rounded"
+                            />
+                            <span className="text-sm text-gray-700">
+                                {t("byokEnabledLabel")}
+                            </span>
+                        </label>
+                        <p className="text-xs text-gray-500 ml-6">
+                            {t("byokEnabledHint")}
+                        </p>
+
+                        {/* API key field */}
+                        <div>
+                            <div className="flex items-center justify-between mb-1">
+                                <label className="text-sm text-gray-600">
+                                    {t("byokApiKeyLabel")}
+                                </label>
+                                {ikConfig.has_key && (
+                                    <div className="flex items-center gap-2 text-xs">
+                                        <span className="inline-flex items-center gap-1 rounded-full bg-green-50 text-green-700 px-2 py-0.5 border border-green-200">
+                                            <ShieldCheck className="h-3 w-3" />
+                                            {t("byokApiKeyStored")}
+                                        </span>
+                                        <button
+                                            type="button"
+                                            onClick={handleIkClear}
+                                            disabled={ikSaving}
+                                            className="text-gray-400 hover:text-red-600 transition-colors disabled:opacity-50"
+                                        >
+                                            {tCommon("delete")}
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+                            <div className="relative">
+                                <input
+                                    ref={ikKeyRef}
+                                    type={ikReveal ? "text" : "password"}
+                                    defaultValue=""
+                                    placeholder={
+                                        ikConfig.has_key
+                                            ? t("byokApiKeyKeepHint")
+                                            : t("byokApiKeyPlaceholder")
+                                    }
+                                    className="flex h-10 w-full rounded-md border border-gray-200 bg-white px-3 py-2 text-sm placeholder:text-gray-400 focus-visible:outline-none focus-visible:border-gray-400 disabled:cursor-not-allowed disabled:opacity-50 pr-10"
+                                    autoComplete="off"
+                                    spellCheck={false}
+                                    disabled={ikSaving}
+                                />
+                                <button
+                                    type="button"
+                                    onClick={() => setIkReveal((r) => !r)}
+                                    className="absolute inset-y-0 right-2 flex items-center text-gray-400 hover:text-gray-600 disabled:opacity-50"
+                                    aria-label={ikReveal ? "Hide" : "Show"}
+                                    disabled={ikSaving}
+                                >
+                                    {ikReveal ? (
+                                        <EyeOff className="h-4 w-4" />
+                                    ) : (
+                                        <Eye className="h-4 w-4" />
+                                    )}
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Save button */}
+                        <button
+                            onClick={handleIkSave}
+                            disabled={ikSaving}
+                            className="inline-flex items-center gap-1.5 rounded-md bg-black text-white px-4 py-2 text-sm font-medium hover:bg-gray-900 disabled:opacity-50 transition-colors"
+                        >
+                            {ikSaved ? (
+                                <>
+                                    <Check className="h-4 w-4" />
+                                    {tCommon("save")}
+                                </>
+                            ) : ikSaving ? (
+                                <>
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                    {t("byokSaveButton")}
+                                </>
+                            ) : (
+                                t("byokSaveButton")
+                            )}
+                        </button>
+
+                        {ikSaveError && (
+                            <p className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-md border border-red-200">
+                                {ikSaveError}
+                            </p>
+                        )}
+                    </div>
+                </section>
+            ) : null}
+
             <div>
                 <h2 className="text-lg font-medium flex items-center gap-2">
                     <HardDrive className="h-5 w-5 text-gray-500" />

@@ -1284,3 +1284,58 @@ export async function updateCorpusFile(
 export async function deleteCorpusFile(id: string): Promise<void> {
     await apiRequest(`/corpus/files/${id}`, { method: "DELETE" });
 }
+
+// ---- Statutes (Indian statute database) ----
+
+export interface StatuteAct {
+    id: number;
+    short_name: string;
+    full_title: string;
+    year: number | null;
+    status: string;
+    replaced_by: string | null;
+    category: string | null;
+    language: string | null;
+    section_count: number;
+}
+
+export async function listStatuteActs(): Promise<StatuteAct[]> {
+    return apiRequest(`/statutes/acts`);
+}
+
+/** Returns the raw streaming Response; the caller reads the SSE body. */
+export async function ingestStatute(url: string): Promise<Response> {
+    return fetch(`${API_BASE}/statutes/ingest`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...getAuthHeader() },
+        body: JSON.stringify({ url }),
+    });
+}
+
+export async function deleteStatuteAct(shortName: string): Promise<void> {
+    await apiRequest(`/statutes/acts/${encodeURIComponent(shortName)}`, {
+        method: "DELETE",
+    });
+}
+
+// ---- Indian Kanoon BYOK API ----
+
+export interface IndianKanoonConfig {
+    enabled: boolean;
+    has_key: boolean;
+}
+
+export async function getIndianKanoonConfig(): Promise<IndianKanoonConfig> {
+    return apiRequest(`/indian-kanoon/config`);
+}
+
+export async function putIndianKanoonConfig(body: {
+    enabled: boolean;
+    ik_api_key?: string | null;
+}): Promise<void> {
+    await apiRequest(`/indian-kanoon/config`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+    });
+}

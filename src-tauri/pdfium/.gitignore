@@ -1,0 +1,6 @@
+# The pdfium native library is downloaded by scripts/setup.sh|setup.ps1 at
+# build time and bundled into the app — it is a large, platform-specific
+# binary and is not committed. This folder is kept so the bundle resource
+# path ("pdfium/*") always resolves.
+*
+!.gitignore

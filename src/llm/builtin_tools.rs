@@ -6,7 +6,8 @@
 //! * `read_document` — fetch full text of a chat-attached document by `doc-N` label
 //! * `find_in_document` — case-insensitive search within a document
 //! * `read_workflow` — load the Markdown body of a saved workflow by id
-//! * `generate_docx` — produce a downloadable .docx (stub for now)
+//! * `draft_document` — persist a Markdown draft (no .docx until rendered)
+//! * `render_word` — render a Markdown draft to a downloadable .docx
 //! * `edit_document` — modify an existing .docx (stub for now)
 //!
 //! The model is expected to call these tools to ground its answers. The
@@ -21,7 +22,8 @@ use std::collections::HashMap;
 const READ_DOCUMENT: &str = "read_document";
 const FIND_IN_DOCUMENT: &str = "find_in_document";
 const READ_WORKFLOW: &str = "read_workflow";
-const GENERATE_DOCX: &str = "generate_docx";
+const DRAFT_DOCUMENT: &str = "draft_document";
+const RENDER_WORD: &str = "render_word";
 const EDIT_DOCUMENT: &str = "edit_document";
 const VANGA_SEARCH: &str = "vanga_search";
 const KANOON_SEARCH: &str = "kanoon_search";
@@ -38,7 +40,8 @@ pub fn is_builtin(name: &str) -> bool {
         READ_DOCUMENT
             | FIND_IN_DOCUMENT
             | READ_WORKFLOW
-            | GENERATE_DOCX
+            | DRAFT_DOCUMENT
+            | RENDER_WORD
             | EDIT_DOCUMENT
             | KANOON_SEARCH
             | KANOON_GET_FRAGMENT
@@ -105,15 +108,27 @@ pub fn schemas() -> Vec<ToolSchema> {
             }),
         ),
         fun(
-            GENERATE_DOCX,
-            "Produce a downloadable .docx document. Pass `title` (file label) and `body` (Markdown). Returns the new document id and filename.",
+            DRAFT_DOCUMENT,
+            "Draft a legal document as Markdown. This is the persistent working copy — it renders FORMATTED in the side panel; it does NOT produce a Word file (the user renders Word later via render_word). Pass `title` (file label) and `body` (full Markdown). To EDIT an existing draft, rewrite the FULL Markdown and pass the same `document_id` — it upserts the draft and keeps a version history. Returns the document id and filename.",
             json!({
                 "type": "object",
                 "properties": {
                     "title": { "type": "string", "description": "Document title / base filename (no extension)." },
-                    "body":  { "type": "string", "description": "Document content in Markdown. Headings (#, ##, ###), bullet lists and bold/italic are honored." }
+                    "body":  { "type": "string", "description": "Full document content in Markdown. Headings (#, ##, ###), bullet lists and bold/italic are honored." },
+                    "document_id": { "type": "string", "description": "Optional. To re-draft / edit an existing draft, pass its document_id (from a prior draft_document result) and the full rewritten Markdown." }
                 },
                 "required": ["title", "body"]
+            }),
+        ),
+        fun(
+            RENDER_WORD,
+            "Render an existing Markdown draft to a downloadable Word (.docx) file. Call this ONLY after the user confirms they want a Word file. Pass the `document_id` of a draft created by draft_document.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "document_id": { "type": "string", "description": "The document_id of the draft to render to .docx." }
+                },
+                "required": ["document_id"]
             }),
         ),
         fun(
@@ -359,14 +374,15 @@ pub async fn dispatch(
     arguments: &Value,
 ) -> String {
     // `case_id` is Some only inside a case-scoped chat. Consumed by the arms
-    // that need case context (generate_docx cross-ref resolution, corpus
+    // that need case context (draft_document cross-ref resolution, corpus
     // tools); the no-op keeps it live until every such arm is wired in.
     let _ = case_id;
     match name {
         READ_DOCUMENT => exec_read_document(state, user_id, doc_label_map, arguments).await,
         FIND_IN_DOCUMENT => exec_find_in_document(state, user_id, doc_label_map, arguments).await,
         READ_WORKFLOW => exec_read_workflow(state, user_id, arguments).await,
-        GENERATE_DOCX => exec_generate_docx(state, user_id, arguments).await,
+        DRAFT_DOCUMENT => exec_draft_document(state, user_id, doc_label_map, arguments).await,
+        RENDER_WORD => exec_render_word(state, user_id, doc_label_map, arguments).await,
         EDIT_DOCUMENT => exec_edit_document(state, user_id, doc_label_map, arguments).await,
         KANOON_SEARCH => crate::llm::kanoon_tool::exec_kanoon_search(state, user_id, arguments).await,
         KANOON_GET_FRAGMENT => {
@@ -646,9 +662,25 @@ fn validate_legal_draft(body: &str) -> Vec<String> {
     warnings
 }
 
-async fn exec_generate_docx(state: &AppState, user_id: &str, arguments: &Value) -> String {
+/// Draft-only: persist the Markdown working copy of a document. Does NOT render
+/// or store a .docx — the user renders Word later via `render_word`. On re-draft
+/// (an owned `document_id` is supplied) it upserts the same row and appends a new
+/// markdown version snapshot so prior drafts stay recoverable.
+async fn exec_draft_document(
+    state: &AppState,
+    user_id: &str,
+    doc_label_map: &HashMap<String, String>,
+    arguments: &Value,
+) -> String {
     let raw_title = arguments.get("title").and_then(|v| v.as_str()).unwrap_or("Untitled").trim().to_string();
     let raw_body = arguments.get("body").and_then(|v| v.as_str()).unwrap_or("");
+    // Resolve a chat-local label ("doc-0") back to the real UUID; a raw UUID
+    // (not in the map) passes through unchanged.
+    let existing_id = arguments
+        .get("document_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| doc_label_map.get(s).map(|u| u.as_str()).unwrap_or(s));
     if raw_body.is_empty() {
         return json!({"error": "body (Markdown) is required"}).to_string();
     }
@@ -656,58 +688,119 @@ async fn exec_generate_docx(state: &AppState, user_id: &str, arguments: &Value) 
     // Strip citation JSON that confused models sometimes embed in tool calls.
     let body = strip_citation_noise(raw_body);
     let title = clean_title(&raw_title, &body);
-
-    let draft_warnings = validate_legal_draft(&body);
-    let bytes = match crate::pdf::docx_writer::markdown_to_docx(&title, &body) {
-        Ok(b) => b,
-        Err(e) => return json!({"error": format!("docx build: {e}")}).to_string(),
-    };
     let safe_title = sanitize_filename(&title);
     let filename = format!("{safe_title}.docx");
-    let doc_id = uuid::Uuid::new_v4().to_string();
-    let storage_path = format!("documents/{user_id}/{doc_id}");
+    let draft_warnings = validate_legal_draft(&body);
 
-    let storage = match crate::storage::make_storage() {
-        Ok(s) => s,
-        Err(e) => return json!({"error": format!("storage: {e}")}).to_string(),
+    // Resolve the target row: re-draft an owned doc, else create a fresh one.
+    let doc_id = match existing_id {
+        Some(id) => {
+            let owns: Option<(String,)> = sqlx::query_as(
+                "SELECT id FROM documents WHERE id = ? AND user_id = ?",
+            )
+            .bind(id)
+            .bind(user_id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+            if owns.is_none() {
+                return json!({"error": format!("document {id} not found")}).to_string();
+            }
+            // Upsert: keep storage_path as-is (a previously-rendered .docx is now
+            // stale, but render_word re-renders from markdown_source on demand).
+            if let Err(e) = sqlx::query(
+                "UPDATE documents SET filename = ?, markdown_source = ?, status = 'draft' \
+                 WHERE id = ? AND user_id = ?",
+            )
+            .bind(&filename)
+            .bind(&body)
+            .bind(id)
+            .bind(user_id)
+            .execute(&state.db)
+            .await
+            {
+                return json!({"error": format!("db: {e}")}).to_string();
+            }
+            id.to_string()
+        }
+        None => {
+            let new_id = uuid::Uuid::new_v4().to_string();
+            if let Err(e) = sqlx::query(
+                "INSERT INTO documents (id, user_id, project_id, filename, file_type, size_bytes, storage_path, status, markdown_source) \
+                 VALUES (?, ?, NULL, ?, 'docx', 0, NULL, 'draft', ?)",
+            )
+            .bind(&new_id)
+            .bind(user_id)
+            .bind(&filename)
+            .bind(&body)
+            .execute(&state.db)
+            .await
+            {
+                return json!({"error": format!("db: {e}")}).to_string();
+            }
+            new_id
+        }
     };
-    if let Err(e) = storage
-        .put(
-            &storage_path,
-            &bytes,
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        )
-        .await
-    {
-        return json!({"error": format!("storage write: {e}")}).to_string();
-    }
 
-    let size = bytes.len() as i64;
-    if let Err(e) = sqlx::query(
-        "INSERT INTO documents (id, user_id, project_id, filename, file_type, size_bytes, storage_path, status) \
-         VALUES (?, ?, NULL, ?, 'docx', ?, ?, 'ready')",
+    // Append-only markdown snapshot (version_no = max + 1).
+    let next_version: i64 = sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(MAX(version_no), 0) + 1 FROM document_markdown_versions WHERE document_id = ?",
     )
     .bind(&doc_id)
-    .bind(user_id)
-    .bind(&filename)
-    .bind(size)
-    .bind(&storage_path)
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(1);
+    if let Err(e) = sqlx::query(
+        "INSERT INTO document_markdown_versions (id, document_id, version_no, markdown) VALUES (?, ?, ?, ?)",
+    )
+    .bind(uuid::Uuid::new_v4().to_string())
+    .bind(&doc_id)
+    .bind(next_version)
+    .bind(&body)
     .execute(&state.db)
     .await
     {
-        return json!({"error": format!("db: {e}")}).to_string();
+        return json!({"error": format!("version snapshot: {e}")}).to_string();
     }
 
     let mut result = json!({
         "doc_id": doc_id,
+        "document_id": doc_id,
         "filename": filename,
-        "size_bytes": size,
-        "note": "Document persisted as a standalone document. Call read_document with this doc_id to verify content before describing it to the user."
+        "note": "Markdown draft persisted (no Word file yet — it renders formatted in the side panel). To edit, call draft_document again with the SAME document_id and the full rewritten Markdown. To produce a Word file, call render_word with this document_id."
     });
     if !draft_warnings.is_empty() {
         result["warnings"] = json!(draft_warnings);
     }
     result.to_string()
+}
+
+/// Render an existing Markdown draft to a stored .docx via the shared core in
+/// `routes::documents`. Returns `{document_id, filename, download_url}` so
+/// chat.rs can emit a rendered `doc_created` card.
+async fn exec_render_word(
+    state: &AppState,
+    user_id: &str,
+    doc_label_map: &HashMap<String, String>,
+    arguments: &Value,
+) -> String {
+    let raw_id = arguments.get("document_id").and_then(|v| v.as_str()).unwrap_or("");
+    if raw_id.is_empty() {
+        return json!({"error": "document_id is required"}).to_string();
+    }
+    // Resolve a chat-local label ("doc-0") back to the real UUID.
+    let doc_id = doc_label_map.get(raw_id).map(|u| u.as_str()).unwrap_or(raw_id);
+    match crate::routes::documents::render_document_to_docx(state, user_id, doc_id).await {
+        Ok((filename, download_url)) => json!({
+            "document_id": doc_id,
+            "filename": filename,
+            "download_url": download_url,
+            "note": "Word document rendered and ready for download."
+        })
+        .to_string(),
+        Err(msg) => json!({"error": msg}).to_string(),
+    }
 }
 
 async fn exec_edit_document(
@@ -1012,7 +1105,8 @@ mod tests {
             "read_document",
             "find_in_document",
             "read_workflow",
-            "generate_docx",
+            "draft_document",
+            "render_word",
             "edit_document",
             "kanoon_search",
             "kanoon_get_fragment",
@@ -1034,9 +1128,10 @@ mod tests {
     #[test]
     fn schemas_have_required_fields() {
         let s = schemas();
-        // 5 doc tools + vanga_search (client) + kanoon_search + kanoon_get_fragment + kanoon_verify_case + statute_search = 10, + ask_clarifying_questions (client) = 11,
-        // + search_firm_corpus + expand_chunk = 13
-        assert_eq!(s.len(), 13);
+        // 6 doc tools (read_document, find_in_document, read_workflow, draft_document, render_word, edit_document)
+        // + vanga_search (client) + kanoon_search + kanoon_get_fragment + kanoon_verify_case + statute_search = 11,
+        // + ask_clarifying_questions (client) = 12, + search_firm_corpus + expand_chunk = 14
+        assert_eq!(s.len(), 14);
         for sch in &s {
             assert_eq!(sch.kind, "function");
             assert!(!sch.function.name.is_empty());
@@ -1047,7 +1142,8 @@ mod tests {
         assert!(names.contains(&"read_document"));
         assert!(names.contains(&"find_in_document"));
         assert!(names.contains(&"read_workflow"));
-        assert!(names.contains(&"generate_docx"));
+        assert!(names.contains(&"draft_document"));
+        assert!(names.contains(&"render_word"));
         assert!(names.contains(&"edit_document"));
         assert!(names.contains(&"vanga_search"));
         assert!(names.contains(&"kanoon_search"));

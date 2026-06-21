@@ -2,6 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslations } from "next-intl";
+import ReactMarkdown from "react-markdown";
+import remarkMath from "remark-math";
+import remarkGfm from "remark-gfm";
+import rehypeKatex from "rehype-katex";
+import "katex/dist/katex.min.css";
 import { Download, FileText, Loader2 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { applyOptimisticResolution } from "../assistant/EditCard";
@@ -82,6 +87,10 @@ interface Props {
     onWarningDismiss?: () => void;
     initialScrollTop?: number | null;
     onScrollChange?: (scrollTop: number) => void;
+    /** Markdown source for draft documents; when set, renders a formatted markdown view. */
+    editableText?: string | null;
+    /** Called when the "Render Word" button is clicked to convert markdown to DOCX. */
+    onRenderWord?: () => void;
 }
 
 /**
@@ -102,12 +111,15 @@ export function DocPanel({
     onWarningDismiss,
     initialScrollTop,
     onScrollChange,
+    editableText,
+    onRenderWord,
 }: Props) {
     // Pick the viewer from the filename only, not from mode. Switching
     // headers (citation ↔ edit ↔ document) for the same document must
     // not unmount and remount the body — otherwise the user sees a full
     // re-fetch every time they toggle. Tracked-change rendering still
     // only lives in DocxView, which is fine because edits are DOCX-only.
+    const tDV = useTranslations("DocViewer");
     const useDocxView = isDocxFilename(filename);
 
     const quotes: CitationQuote[] | undefined = useMemo(() => {
@@ -158,21 +170,67 @@ export function DocPanel({
                             </span>
                         )}
                     </div>
-                    <OpenInWordButton
-                        documentId={documentId}
-                        kbPath={kbPath}
-                    />
-                    <DownloadButton
-                        documentId={documentId}
-                        versionId={versionId}
-                        filename={filename}
-                        kbPath={kbPath ?? undefined}
-                        isReloading={isReloading}
-                    />
+                    {editableText && onRenderWord && (
+                        <button
+                            onClick={onRenderWord}
+                            disabled={isReloading}
+                            className="shrink-0 border border-border rounded-md px-3 py-2 text-sm font-medium text-foreground hover:bg-blue-50 hover:text-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
+                        >
+                            {isReloading ? (
+                                <>
+                                    <Loader2 size={13} className="animate-spin" />
+                                    {tDV("rendering")}
+                                </>
+                            ) : (
+                                <>
+                                    <FileText size={13} />
+                                    {tDV("renderWord")}
+                                </>
+                            )}
+                        </button>
+                    )}
+                    {!editableText && (
+                        <>
+                            <OpenInWordButton
+                                documentId={documentId}
+                                kbPath={kbPath}
+                            />
+                            <DownloadButton
+                                documentId={documentId}
+                                versionId={versionId}
+                                filename={filename}
+                                kbPath={kbPath ?? undefined}
+                                isReloading={isReloading}
+                            />
+                        </>
+                    )}
                 </div>
             )}
 
-            {useDocxView ? (
+            {editableText ? (
+                warning ? (
+                    <div className="flex h-full min-h-0 flex-col">
+                        <div className="flex items-start justify-between gap-2 border-b border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">
+                            <span className="min-w-0">{warning}</span>
+                            {onWarningDismiss && (
+                                <button
+                                    type="button"
+                                    onClick={onWarningDismiss}
+                                    className="shrink-0 text-red-400 hover:text-red-600"
+                                    aria-label="Dismiss"
+                                >
+                                    ✕
+                                </button>
+                            )}
+                        </div>
+                        <div className="min-h-0 flex-1 overflow-hidden">
+                            <MarkdownDocumentView markdown={editableText} />
+                        </div>
+                    </div>
+                ) : (
+                    <MarkdownDocumentView markdown={editableText} />
+                )
+            ) : useDocxView ? (
                 <DocxView
                     documentId={documentId}
                     versionId={versionId ?? undefined}
@@ -194,6 +252,143 @@ export function DocPanel({
                     quotes={quotes}
                 />
             )}
+        </div>
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Markdown document viewer
+// ---------------------------------------------------------------------------
+
+function MarkdownDocumentView({ markdown }: { markdown: string }) {
+    return (
+        <div className="flex-1 overflow-auto bg-white">
+            <div className="text-foreground mb-4 text-base prose prose-sm max-w-none font-serif px-4 py-6">
+                <ReactMarkdown
+                    remarkPlugins={[
+                        [remarkMath, { singleDollarTextMath: false }],
+                        remarkGfm,
+                    ]}
+                    rehypePlugins={[rehypeKatex]}
+                    components={{
+                        table: ({ node, ...props }) => (
+                            <div className="overflow-x-auto my-4">
+                                <table
+                                    className="min-w-full divide-y divide-gray-300 border border-gray-200 rounded-lg overflow-hidden"
+                                    {...props}
+                                />
+                            </div>
+                        ),
+                        thead: ({ node, ...props }) => (
+                            <thead className="bg-gray-50" {...props} />
+                        ),
+                        tbody: ({ node, ...props }) => (
+                            <tbody
+                                className="divide-y divide-gray-200 bg-white"
+                                {...props}
+                            />
+                        ),
+                        tr: ({ node, ...props }) => <tr {...props} />,
+                        th: ({ node, ...props }) => (
+                            <th
+                                className="px-3 py-3.5 text-left text-sm font-semibold text-gray-900"
+                                {...props}
+                            />
+                        ),
+                        td: ({ node, ...props }) => (
+                            <td
+                                className="whitespace-normal px-3 py-4 text-sm text-gray-900"
+                                {...props}
+                            />
+                        ),
+                        h1: ({ node, ...props }) => (
+                            <h1
+                                className="mt-6 mb-4 text-3xl font-serif font-semibold"
+                                {...props}
+                            />
+                        ),
+                        h2: ({ node, ...props }) => (
+                            <h2
+                                className="mt-5 mb-3 text-2xl font-serif font-semibold"
+                                {...props}
+                            />
+                        ),
+                        h3: ({ node, ...props }) => (
+                            <h3
+                                className="text-xl font-semibold mt-4 mb-2"
+                                {...props}
+                            />
+                        ),
+                        h4: ({ node, ...props }) => (
+                            <h4
+                                className="text-lg font-semibold mt-4 mb-2"
+                                {...props}
+                            />
+                        ),
+                        p: ({ node, ...props }) => {
+                            const parent = (node as any)?.parent;
+                            if (parent?.type === "listItem") {
+                                return (
+                                    <p
+                                        className="inline leading-7 m-0"
+                                        {...props}
+                                    />
+                                );
+                            }
+                            return <p className="mb-4 leading-7" {...props} />;
+                        },
+                        ul: ({ node, ...props }) => (
+                            <ul
+                                className="list-disc list-outside mb-4 pl-6"
+                                {...props}
+                            />
+                        ),
+                        ol: ({ node, ...props }) => (
+                            <ol
+                                className="list-decimal list-outside mb-4 pl-6"
+                                {...props}
+                            />
+                        ),
+                        li: ({ node, ...props }) => (
+                            <li className="mb-2 leading-7" {...props} />
+                        ),
+                        strong: ({ node, ...props }) => (
+                            <strong className="font-semibold" {...props} />
+                        ),
+                        em: ({ node, ...props }) => (
+                            <em className="italic" {...props} />
+                        ),
+                        code: ({ node, children, ...props }) => (
+                            <code
+                                className="bg-gray-100 px-1.5 py-0.5 rounded text-sm font-serif"
+                                {...props}
+                            >
+                                {children}
+                            </code>
+                        ),
+                        blockquote: ({ node, ...props }) => (
+                            <blockquote
+                                className="border-l-4 border-gray-300 pl-4 italic my-4"
+                                {...props}
+                            />
+                        ),
+                        a: ({ node, href, children, ...props }) => (
+                            <a
+                                href={href}
+                                className="text-blue-600 hover:text-blue-700 underline cursor-pointer"
+                                {...props}
+                            >
+                                {children}
+                            </a>
+                        ),
+                        hr: ({ node, ...props }) => (
+                            <hr className="my-6 border-gray-200" {...props} />
+                        ),
+                    }}
+                >
+                    {markdown}
+                </ReactMarkdown>
+            </div>
         </div>
     );
 }

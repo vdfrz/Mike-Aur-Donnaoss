@@ -195,22 +195,10 @@ pub fn parse_year(date_str: &str) -> Option<i32> {
 /// Where downloaded parquet files live on disk. Same root as the
 /// existing storage layer; adds an `aws-cache/metadata/` sub-tree.
 fn cache_root() -> PathBuf {
-    let base = std::env::var("STORAGE_PATH").unwrap_or_else(|_| {
-        if let Some(home) = dirs_home() {
-            home.join("mikerust-data").to_string_lossy().into_owned()
-        } else {
-            "./data/storage".to_string()
-        }
-    });
-    PathBuf::from(base).join("aws-cache").join("metadata")
-}
-
-fn dirs_home() -> Option<PathBuf> {
-    // We don't depend on the `dirs` crate; the existing code uses
-    // std::env::var for HOME with sensible fallbacks.
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
+    let base = std::env::var("STORAGE_PATH")
         .map(PathBuf::from)
+        .unwrap_or_else(|_| crate::storage::default_storage_root());
+    base.join("aws-cache").join("metadata")
 }
 
 // ---------------------------------------------------------------------------

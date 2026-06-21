@@ -819,41 +819,56 @@ export function useAssistantChat({
                         }
 
                         if (data.type === "doc_created") {
-                            updateMatchingEvent(
-                                (e) =>
-                                    e.type === "doc_created" &&
-                                    !!e.isStreaming,
-                                (e) => {
-                                    const next: Extract<
-                                        AssistantEvent,
-                                        { type: "doc_created" }
-                                    > = {
-                                        type: "doc_created",
-                                        filename: data.filename as string,
-                                        download_url:
-                                            data.download_url as string,
-                                        isStreaming: false,
-                                    };
-                                    if (typeof data.document_id === "string") {
-                                        next.document_id =
-                                            data.document_id as string;
-                                    }
-                                    if (typeof data.version_id === "string") {
-                                        next.version_id =
-                                            data.version_id as string;
-                                    }
-                                    if (
-                                        typeof data.version_number === "number"
-                                    ) {
-                                        next.version_number =
-                                            data.version_number as number;
-                                    }
-                                    if (typeof data.body === "string") {
-                                        next.body = data.body as string;
-                                    }
-                                    return next;
-                                },
-                            );
+                            const docId =
+                                typeof data.document_id === "string"
+                                    ? (data.document_id as string)
+                                    : undefined;
+                            const buildDoc = (): Extract<
+                                AssistantEvent,
+                                { type: "doc_created" }
+                            > => {
+                                const next: Extract<
+                                    AssistantEvent,
+                                    { type: "doc_created" }
+                                > = {
+                                    type: "doc_created",
+                                    filename: data.filename as string,
+                                    download_url:
+                                        typeof data.download_url === "string"
+                                            ? (data.download_url as string)
+                                            : "",
+                                    isStreaming: false,
+                                };
+                                if (docId) next.document_id = docId;
+                                if (typeof data.version_id === "string") {
+                                    next.version_id = data.version_id as string;
+                                }
+                                if (typeof data.version_number === "number") {
+                                    next.version_number =
+                                        data.version_number as number;
+                                }
+                                if (typeof data.body === "string") {
+                                    next.body = data.body as string;
+                                }
+                                if (typeof data.rendered === "boolean") {
+                                    next.rendered = data.rendered as boolean;
+                                }
+                                return next;
+                            };
+                            // Update the streaming placeholder OR an existing
+                            // card for the same document, so a later-turn
+                            // render_word emit flips the original draft card to
+                            // "rendered" instead of being dropped.
+                            const matchDoc = (e: AssistantEvent) =>
+                                e.type === "doc_created" &&
+                                (!!e.isStreaming ||
+                                    (docId !== undefined &&
+                                        e.document_id === docId));
+                            if (eventsRef.current.some(matchDoc)) {
+                                updateMatchingEvent(matchDoc, buildDoc);
+                            } else {
+                                pushEvent(buildDoc());
+                            }
                             pushThinkingPlaceholder();
                             continue;
                         }

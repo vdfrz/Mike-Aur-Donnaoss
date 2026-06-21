@@ -36,6 +36,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/{id}/text", get(display_document))
         .route("/{id}/url", get(get_document_url))
         .route("/{id}/tracked-change-ids", get(tracked_change_ids))
+        .route("/{id}/render-word", post(render_word))
         .route("/{id}/edits/{edit_id}/accept", post(resolve_edit_accept))
         .route("/{id}/edits/{edit_id}/reject", post(resolve_edit_reject))
         .layer(DefaultBodyLimit::max(50_usize * 1024 * 1024 * 1024))
@@ -431,6 +432,91 @@ async fn delete_document(
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
     Ok(Json(json!({ "ok": true })))
+}
+
+// ---------------------------------------------------------------------------
+// Render a Markdown draft to a stored .docx.
+//
+// Shared by the `render_word` chat tool and the `POST /document/:id/render-word`
+// route below. Reads `markdown_source` (the persistent working copy), renders it
+// via the existing `markdown_to_docx`, stores the bytes, and flips the row to a
+// ready, downloadable document. The Err string is a readable message the caller
+// surfaces (409 when there is no markdown to render — e.g. an uploaded file).
+// Returns `(filename, download_url)`.
+// ---------------------------------------------------------------------------
+pub async fn render_document_to_docx(
+    state: &AppState,
+    user_id: &str,
+    id: &str,
+) -> Result<(String, String), String> {
+    let row: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT filename, markdown_source, storage_path FROM documents WHERE id = ? AND user_id = ?",
+    )
+    .bind(id)
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let (filename, markdown_source, storage_path) =
+        row.ok_or_else(|| "document not found".to_string())?;
+
+    // 409 case: nothing to render (uploaded file / legacy doc with no markdown).
+    let markdown = markdown_source.filter(|m| !m.trim().is_empty()).ok_or_else(|| {
+        "no markdown source to render — this document has no editable draft (it is likely an uploaded file)".to_string()
+    })?;
+
+    // Title = filename without the .docx extension (matches how drafts are named).
+    let title = filename.strip_suffix(".docx").unwrap_or(&filename).to_string();
+
+    let bytes = crate::pdf::docx_writer::markdown_to_docx(&title, &markdown)
+        .map_err(|e| format!("docx build: {e}"))?;
+
+    let key = storage_path.unwrap_or_else(|| format!("documents/{user_id}/{id}"));
+    let storage = make_storage().map_err(|e| e.to_string())?;
+    storage
+        .put(
+            &key,
+            &bytes,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+        .await
+        .map_err(|e| format!("storage write: {e}"))?;
+
+    let size = bytes.len() as i64;
+    sqlx::query(
+        "UPDATE documents SET storage_path = ?, size_bytes = ?, status = 'ready' \
+         WHERE id = ? AND user_id = ?",
+    )
+    .bind(&key)
+    .bind(size)
+    .bind(id)
+    .bind(user_id)
+    .execute(&state.db)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok((filename, format!("/document/{id}/docx")))
+}
+
+// ---------------------------------------------------------------------------
+// POST /document/:id/render-word  — render a Markdown draft to a .docx
+// ---------------------------------------------------------------------------
+async fn render_word(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+) -> ApiResult {
+    match render_document_to_docx(&state, &auth.user_id, &id).await {
+        Ok((_filename, download_url)) => {
+            Ok(Json(json!({ "document_id": id, "download_url": download_url })))
+        }
+        Err(msg) if msg == "document not found" => Err(err(StatusCode::NOT_FOUND, &msg)),
+        Err(msg) if msg.starts_with("no markdown source") => {
+            Err(err(StatusCode::CONFLICT, &msg))
+        }
+        Err(msg) => Err(err(StatusCode::INTERNAL_SERVER_ERROR, &msg)),
+    }
 }
 
 // ---------------------------------------------------------------------------

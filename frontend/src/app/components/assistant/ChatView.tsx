@@ -54,6 +54,11 @@ export function ChatView({
     const [reloadingDocIds, setReloadingDocIds] = useState<Set<string>>(
         () => new Set(),
     );
+    // documentId -> rendered download_url, so a button-triggered render
+    // flips the in-thread doc card from "Render Word" to "Download".
+    const [docRenderedOverrides, setDocRenderedOverrides] = useState<
+        Record<string, string>
+    >({});
     // Per-edit in-flight set — disables Accept/Reject on only the one
     // edit currently being resolved, so sibling edits in the same message
     // (and their twins in DocPanel) stay clickable.
@@ -418,6 +423,77 @@ export function ChatView({
         [patchTab],
     );
 
+    const handleRenderWord = useCallback(
+        async (documentId: string) => {
+            // Mark this document as reloading so the Render Word button shows spinner
+            setReloadingDocIds((prev) => new Set(prev).add(documentId));
+
+            const token =
+                typeof window !== "undefined"
+                    ? localStorage.getItem("mike_auth_token")
+                    : null;
+            const apiBase =
+                process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:3001";
+
+            try {
+                const response = await fetch(
+                    `${apiBase}/document/${documentId}/render-word`,
+                    {
+                        method: "POST",
+                        headers: token
+                            ? { Authorization: `Bearer ${token}` }
+                            : {},
+                    },
+                );
+
+                if (!response.ok) {
+                    const message = await response.text();
+                    throw new Error(
+                        message || `HTTP ${response.status}`,
+                    );
+                }
+
+                const data = (await response.json()) as {
+                    document_id: string;
+                    download_url: string;
+                };
+
+                // Invalidate docx cache and update the tab to clear editableText
+                invalidateDocxBytes(data.document_id);
+
+                // Clear editableText and mark as rendered in the tab
+                setTabs((prev) =>
+                    prev.map((t) =>
+                        t.documentId === data.document_id
+                            ? { ...t, editableText: null }
+                            : t,
+                    ),
+                );
+
+                setDocRenderedOverrides((prev) => ({
+                    ...prev,
+                    [data.document_id]: data.download_url,
+                }));
+            } catch (error) {
+                const message =
+                    error instanceof Error
+                        ? error.message
+                        : "Failed to render document";
+                handleEditError({
+                    documentId,
+                    message,
+                });
+            } finally {
+                setReloadingDocIds((prev) => {
+                    const next = new Set(prev);
+                    next.delete(documentId);
+                    return next;
+                });
+            }
+        },
+        [handleEditError],
+    );
+
     const handleScrollChange = useCallback(
         (tabId: string, scrollTop: number) => {
             patchTab(tabId, { initialScrollTop: scrollTop });
@@ -665,6 +741,8 @@ export function ChatView({
                                                 }}
                                                 onEditViewClick={openEditor}
                                                 onOpenDocument={openDocument}
+                                                onRenderWord={handleRenderWord}
+                                                docRenderedOverrides={docRenderedOverrides}
                                                 onEditResolveStart={
                                                     handleEditResolveStart
                                                 }
@@ -768,6 +846,7 @@ export function ChatView({
                         onEditError={handleEditError}
                         onWarningDismiss={handleWarningDismiss}
                         onScrollChange={handleScrollChange}
+                        onRenderWord={handleRenderWord}
                     />
                 </div>
             )}

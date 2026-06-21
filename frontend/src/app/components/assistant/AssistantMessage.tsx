@@ -7,7 +7,7 @@ import remarkMath from "remark-math";
 import remarkGfm from "remark-gfm";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
-import { Copy, Check, ChevronDown, Download, Loader2 } from "lucide-react";
+import { Copy, Check, ChevronDown, Download, Loader2, FileText } from "lucide-react";
 import { MikeIcon } from "@/components/chat/mike-icon";
 import { displayCitationQuote, formatCitationPage } from "../shared/types";
 import type {
@@ -723,13 +723,18 @@ function DocDownloadBlock({
     onOpen,
     isReloading = false,
     versionNumber,
+    isRendered = true,
+    onRenderWord,
 }: {
     filename: string;
     download_url: string;
     onOpen?: () => void;
     isReloading?: boolean;
     versionNumber?: number | null;
+    isRendered?: boolean;
+    onRenderWord?: () => void;
 }) {
+    const tA = useTranslations("Assistant");
     const hasVersion =
         typeof versionNumber === "number" &&
         Number.isFinite(versionNumber) &&
@@ -800,20 +805,30 @@ function DocDownloadBlock({
         </div>
     );
 
-    const downloadIcon = spinning ? (
+    const actionIcon = spinning ? (
         <div
             aria-disabled
             className="shrink-0 flex items-center border-l border-gray-200 px-6 bg-white text-gray-400 cursor-not-allowed"
         >
             <Loader2 size={13} className="animate-spin" />
         </div>
-    ) : (
+    ) : isRendered ? (
         <button
             type="button"
             onClick={handleDownload}
             className="shrink-0 flex items-center border-l border-gray-200 px-6 bg-white text-gray-400 hover:bg-gray-100 hover:text-gray-600 transition-colors cursor-pointer"
         >
             <Download size={13} />
+        </button>
+    ) : (
+        <button
+            type="button"
+            onClick={onRenderWord}
+            disabled={!onRenderWord}
+            className="shrink-0 flex items-center border-l border-gray-200 px-4 bg-white text-gray-700 hover:bg-blue-50 hover:text-blue-700 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed font-medium text-xs"
+        >
+            <FileText size={13} className="mr-1.5" />
+            {tA("render")}
         </button>
     );
 
@@ -827,16 +842,16 @@ function DocDownloadBlock({
                 >
                     {body}
                 </button>
-                {downloadIcon}
+                {actionIcon}
             </div>
         );
     }
 
-    if (spinning) {
+    if (spinning || !isRendered) {
         return (
             <div className="flex items-stretch border border-gray-200 rounded-lg overflow-hidden w-full font-sans bg-gray-50">
                 {body}
-                {downloadIcon}
+                {actionIcon}
             </div>
         );
     }
@@ -850,7 +865,7 @@ function DocDownloadBlock({
             >
                 {body}
             </button>
-            {downloadIcon}
+            {actionIcon}
         </div>
     );
 }
@@ -1519,6 +1534,8 @@ interface Props {
      */
     resolvedEditStatuses?: Record<string, "accepted" | "rejected">;
     onIKLinkClick?: (url: string, title: string, context: string) => void;
+    onRenderWord?: (documentId: string) => void;
+    docRenderedOverrides?: Record<string, string>;
     onSendMessage?: (text: string) => void;
 }
 
@@ -1541,6 +1558,8 @@ export function AssistantMessage({
     isEditReloading,
     resolvedEditStatuses,
     onIKLinkClick,
+    onRenderWord,
+    docRenderedOverrides,
     onSendMessage,
 }: Props) {
     const messageKey = useId();
@@ -1927,8 +1946,12 @@ export function AssistantMessage({
                 )}
                 {events && events.length > 0 ? (
                     <div className="flex flex-col gap-4">
-                        {/* Show skeleton while waiting for first content token */}
-                        {isStreaming && lastContentIdx < 0 && (
+                        {/* Cold-state placeholder only: show the skeleton while
+                            waiting for the first content token, but suppress it
+                            once any reasoning/tool group ("Working…") is already
+                            on screen — otherwise it's a redundant grey bar above
+                            the indicator that already owns the waiting state. */}
+                        {isStreaming && lastContentIdx < 0 && groups.length === 0 && (
                             <MessageSkeleton />
                         )}
                         {groups.map((g, gIdx) => {
@@ -2185,20 +2208,19 @@ export function AssistantMessage({
                         ));
                     })()}
 
-                {/* Download cards for created docs — generated docs now
-                    persist as first-class documents, so clicking opens
-                    them in the DocPanel (like edited docs). */}
+                {/* Doc cards for created docs — show both rendered (download_url)
+                    and draft (body) markdown. */}
                 {events &&
                     !isStreaming &&
                     events.some(
-                        (e) => e.type === "doc_created" && e.download_url,
+                        (e) => e.type === "doc_created" && (e.download_url || e.body),
                     ) && (
                         <div className="flex flex-col gap-2 mt-2 mb-3">
                             {(
                                 events.filter(
                                     (e) =>
                                         e.type === "doc_created" &&
-                                        e.download_url,
+                                        (e.download_url || e.body),
                                 ) as Extract<
                                     AssistantEvent,
                                     { type: "doc_created" }
@@ -2209,12 +2231,19 @@ export function AssistantMessage({
                                 const versionNumber = e.version_number ?? null;
                                 const canOpen =
                                     !!onOpenDocument && !!documentId;
+                                const overrideUrl = documentId
+                                    ? docRenderedOverrides?.[documentId]
+                                    : undefined;
+                                const effectiveUrl =
+                                    overrideUrl ?? e.download_url;
+                                const isRendered = !!effectiveUrl;
                                 return (
                                     <DocDownloadBlock
                                         key={i}
                                         filename={e.filename}
-                                        download_url={e.download_url}
+                                        download_url={effectiveUrl}
                                         versionNumber={versionNumber}
+                                        isRendered={isRendered}
                                         onOpen={
                                             canOpen
                                                 ? () =>
@@ -2227,6 +2256,14 @@ export function AssistantMessage({
                                                           editableText:
                                                               e.body ?? null,
                                                       })
+                                                : undefined
+                                        }
+                                        onRenderWord={
+                                            canOpen &&
+                                            !isRendered &&
+                                            documentId &&
+                                            onRenderWord
+                                                ? () => onRenderWord(documentId)
                                                 : undefined
                                         }
                                     />

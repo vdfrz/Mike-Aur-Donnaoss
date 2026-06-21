@@ -13,6 +13,18 @@ pub trait Storage: Send + Sync {
     async fn public_url(&self, key: &str) -> Result<String>;
 }
 
+/// Default storage root *outside* the project tree, mirroring how
+/// `db::default_db_url()` resolves the SQLite path. When the app runs as an
+/// installed desktop bundle the CWD is `/` (read-only), so a relative
+/// `./data/storage` fails — resolve to `<user-home>/mikerust-data/storage`
+/// instead. Overridable via `STORAGE_PATH`.
+pub fn default_storage_root() -> PathBuf {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join("mikerust-data").join("storage")
+}
+
 // ---------------------------------------------------------------------------
 // Local filesystem implementation
 // ---------------------------------------------------------------------------
@@ -23,9 +35,9 @@ pub struct LocalStorage {
 
 impl LocalStorage {
     pub fn new() -> Result<Self> {
-        let base = PathBuf::from(
-            std::env::var("STORAGE_PATH").unwrap_or_else(|_| "./data/storage".to_string()),
-        );
+        let base = std::env::var("STORAGE_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| default_storage_root());
         std::fs::create_dir_all(&base)?;
         Ok(Self { base })
     }

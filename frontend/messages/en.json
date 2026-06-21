@@ -1,4 +1,12 @@
 {
+  "Network": {
+    "offlineTitle": "You're offline now",
+    "offlineWithLocal": "Cloud models can't be reached — switched you to your local model. You can keep working offline.",
+    "offlineNoLocal": "Cloud models can't be reached. Set up a local model to keep working offline.",
+    "backOnline": "Back online — cloud models are available again.",
+    "setupLocal": "Set up a local model",
+    "dismiss": "Dismiss"
+  },
   "Common": {
     "offlineBlocked": "Go online to use this",
     "offlineFeatureTitle": "Unavailable offline",
@@ -131,7 +139,8 @@
     "indianKanoonLink": "Indian Kanoon",
     "caseSearchLink": "Case Search",
     "personalizationLink": "How Mike works",
-    "knowledgeLink": "Firm Knowledge"
+    "knowledgeLink": "Firm Knowledge",
+    "statutesLink": "Statutes"
   },
   "Personalization": {
     "heading": "How you want Mike to work",
@@ -146,6 +155,27 @@
     "no": "Cancel",
     "cleared": "Preferences cleared",
     "lastUpdated": "Last updated"
+  },
+  "Statutes": {
+    "heading": "Statutes",
+    "description": "The Acts and statutes Mike can cite while drafting. Add a link to any statute and Mike pulls it in and indexes every section so it shows up in search and in your drafts.",
+    "addButton": "Add statute",
+    "dialogTitle": "Add a statute",
+    "dialogHelp": "Paste any link to a statute or Act and Mike will pull it in and index it. If you can, please paste an India Code link (indiacode.nic.in) for the cleanest result.",
+    "urlPlaceholder": "https://www.indiacode.nic.in/...",
+    "indexButton": "Index it",
+    "cancel": "Cancel",
+    "act": "Act",
+    "year": "Year",
+    "category": "Category",
+    "sections": "Sections",
+    "emptyState": "No statutes indexed yet. Add your first one above.",
+    "deleteConfirm": "Remove this statute from the index?",
+    "truncatedNote": "This statute was long, so only the first part was indexed.",
+    "genericError": "Something went wrong while indexing.",
+    "stageFetching": "Fetching the page",
+    "stageReading": "Reading the text",
+    "stageParsing": "Reading the statute"
   },
   "Knowledge": {
     "heading": "Firm Knowledge",
@@ -378,7 +408,8 @@
     "submit": "Send answers",
     "draftNow": "Skip — draft now",
     "proceedingWithPlaceholders": "Proceeding with placeholders for anything unanswered.",
-    "couldntSubmit": "Couldn't submit — please try again."
+    "couldntSubmit": "Couldn't submit — please try again.",
+    "render": "Render"
   },
   "People": {
     "addByEmail": "Add by email…",
@@ -441,7 +472,9 @@
     "citation": "Citation",
     "trackedChange": "Tracked Change",
     "page": "Page",
-    "version": "Version"
+    "version": "Version",
+    "renderWord": "Render Word",
+    "rendering": "Rendering…"
   },
   "DocumentSupport": {
     "noticeTitle": "What gets indexed",
@@ -841,6 +874,16 @@
     "cachedTitle": "Locally cached cases",
     "cachedEmpty": "No cases cached yet. Search and save cases to build your local library.",
     "deleteConfirm": "Remove this case from your local index?",
-    "keyMissing": "Add your Indian Kanoon API key above to start searching."
+    "keyMissing": "Add your Indian Kanoon API key above to start searching.",
+    "byokTitle": "Configure your API key",
+    "byokSubtitle": "Bring your own Indian Kanoon API key to enable searches.",
+    "byokApiKeyLabel": "Your API key",
+    "byokApiKeyPlaceholder": "ikapi_…",
+    "byokApiKeyKeepHint": "Leave empty to keep the saved key",
+    "byokApiKeyStored": "Key saved",
+    "byokEnabledLabel": "Enable Indian Kanoon",
+    "byokEnabledHint": "When enabled, the integration is active for case search.",
+    "byokSaveButton": "Save",
+    "byokSaveError": "Failed to save configuration"
   }
 }

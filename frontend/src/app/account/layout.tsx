@@ -52,6 +52,7 @@ export default function AccountLayout({
             heading: tAccount("groupSources"),
             tabs: [
                 { id: "knowledge", label: tAccount("knowledgeLink"), href: "/account/knowledge" },
+                { id: "statutes", label: tAccount("statutesLink"), href: "/account/statutes" },
                 { id: "local-docs", label: tAccount("localDocsLink"), href: "/account/sync" },
                 { id: "case-search", label: tAccount("caseSearchLink"), href: "/account/case-search" },
             ],

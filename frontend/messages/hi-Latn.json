@@ -1,4 +1,12 @@
 {
+  "Network": {
+    "offlineTitle": "Ab aap offline hain",
+    "offlineWithLocal": "Cloud models tak nahi pahuncha ja saka — aapko aapke local model par le jaaya gaya hai. Aap offline kaam jaari rakh sakte hain.",
+    "offlineNoLocal": "Cloud models tak nahi pahuncha ja saka. Offline kaam jaari rakhne ke liye ek local model set karein.",
+    "backOnline": "Wapas online — cloud models phir se uplabdh hain.",
+    "setupLocal": "Local model set karein",
+    "dismiss": "Band karein"
+  },
   "Common": {
     "offlineBlocked": "Ise use karne ke liye online jayein",
     "offlineFeatureTitle": "Offline mein available nahi",
@@ -131,7 +139,8 @@
     "indianKanoonLink": "Indian Kanoon",
     "caseSearchLink": "Case Search",
     "personalizationLink": "Mike kaise kaam kare",
-    "knowledgeLink": "Firm Knowledge"
+    "knowledgeLink": "Firm Knowledge",
+    "statutesLink": "Statutes"
   },
   "Personalization": {
     "heading": "Mike kaise kaam kare — aap batao",
@@ -146,6 +155,27 @@
     "no": "Cancel",
     "cleared": "Preferences clear ho gayi",
     "lastUpdated": "Last updated"
+  },
+  "Statutes": {
+    "heading": "Statutes",
+    "description": "Wo Acts aur statutes jinhe Mike drafting ke time cite kar sakta hai. Kisi bhi statute ka link add karein aur Mike use laa kar har section index kar dega taaki wo search aur aapke drafts mein dikhe.",
+    "addButton": "Statute add karein",
+    "dialogTitle": "Statute add karein",
+    "dialogHelp": "Kisi bhi statute ya Act ka link paste karein aur Mike use laa kar index kar dega. Agar ho sake to please India Code (indiacode.nic.in) ka link paste karein, sabse saaf result ke liye.",
+    "urlPlaceholder": "https://www.indiacode.nic.in/...",
+    "indexButton": "Index karein",
+    "cancel": "Cancel",
+    "act": "Act",
+    "year": "Year",
+    "category": "Category",
+    "sections": "Sections",
+    "emptyState": "Abhi tak koi statute index nahi hua. Upar se apna pehla add karein.",
+    "deleteConfirm": "Is statute ko index se hata dein?",
+    "truncatedNote": "Ye statute lamba tha, isliye sirf pehla hissa index hua.",
+    "genericError": "Index karte waqt kuch galat ho gaya.",
+    "stageFetching": "Page laaya ja raha hai",
+    "stageReading": "Text padha ja raha hai",
+    "stageParsing": "Statute padha ja raha hai"
   },
   "Knowledge": {
     "heading": "Firm Knowledge",
@@ -378,7 +408,8 @@
     "submit": "Jawab bhejo",
     "draftNow": "Skip — abhi draft karo",
     "proceedingWithPlaceholders": "Bina jawab waale points ke liye placeholders ke saath aage badh rahe hain.",
-    "couldntSubmit": "Bhej nahi paaye — dobara try karo."
+    "couldntSubmit": "Bhej nahi paaye — dobara try karo.",
+    "render": "Word banayein"
   },
   "People": {
     "addByEmail": "Email se add karo…",
@@ -441,7 +472,9 @@
     "citation": "Citation",
     "trackedChange": "Tracked Change",
     "page": "Page",
-    "version": "Version"
+    "version": "Version",
+    "renderWord": "Word banayein",
+    "rendering": "Bana raha hai…"
   },
   "DocumentSupport": {
     "noticeTitle": "Kya index hota hai",
@@ -840,6 +873,16 @@
     "cachedTitle": "Locally cached cases",
     "cachedEmpty": "Abhi tak koi case cache nahi hua. Apni local library banane ke liye cases search aur save karo.",
     "deleteConfirm": "Is case ko local index se hatana hai?",
-    "keyMissing": "Search shuru karne ke liye upar apni Indian Kanoon API key daalo."
+    "keyMissing": "Search shuru karne ke liye upar apni Indian Kanoon API key daalo.",
+    "byokTitle": "Apni API key configure karo",
+    "byokSubtitle": "Search chalu karne ke liye apni Indian Kanoon API key lao.",
+    "byokApiKeyLabel": "Aapki API key",
+    "byokApiKeyPlaceholder": "ikapi_…",
+    "byokApiKeyKeepHint": "Save ki gayi key rakhne ke liye khaali chodo",
+    "byokApiKeyStored": "Key save ho gaya",
+    "byokEnabledLabel": "Indian Kanoon chalu karo",
+    "byokEnabledHint": "Chalu hone pe integration case search ke liye active hota hai.",
+    "byokSaveButton": "Save karo",
+    "byokSaveError": "Configuration save karne mein fail"
   }
 }

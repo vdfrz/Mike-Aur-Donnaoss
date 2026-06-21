@@ -114,19 +114,6 @@ docs/mike-upstream/
 # Training data (JSONL files with extracted legal texts)
 training/*.jsonl
 
-# LoRA fine-tune: track pipeline scripts + Modelfile + README; ignore heavy artifacts.
-/finetune/.venv/
-/finetune/data/
-/finetune/outputs/
-/finetune/lora_adapters*/
-/finetune/mike-legal-merged-16bit/
-/finetune/llama.cpp/
-/finetune/*.gguf
-/finetune/*.log
-/finetune/*.ps1
-# Unsloth drops a compiled cache in the cwd at train/merge time.
-unsloth_compiled_cache/
-
 # Roadmap docs (internal planning)
 Mike_aur_Donna_Roadmap_v2.docx
 ROADMAP.md
@@ -156,8 +143,8 @@ mike.db.empty-backup
 # macOS
 .DS_Store
 
-# Sensitive client case files — keep local only, never commit
+# ─── Legal training data & DB backups — NEVER push (sensitive client material) ───
 training documents/
-# Local database backups
-src-tauri/mike.db.bak*
-src-tauri/mike.db.backup*
+*.db.bak-*
+*.db.backup-*
+src-tauri/data/storage/

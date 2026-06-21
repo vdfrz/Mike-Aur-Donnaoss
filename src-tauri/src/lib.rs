@@ -40,6 +40,25 @@ pub fn run() {
             open_ecourts_verify_window
         ])
         .setup(move |app| {
+            // When running as an installed bundle there is no libs/pdfium next
+            // to the executable, so point pdfium at the copy bundled under the
+            // app's resource dir. Harmless in dev: if the dir is absent the
+            // loader (src/pdf/mod.rs) falls back to its other search paths.
+            if std::env::var_os("PDFIUM_DYNAMIC_LIB_PATH").is_none() {
+                if let Ok(res_dir) = app.path().resource_dir() {
+                    let pdfium_dir = res_dir.join("pdfium");
+                    if pdfium_dir.is_dir() {
+                        // SAFETY: set once during setup. pdfium is loaded lazily
+                        // (only when a PDF is processed, long after startup), so
+                        // no other thread reads this var concurrently here.
+                        unsafe {
+                            std::env::set_var("PDFIUM_DYNAMIC_LIB_PATH", &pdfium_dir);
+                        }
+                        tracing::info!("[pdf] using bundled pdfium at {}", pdfium_dir.display());
+                    }
+                }
+            }
+
             #[cfg(debug_assertions)]
             app.get_webview_window("main")
                 .expect("main window")

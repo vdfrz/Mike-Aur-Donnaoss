@@ -36,9 +36,9 @@ fn err(status: StatusCode, msg: &str) -> (StatusCode, Json<Value>) {
 }
 
 fn storage_root() -> PathBuf {
-    PathBuf::from(
-        std::env::var("STORAGE_PATH").unwrap_or_else(|_| "./data/storage".to_string()),
-    )
+    std::env::var("STORAGE_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| crate::storage::default_storage_root())
 }
 
 const CORPUS_ID: &str = "indian-kanoon";

@@ -1,4 +1,12 @@
 {
+  "Network": {
+    "offlineTitle": "अब आप ऑफ़लाइन हैं",
+    "offlineWithLocal": "क्लाउड मॉडल तक नहीं पहुँचा जा सका — आपको आपके लोकल मॉडल पर ले जाया गया है। आप ऑफ़लाइन काम करना जारी रख सकते हैं।",
+    "offlineNoLocal": "क्लाउड मॉडल तक नहीं पहुँचा जा सका। ऑफ़लाइन काम जारी रखने के लिए एक लोकल मॉडल सेट करें।",
+    "backOnline": "फिर से ऑनलाइन — क्लाउड मॉडल फिर से उपलब्ध हैं।",
+    "setupLocal": "लोकल मॉडल सेट करें",
+    "dismiss": "बंद करें"
+  },
   "Common": {
     "offlineBlocked": "इसका उपयोग करने के लिए ऑनलाइन जाएँ",
     "offlineFeatureTitle": "ऑफ़लाइन में उपलब्ध नहीं",
@@ -131,7 +139,8 @@
     "indianKanoonLink": "Indian Kanoon",
     "caseSearchLink": "मामला खोजें",
     "personalizationLink": "Mike कैसे काम करे",
-    "knowledgeLink": "फर्म का ज्ञान"
+    "knowledgeLink": "फर्म का ज्ञान",
+    "statutesLink": "क़ानून"
   },
   "Personalization": {
     "heading": "आप चाहते हैं कि Mike कैसे काम करे",
@@ -146,6 +155,27 @@
     "no": "रद्द करें",
     "cleared": "प्राथमिकताएँ मिटा दी गईं",
     "lastUpdated": "अंतिम अपडेट"
+  },
+  "Statutes": {
+    "heading": "क़ानून",
+    "description": "वे अधिनियम और क़ानून जिन्हें Mike मसौदा बनाते समय उद्धृत कर सकता है। किसी भी क़ानून का लिंक जोड़ें और Mike उसे ले आकर हर धारा को इंडेक्स कर देगा ताकि वह खोज और आपके मसौदों में दिखे।",
+    "addButton": "क़ानून जोड़ें",
+    "dialogTitle": "क़ानून जोड़ें",
+    "dialogHelp": "किसी भी क़ानून या अधिनियम का लिंक पेस्ट करें और Mike उसे ले आकर इंडेक्स कर देगा। यदि संभव हो तो कृपया सबसे साफ़ परिणाम के लिए India Code (indiacode.nic.in) का लिंक पेस्ट करें।",
+    "urlPlaceholder": "https://www.indiacode.nic.in/...",
+    "indexButton": "इंडेक्स करें",
+    "cancel": "रद्द करें",
+    "act": "अधिनियम",
+    "year": "वर्ष",
+    "category": "श्रेणी",
+    "sections": "धाराएँ",
+    "emptyState": "अभी तक कोई क़ानून इंडेक्स नहीं हुआ। ऊपर से अपना पहला जोड़ें।",
+    "deleteConfirm": "क्या इस क़ानून को इंडेक्स से हटाना है?",
+    "truncatedNote": "यह क़ानून लंबा था, इसलिए केवल पहला भाग इंडेक्स किया गया।",
+    "genericError": "इंडेक्स करते समय कुछ ग़लत हो गया।",
+    "stageFetching": "पृष्ठ लाया जा रहा है",
+    "stageReading": "पाठ पढ़ा जा रहा है",
+    "stageParsing": "क़ानून पढ़ा जा रहा है"
   },
   "Knowledge": {
     "heading": "फर्म का ज्ञान",
@@ -378,7 +408,8 @@
     "submit": "उत्तर भेजें",
     "draftNow": "छोड़ें — अभी ड्राफ्ट करें",
     "proceedingWithPlaceholders": "अनुत्तरित बिंदुओं के लिए प्लेसहोल्डर के साथ आगे बढ़ रहे हैं।",
-    "couldntSubmit": "भेजा नहीं जा सका — कृपया फिर से प्रयास करें।"
+    "couldntSubmit": "भेजा नहीं जा सका — कृपया फिर से प्रयास करें।",
+    "render": "वर्ड बनाएँ"
   },
   "People": {
     "addByEmail": "ईमेल से जोड़ें…",
@@ -441,7 +472,9 @@
     "citation": "उद्धरण",
     "trackedChange": "ट्रैक किया गया परिवर्तन",
     "page": "पृष्ठ",
-    "version": "संस्करण"
+    "version": "संस्करण",
+    "renderWord": "वर्ड बनाएँ",
+    "rendering": "बना रहा है…"
   },
   "DocumentSupport": {
     "noticeTitle": "क्या इंडेक्स होता है",
@@ -840,6 +873,16 @@
     "cachedTitle": "स्थानीय रूप से कैश किए गए मामले",
     "cachedEmpty": "अभी तक कोई मामला कैश नहीं हुआ। अपनी स्थानीय लाइब्रेरी बनाने के लिए मामले खोजें और सहेजें।",
     "deleteConfirm": "इस मामले को अपने स्थानीय इंडेक्स से हटाएँ?",
-    "keyMissing": "खोज शुरू करने के लिए ऊपर अपनी Indian Kanoon API key जोड़ें।"
+    "keyMissing": "खोज शुरू करने के लिए ऊपर अपनी Indian Kanoon API key जोड़ें।",
+    "byokTitle": "अपनी API key कॉन्फ़िगर करें",
+    "byokSubtitle": "खोज सक्षम करने के लिए अपनी Indian Kanoon API key लाएँ।",
+    "byokApiKeyLabel": "आपकी API key",
+    "byokApiKeyPlaceholder": "ikapi_…",
+    "byokApiKeyKeepHint": "सहेजी गई key रखने के लिए खाली छोड़ें",
+    "byokApiKeyStored": "Key सहेज लिया गया",
+    "byokEnabledLabel": "Indian Kanoon सक्रिय करें",
+    "byokEnabledHint": "सक्रिय होने पर, एकीकरण केस खोज के लिए सक्रिय होता है।",
+    "byokSaveButton": "सहेजें",
+    "byokSaveError": "कॉन्फ़िगरेशन सहेजने में विफल"
   }
 }

@@ -1110,11 +1110,12 @@ Rules:
 - For a single-page quote, set "page" to an integer. If a quote is one continuous sentence that spans two pages, set "page" to "N-M" and insert [[PAGE_BREAK]] in the quote at the page break. Otherwise, use separate citations for text on different pages
 - Put the <CITATIONS> block at the very end of the response. Omit it entirely if there are no citations
 
-DOCX GENERATION:
-If asked to draft or generate a document, use the generate_docx tool to produce a downloadable Word document. Always use this tool rather than just displaying the document content inline when the user asks for a document to be created.
-If the user follows up on a document you just generated and asks for changes (e.g. "make section 3 longer", "add a termination clause", "change the parties"), default to calling edit_document on that newly generated document — do NOT call generate_docx again to regenerate the whole document. Only fall back to generate_docx if the user explicitly asks for a brand-new document or the change is so sweeping that an edit would not be coherent.
-After calling generate_docx, do NOT include any download links, URLs, or markdown links to the document in your prose response — the download card is presented automatically by the UI.
-After calling generate_docx, you MUST call read_document on the returned doc_id before writing your prose response. Base your description on the generated document's actual text, not on memory of what you intended to generate.
+DOCUMENT DRAFTING:
+If asked to draft or generate a document, use the draft_document tool. It persists your full Markdown as the working copy and renders it FORMATTED in the side panel — it does NOT produce a Word (.docx) file. Always use this tool rather than dumping the document inline in your prose.
+EDITS REWRITE THE FULL MARKDOWN: if the user asks for any change to a draft you just made (e.g. "make section 3 longer", "add a termination clause", "change the parties throughout"), call draft_document again with the SAME document_id and the COMPLETE rewritten Markdown — do not send a fragment. (The edit_document / tracked-changes flow is ONLY for a Word file the USER uploaded, never for a draft you authored.)
+After EACH draft AND each edit, offer ONCE — and only once — to render a Word file, using ask_clarifying_questions with a single yes/no question ("Render this as a Word document?" → "Yes, render Word" / "Not yet"). Keep it to that one question; never a wall of text, and don't nag if they decline. If they say yes, call render_word(document_id). If they say "not yet" or ignore it, leave the draft as-is.
+After calling draft_document, do NOT include any download links or markdown links in your prose — the document card is shown automatically by the UI.
+After calling draft_document, briefly describe the draft from the Markdown you just wrote (you already have its full text — no need to re-read it).
 Your prose response MUST include a short description of the generated document: what it is, its structure (key sections/clauses), and — if the draft was informed by any provided source documents — which sources you drew from and how. Keep it concise (typically 3–8 sentences or a short bulleted list). Refer to the document by filename, never by a download link.
 When the description makes factual claims about the contents of the newly generated document, cite the generated document with [N] markers and a <CITATIONS> block exactly as specified in the DOCUMENT CITATION INSTRUCTIONS above. If you also make factual claims about provided source documents, cite those source documents separately. Omit the <CITATIONS> block if the description makes no such claims.
 Heading hierarchy: always use Heading 1 before introducing Heading 2, Heading 2 before Heading 3, and so on. Never skip levels.
@@ -1461,45 +1462,6 @@ CONFIDENCE & HONESTY:
 
 LEGACY TOOLS:
 - vanga_search is a metadata-only browser-side search retained for the standalone Case Search page. Prefer kanoon_search for chat queries — it returns actual judgment paragraphs, not just titles.
-
-LITIGATION DRAFTING & REVIEW RISK RUBRIC — you are a litigator's drafting partner (~85% pleadings, ~15% transactional). When you DRAFT, build it right and call out the HIGH risks you resolved. When the lawyer UPLOADS a document, run the cross-cutting checklist then the type checklist, and return a triage table (Issue | Severity | Side | Fix) before the redline.
-
-THIS RUBRIC DRIVES THE REDLINE. Review every draft and upload AGAINST this rubric — cross-cutting list, then the document-type flags, then (for contracts/deeds) the transactional heads. Tag every issue HIGH/MED/LOW and say which side it helps vs hurts. If an issue is NOT covered here, you MAY fall back on general legal training knowledge, but you MUST tell the user you are going beyond the rubric, using exactly: "⚠️ Beyond the rubric — general principle: …". Never pass off a beyond-the-rubric point as part of the rubric, and still tag it HIGH/MED/LOW + side.
-
-TAG every risk HIGH (can get the pleading rejected/dismissed/time-barred/struck — flag even if unasked), MED (weakens the case / invites a preliminary objection / costs an amendment) or LOW (polish), and say which SIDE it helps vs hurts — the same defect is a sword for one party and a wound for the other. If the user hasn't said which party they represent, ASK ONCE before redlining. Flag statutory bars (limitation, jurisdiction, mandatory notices, non-joinder) PROACTIVELY even if it hurts the user — a bar caught before filing is the whole value; a bar missed becomes a dismissal in court. Never fabricate citations/sections/dates/names/amounts; unknown facts stay "________"; cite case law only via kanoon_verify_case.
-
-CROSS-CUTTING (almost every pleading):
-- LIMITATION (Limitation Act 1963) — HIGH. Court dismisses a time-barred suit even unpleaded (s.3). State the Article, the date the cause of action arose, and the LAST date. APPEALS run from RECEIPT of the certified/impugned order, not its date. Exclude s.12 (event day / certified-copy time), s.14 (bona fide wrong forum); s.18/19 acknowledgment/part-payment resets. If late: SEPARATE condonation application + supporting affidavit (s.5; IT appeals s.249(3)) — never a foot-of-prayer line.
-- JURISDICTION — HIGH. Territorial (s.20 CPC), pecuniary, subject-matter; wrong forum → plaint returned (O7R10). Watch tribunal exclusivity (AFT/ITAT/GSTAT/NCLT/RERA/DRT/Labour) and the WRONG-STATUTE trap (consumer complaint under repealed CP Act 1986 vs 2019 — fatal). Add a jurisdiction paragraph.
-- CAUSE OF ACTION — HIGH. None/defective → rejection under Order VII Rule 11(a). On an O7R11 application ONLY the plaint is seen, not the WS. Plead operative facts + the date each arose.
-- COURT FEE & VALUATION — MED/HIGH. Ad valorem on the relief's value; state valuation-for-jurisdiction and fee-affixed; declaration needs the right fee head.
-- VERIFICATION & AFFIDAVIT — HIGH. Order VI Rule 15 (split knowledge vs information&belief), place/date, deponent capacity (board resolution for a company); supporting affidavit s.26(2) CPC for fact-pleadings; affidavit sworn before a notary/oath commissioner.
-- MATERIAL FACTS vs EVIDENCE & SUPPRESSION — HIGH (writs especially). Plead material facts not evidence (O6R2); suppression defeats a writ (clean hands) — disclose adverse facts yourself.
-- PARTIES — HIGH. Non-joinder of a NECESSARY party can dismiss (e.g. all co-owners in partition); correct CAPACITY (karta, guardian O32, legal heirs O22, firm O30); government as "Union of India through Secretary, Ministry of ___"; representative suits O1R8. On review check no relief is sought against an un-arrayed party.
-- STATUTORY PRE-CONDITIONS — HIGH. S.80 CPC 2-month govt notice; S.12A Commercial Courts pre-institution mediation (no urgent relief); S.138 NI chain (demand notice within 30 days of dishonour memo → 15-day pay window → complaint within 1 month of its expiry, s.142(b); only payee/holder-in-due-course); S.69 Partnership unregistered-firm bar; s.21 A&C notice. Plead it was met with date+annexure, or advise doing it before filing.
-- PRAYER/RELIEF — MED/HIGH. Relief must trace to a pleaded fact; declaration needs CONSEQUENTIAL relief (s.34 SRA); plead specific AND alternative relief; pray interim relief separately; "any other relief" is a tail not the spine.
-- INTERIM RELIEF — HIGH. Plead the three-fold test separately (prima facie case, balance of convenience, irreparable injury); justify ex-parte under O39R3 with reasons; add the damages undertaking; define the status quo precisely.
-- DENIAL DISCIPLINE (WS/replies) — HIGH. Evasive/vague denial = ADMISSION (O8 R3-5). General denial + preliminary objections + PARA-WISE reply, each averment admitted/denied/"put to strict proof". Plead set-off/counterclaim (O8R6/6A) with its own court fee + limitation.
-- ANNEXURE & CROSS-REF INTEGRITY — MED. Cite each annexure in the body exactly once; never list an uncited annexure; reconcile index/List of Dates/body; renumber paras after edits.
-- SIGNATURE/VAKALATNAMA — MED/HIGH. Signed by party AND counsel; vakalatnama, court fee, exemption application, and certified copy of the impugned order in the bundle.
-
-DOCUMENT-TYPE FLAGS:
-- Plaint: cause of action + jurisdiction + valuation + limitation paras; pre-conditions; O37 averment for summary suits.
-- Written Statement: file in 30 days (commercial suits: 120-day HARD limit — right forfeited after); para-wise denials; all preliminary objections; set-off/counterclaim.
-- Writ (226/32): alternative remedy, delay & laches, locus, NO suppression (affidavit of full disclosure); correct State respondents.
-- S.138 NI / criminal complaint: the timeline above + director liability s.141 (plead each accused "was in charge of and responsible for the conduct of the company's business"; company + signatory always liable, a mere director not automatically).
-- Bail/anticipatory (BNSS §480/§483/§482): flight risk, tampering, witness influence, gravity, parity; flag NDPS/UAPA/PMLA statutory rigour; don't concede guilt.
-- Appeal/revision (civil/ITAT/AFT/GSTAT/CIC): limitation from receipt of order; annex certified copy; condonation if late; numbered grounds (errors of law/fact) + "craves leave to add grounds"; statutory pre-deposit.
-- Affidavit: competent deponent, knowledge-vs-belief split, sworn, place/date, exhibits marked.
-- Legal/demand notice: NOT a pleading (no verification); state demand, compliance period, consequence; s.80 (2 months govt) / s.138 (15 days, issued within 30) timelines.
-- Arbitration: S.9 three-fold test; S.11 confirm s.21 notice + agreement; S.34 STRICT 3 months + 30 days condonable max, grounds confined to s.34(2)/(2A), no merits review.
-- Consumer: 2-year limitation; pecuniary jurisdiction on consideration paid (District ≤₹50L / State ≤₹2cr / National >₹2cr); FILE UNDER 2019 ACT; establish "consumer" (non-commercial).
-- Matrimonial: jurisdiction (HMA s.19 / DV Act §27); plead marriage/rites/residence; DV Act needs aggrieved person + domestic relationship + shared household; cruelty/desertion with dated particulars; assets affidavit for maintenance (Rajnesh v. Neha).
-- Eviction/property: relationship + statutory ground + s.106 TPA / Rent-Act notice to quit; partition arrays ALL co-sharers; market-value valuation.
-
-TRANSACTIONAL (~15%, scan these heads — full detail in the rubric file): §124-125 indemnity scope; liability cap with fraud/IP carve-outs; §74 penalty vs genuine pre-estimate; §27 void post-employment non-compete; arbitration seat/venue; STAMP DUTY & REGISTRATION (§17 Reg. Act — unregistered sale/gift/>11-month lease passes no title; unstamped = inadmissible); §28 forum/limitation bar + exception; force majeure vs §56; termination & survival; present IP assignment + moral-rights waiver; CPs + long-stop; reps/warranties + disclosure schedule; GST/TDS/interest; change-of-control; notice clause; boilerplate (severability / entire-agreement / e-sign §10A IT Act); §126-147 guarantee.
-
-REDLINING IS RUBRIC-DRIVEN. Review and redline against THIS rubric first. If an issue is genuinely not covered by the rubric, you MAY draw on general legal training knowledge — but you MUST tell the user when you go beyond the rubric, prefixed exactly: `⚠️ Beyond the rubric — general principle:`.
 "#;
 
 pub const TONE_RULES: &str = r#"## TONE — SENIOR ASSOCIATE
@@ -1709,7 +1671,7 @@ fn format_clarifying_answers(raw: &str) -> String {
         out.push_str(&format!("- {}: {}\n", q, sel));
     }
     if wants_to_provide {
-        out.push_str("\nIMPORTANT: for at least one answer the user chose to PROVIDE specific details (e.g. names, amounts, dates). Do NOT draft yet and do NOT call generate_docx. In ONE short, friendly sentence, ask the user to type those exact details now, then STOP and wait for their reply. Treat the user's other selections above as settled.");
+        out.push_str("\nIMPORTANT: for at least one answer the user chose to PROVIDE specific details (e.g. names, amounts, dates). Do NOT draft yet and do NOT call draft_document. In ONE short, friendly sentence, ask the user to type those exact details now, then STOP and wait for their reply. Treat the user's other selections above as settled.");
     } else {
         out.push_str("\nProceed now using only these answers plus any facts the user already provided. Do not ask further questions.");
     }
@@ -1726,7 +1688,7 @@ CLARIFY SMARTLY — ASK ONLY WHEN THE ANSWER CHANGES THE DOCUMENT'S SHAPE OR STR
   (2) Can I already infer the answer from the facts given? If ONE option clearly dominates (e.g. an accused who has absconded + multiple victims + money to be traced ⇒ the FIR track; a forum the user already named ⇒ that forum), DO NOT ask — state the assumption in ONE sentence ("Drafting this to register an FIR, since the accused has absconded and funds need tracing — say so if you'd rather file a private complaint.") and draft. Ask only when two or more options are each genuinely viable on these facts.
   (3) Is it merely a missing FACT, not a choice? Party names, ages, addresses, FIR/case numbers, police station, dates, amounts, the exact section — these are NEVER questions; use "________" placeholders the user completes.
 Ask ONLY when (1) is yes AND (2) is no AND (3) is no. Then call `ask_clarifying_questions` ONCE with 1–3 sharp questions (usually just one), each with 2–5 option chips, recommended first, and draft the moment they answer. Never spread questions across turns, never re-ask what the conversation has already settled, and draft immediately with NO questions if the user said "proceed" / "draft now" / "just draft" or has already answered.
-HARD GATE: in a new matter, run the three-part test BEFORE your first drafting or research tool call (generate_docx, kanoon_search). If the test says ask, calling generate_docx without first calling `ask_clarifying_questions` is an ERROR — the user gets a document built on a strategic choice they never made. GROUND EVERY QUESTION IN THE USER'S OWN FACTS: name the specific detail the choice turns on and make each option a genuinely distinct path with a one-line consequence ("Cheque bounced twice, most recently 10 days ago — the Section 138 notice window is still open. Which track?" → "Statutory demand notice u/s 138 NI Act (criminal; must issue within 30 days of the return memo)" vs "Civil summary suit under Order 37 CPC (no deadline pressure; recovers money but no penal leverage)"). A question you could paste into any other case is a wasted question.
+HARD GATE: in a new matter, run the three-part test BEFORE your first drafting or research tool call (draft_document, kanoon_search). If the test says ask, calling draft_document without first calling `ask_clarifying_questions` is an ERROR — the user gets a document built on a strategic choice they never made. GROUND EVERY QUESTION IN THE USER'S OWN FACTS: name the specific detail the choice turns on and make each option a genuinely distinct path with a one-line consequence ("Cheque bounced twice, most recently 10 days ago — the Section 138 notice window is still open. Which track?" → "Statutory demand notice u/s 138 NI Act (criminal; must issue within 30 days of the return memo)" vs "Civil summary suit under Order 37 CPC (no deadline pressure; recovers money but no penal leverage)"). A question you could paste into any other case is a wasted question.
 
 STATUTE ACCURACY: Before citing any penal / procedural / evidence section, call `statute_search` to fetch the current section text and its old→new mapping. GROUND, DON'T QUOTE — the fetched section text is for YOUR accuracy (to get the number and the legal standard right), NOT to paste into the draft. Write like a lawyer: cite the section inline (e.g. "…dishonestly induced the Complainant to part with Rs. 5,00,000/-, an act squarely falling within Section 318(4) BNS") and deploy the legal standard in your OWN prose. Block-quote the bare-act words verbatim ONLY where the exact wording is itself at issue — a legal notice's formal demand, a ground of appeal that turns on the statutory language, a hotly-contested element. NEVER write "…in contravention of Section X, which states '…[full text]…'" after every section: that reads like a citation dump, not a pleading. Cite the GOVERNING code (the one fixed by the offence date above) as the PRIMARY label, with the equivalent in the other code in parentheses — for a post-1-July-2024 offence: "Section 318(4) of the BNS, 2023 (erstwhile Section 420 IPC)"; for a pre-1-July-2024 offence: "Section 420 IPC (now Section 318(4) of the BNS, 2023)". Use the SAME governing code as the primary label for EVERY section in the document. Never invent a section number; if statute_search returns nothing, write "________" and note the section needs verification. If statute_search returns a section you are NEAR-CERTAIN is wrong (e.g. it returns §314 for cheating, when cheating is §318(4) BNS), you MAY cite the correct section from your own knowledge — but you MUST add a one-line note telling the user what the lookup returned, why it is wrong, and to confirm before filing. (This is the narrow, disclosed override: search first; override only when near-certain; always disclose what/why/what-instead and flag it for the user to verify; and never for the client's own facts.) Still never guess a number you are unsure of — when genuinely unsure, use "________".
 
@@ -1746,7 +1708,7 @@ CRIMINAL COMPLAINTS & ECONOMIC OFFENCES — STRATEGY & PITFALLS (apply whenever 
 
 PLEADING HYGIENE — CLOSE EVERY FACT-PLEADING DOCUMENT PROPERLY. Any plaint, petition, application, complaint or appeal that pleads facts MUST end with a VERIFICATION clause (Order VI Rule 15 CPC, or the forum's equivalent). Because Section 26(2) CPC and Order VI Rule 15 require the facts in a plaint/petition to be PROVED ON AFFIDAVIT, such a document MUST be accompanied by a SUPPORTING AFFIDAVIT of the party swearing to those facts: if the user asked only for the main pleading, still append the verification clause to it, and after the document tell the user in ONE line that a supporting affidavit is required under Section 26(2) CPC and offer to generate it (do not silently fabricate one). Split BOTH the verification and the affidavit into facts true to personal KNOWLEDGE vs facts true to INFORMATION & BELIEF. Deeds, agreements, powers of attorney and legal notices are NOT pleadings — they take execution / attestation / witness blocks, never a verification clause.
 
-BEFORE YOU CALL generate_docx — RUN THIS SELF-CHECK and silently fix anything that fails:
+BEFORE YOU CALL draft_document — RUN THIS SELF-CHECK and silently fix anything that fails:
   1. STATUTE: every section was confirmed via statute_search; ONE governing code throughout; cheating = §318 (NOT §316), CBT = §316 (NOT §314), misappropriation = §314; no §359 (compounding) used for compensation — compensation is §395 / §396.
   2. NO REFLEXIVE CLUBBING: cheating and CBT are not co-equal charges on identical "fraud-from-inception" facts; any CBT count is in the alternative and tied to a real entrustment-then-diversion slice.
   3. ONE TRACK: the prayer seeks cognizance OR an FIR direction, never both; intimidation is graded to the facts; §84 is not used as the warrant provision; warrant/process is §227.
@@ -1755,7 +1717,7 @@ BEFORE YOU CALL generate_docx — RUN THIS SELF-CHECK and silently fix anything 
   6. ANNEXURES: every annexure listed is cited in the body and vice-versa; descriptions match; no orphan or mismatched annexure.
   7. NO INVENTION: every fact, document and annexure traces to something the user actually stated; everything else is a "________" placeholder; any advisable extra step is mentioned to the user in prose, not baked into the pleading.
 
-FORMAT (general): Use # for the court / cause-title header and ## for section headings (e.g. AFFIDAVIT, PRAYER, VERIFICATION, GROUNDS OF APPEAL); bold the case-number line. CAUSE-TITLE (first page) MUST STAY CONCISE — after "IN THE MATTER OF:" put ONLY each party's NAME + role ("Arjun Rastogi ...Complainant", then "VERSUS", then "...Accused"); do NOT put S/o, W/o, D/o, age or addresses in the cause-title. The full particulars of every party (name; S/o/W/o/D/o; age; R/o full address) belong ONLY in a separate MEMO OF PARTIES section (its own ## heading) placed right after the cause-title, one numbered entry per party — never duplicated in the cause-title. Number body paragraphs as **1.** That, … **2.** That, … (not markdown lists), 2-3 sentences each. Use S/o Sh., W/o, D/o, R/o, u/s, Ld., Hon'ble. Then follow the type-specific structure below. Once the facts are settled, call generate_docx with the full document as markdown in "body".
+FORMAT (general): Use # for the court / cause-title header and ## for section headings (e.g. AFFIDAVIT, PRAYER, VERIFICATION, GROUNDS OF APPEAL); bold the case-number line. CAUSE-TITLE (first page) MUST STAY CONCISE — after "IN THE MATTER OF:" put ONLY each party's NAME + role ("Arjun Rastogi ...Complainant", then "VERSUS", then "...Accused"); do NOT put S/o, W/o, D/o, age or addresses in the cause-title. The full particulars of every party (name; S/o/W/o/D/o; age; R/o full address) belong ONLY in a separate MEMO OF PARTIES section (its own ## heading) placed right after the cause-title, one numbered entry per party — never duplicated in the cause-title. Number body paragraphs as **1.** That, … **2.** That, … (not markdown lists), 2-3 sentences each. Use S/o Sh., W/o, D/o, R/o, u/s, Ld., Hon'ble. Then follow the type-specific structure below. Once the facts are settled, call draft_document with the full document as markdown in "body" (this renders formatted in the side panel — it does NOT make a Word file; offer to render Word afterwards). To revise a draft, call draft_document again with the SAME document_id and the full rewritten markdown.
 "#;
 
 // Per-document-type drafting chunks — grounded in the firm's own corpus
@@ -4019,17 +3981,8 @@ fn validate_kanoon_quotes(response: &str) -> Vec<String> {
         // (rarely matters) and 1500 chars after the link to cover both
         // inline `The Court held: "..."` and a Markdown blockquote that
         // immediately follows the citation paragraph.
-        // Snap the byte window to char boundaries — `link_start ± N` can land
-        // mid-codepoint on multibyte text (e.g. Devanagari), which would panic
-        // the slice below.
-        let mut win_start = link_start.saturating_sub(200);
-        while win_start > 0 && !response.is_char_boundary(win_start) {
-            win_start -= 1;
-        }
-        let mut win_end = (link_start + 1500).min(response.len());
-        while win_end < response.len() && !response.is_char_boundary(win_end) {
-            win_end += 1;
-        }
+        let win_start = link_start.saturating_sub(200);
+        let win_end = (link_start + 1500).min(response.len());
         let window = &response[win_start..win_end];
         if window_has_verbatim_quote(window) {
             continue;
@@ -4856,7 +4809,7 @@ pub(crate) async fn stream_chat_root(
 
     // ─── Tools available to the model ────────────────────────────────
     // Builtin Mike tools first (read_document, find_in_document,
-    // read_workflow, generate_docx stub, edit_document stub).
+    // read_workflow, draft_document, render_word, edit_document).
     let mut all_tools: Vec<ToolSchema> = builtin_tools::schemas();
 
     // MCP tools: injected ONLY for models that handle large tool
@@ -5316,7 +5269,7 @@ pub(crate) async fn stream_chat_root(
                                                     .chars().take(40).collect::<String>();
                                                 iter_tool_calls.push(ToolCall {
                                                     id: uuid::Uuid::new_v4().to_string(),
-                                                    name: "generate_docx".to_string(),
+                                                    name: "draft_document".to_string(),
                                                     input: serde_json::json!({
                                                         "title": title,
                                                         "body": assembled
@@ -5391,7 +5344,7 @@ pub(crate) async fn stream_chat_root(
                                                         .chars().take(40).collect::<String>();
                                                     iter_tool_calls.push(ToolCall {
                                                         id: uuid::Uuid::new_v4().to_string(),
-                                                        name: "generate_docx".to_string(),
+                                                        name: "draft_document".to_string(),
                                                         input: serde_json::json!({
                                                             "title": title,
                                                             "body": assembled
@@ -5553,9 +5506,9 @@ pub(crate) async fn stream_chat_root(
                         }
 
                         if !hybrid_handled {
-                            // Case 1: weak local model echoed generate_docx JSON as plain text.
+                            // Case 1: weak local model echoed draft_document JSON as plain text.
                             // Parse it and forge a real ToolCall, then suppress the raw text.
-                            let echoed_tool = if lower.contains("generate_docx") && lower.contains("\"body\"") {
+                            let echoed_tool = if (lower.contains("draft_document") || lower.contains("generate_docx")) && lower.contains("\"body\"") {
                                 let trimmed = full_response.trim();
                                 let start = trimmed.find('{').unwrap_or(0);
                                 serde_json::from_str::<serde_json::Value>(&trimmed[start..]).ok()
@@ -5582,7 +5535,7 @@ pub(crate) async fn stream_chat_root(
                                 iter_text = String::new();
                                 iter_tool_calls.push(ToolCall {
                                     id: uuid::Uuid::new_v4().to_string(),
-                                    name: "generate_docx".to_string(),
+                                    name: "draft_document".to_string(),
                                     input: serde_json::json!({
                                         "title": title,
                                         "body": body
@@ -5601,7 +5554,7 @@ pub(crate) async fn stream_chat_root(
                                     .collect::<String>();
                                 iter_tool_calls.push(ToolCall {
                                     id: uuid::Uuid::new_v4().to_string(),
-                                    name: "generate_docx".to_string(),
+                                    name: "draft_document".to_string(),
                                     input: serde_json::json!({
                                         "title": if title.is_empty() { "Legal Draft" } else { &title },
                                         "body": cleaned_body
@@ -5677,7 +5630,7 @@ pub(crate) async fn stream_chat_root(
 
                         // Emit doc_created_start/doc_edited_start so the frontend
                         // shows a document card placeholder immediately.
-                        if call.name == "generate_docx" {
+                        if call.name == "draft_document" {
                             let start_payload = serde_json::json!({
                                 "type": "doc_created_start",
                                 "filename": "document.docx",
@@ -5775,42 +5728,94 @@ pub(crate) async fn stream_chat_root(
                         // fills in the document card with real data.
                         let mut result_for_model: Option<String> = None;
                         if let Ok(val) = serde_json::from_str::<serde_json::Value>(&result) {
-                            if call.name == "generate_docx" && val.get("error").is_none() {
+                            if call.name == "draft_document" && val.get("error").is_none() {
                                 doc_already_generated = true;
                                 let filename = val["filename"].as_str().unwrap_or("document.docx");
                                 let doc_id = val["doc_id"].as_str().unwrap_or("");
                                 last_doc_uuid = Some(doc_id.to_string());
-                                let next_idx = doc_label_map.len();
-                                let label = format!("doc-{}", next_idx);
-                                doc_label_map.insert(label.clone(), doc_id.to_string());
+                                // On re-draft the model passes the SAME document_id,
+                                // which already has a label — don't allocate a second.
+                                let label = doc_label_map.iter()
+                                    .find(|(_, v)| v.as_str() == doc_id)
+                                    .map(|(k, _)| k.clone())
+                                    .unwrap_or_else(|| {
+                                        let l = format!("doc-{}", doc_label_map.len());
+                                        doc_label_map.insert(l.clone(), doc_id.to_string());
+                                        l
+                                    });
                                 // The model must never re-type the raw UUID: one
                                 // mistyped hex char makes it conclude the document
                                 // vanished and regenerate a duplicate. Hand it the
                                 // short label instead.
                                 let mut model_val = val.clone();
                                 model_val["doc_id"] = json!(label);
+                                model_val["document_id"] = json!(label);
                                 model_val["note"] = json!(format!(
-                                    "Document created and persisted. In ALL further tool calls \
-                                     (read_document, edit_document) pass doc_id \"{label}\" — never \
-                                     a raw UUID. Call read_document with \"{label}\" now to verify \
-                                     content before describing it to the user."
+                                    "Markdown draft persisted (no Word file yet — it renders formatted \
+                                     in the side panel). To edit it, call draft_document again with \
+                                     document_id \"{label}\" and the full rewritten Markdown — never a \
+                                     raw UUID. To produce a Word file, call render_word with \"{label}\"."
                                 ));
                                 result_for_model = Some(model_val.to_string());
+                                // Draft: markdown only, NOT yet rendered to .docx.
                                 let body_md = call.input.get("body").and_then(|v| v.as_str()).unwrap_or("");
                                 let payload = serde_json::json!({
                                     "type": "doc_created",
                                     "filename": filename,
-                                    "download_url": format!("/document/{doc_id}/docx"),
                                     "document_id": doc_id,
                                     "body": body_md,
+                                    "rendered": false,
+                                    "download_url": "",
+                                    "version_id": serde_json::Value::Null,
+                                    "version_number": serde_json::Value::Null,
                                 });
                                 let _ = tx.send(Ok(axum::response::sse::Event::default()
                                     .data(payload.to_string()))).await;
-                            } else if call.name == "generate_docx" && val.get("error").is_some() {
+                            } else if call.name == "draft_document" && val.get("error").is_some() {
                                 let err_msg = val["error"].as_str().unwrap_or("Unknown error");
                                 let payload = serde_json::json!({
                                     "type": "content_delta",
-                                    "text": format!("\n\n**Demo Warning (Tool Error):** Failed to create the Word document because: {}\n\n", err_msg)
+                                    "text": format!("\n\n**Demo Warning (Tool Error):** Failed to draft the document because: {}\n\n", err_msg)
+                                });
+                                let _ = tx.send(Ok(axum::response::sse::Event::default().data(payload.to_string()))).await;
+                            } else if call.name == "render_word" && val.get("error").is_none() {
+                                // Render confirmed: same card flips to rendered:true
+                                // with a real download_url. Body stays the markdown
+                                // source so the formatted panel is unchanged.
+                                let doc_id_arg = call.input.get("document_id").and_then(|v| v.as_str()).unwrap_or("");
+                                let doc_id = doc_label_map
+                                    .get(doc_id_arg)
+                                    .map(|s| s.as_str())
+                                    .unwrap_or(doc_id_arg);
+                                let filename = val["filename"].as_str().unwrap_or("document.docx");
+                                let body_md = sqlx::query_scalar::<_, Option<String>>(
+                                    "SELECT markdown_source FROM documents WHERE id = ? AND user_id = ?",
+                                )
+                                .bind(doc_id)
+                                .bind(&auth.user_id)
+                                .fetch_optional(&state_clone.db)
+                                .await
+                                .ok()
+                                .flatten()
+                                .flatten()
+                                .unwrap_or_default();
+                                let payload = serde_json::json!({
+                                    "type": "doc_created",
+                                    "filename": filename,
+                                    "document_id": doc_id,
+                                    "body": body_md,
+                                    "rendered": true,
+                                    "download_url": format!("/document/{doc_id}/docx"),
+                                    "version_id": serde_json::Value::Null,
+                                    "version_number": serde_json::Value::Null,
+                                });
+                                let _ = tx.send(Ok(axum::response::sse::Event::default()
+                                    .data(payload.to_string()))).await;
+                            } else if call.name == "render_word" && val.get("error").is_some() {
+                                let err_msg = val["error"].as_str().unwrap_or("Unknown error");
+                                let payload = serde_json::json!({
+                                    "type": "content_delta",
+                                    "text": format!("\n\n**Could not render Word:** {}\n\n", err_msg)
                                 });
                                 let _ = tx.send(Ok(axum::response::sse::Event::default().data(payload.to_string()))).await;
                             } else if call.name == "edit_document" && val.get("error").is_none() {
@@ -5834,7 +5839,7 @@ pub(crate) async fn stream_chat_root(
                             }
                         }
 
-                        // Swap in the label-ified generate_docx result so the
+                        // Swap in the label-ified draft_document result so the
                         // model never sees (or re-types) the raw document UUID.
                         let result = result_for_model.unwrap_or(result);
 
@@ -5928,6 +5933,22 @@ pub(crate) async fn stream_chat_root(
                 .bind(&chat_id_clone)
                 .execute(&state_clone.db)
                 .await;
+
+            // Link the draft produced/edited this turn to this assistant message
+            // so chat reload can rebuild its doc_created card + formatted panel.
+            // Only stamps rows not already linked (a re-draft keeps its original
+            // message), and never touches uploaded attachments (last_doc_uuid is
+            // set only by draft_document this turn).
+            if let Some(ref doc_uuid) = last_doc_uuid {
+                let _ = sqlx::query(
+                    "UPDATE documents SET message_id = ? WHERE id = ? AND user_id = ? AND message_id IS NULL",
+                )
+                .bind(&id)
+                .bind(doc_uuid)
+                .bind(&auth.user_id)
+                .execute(&state_clone.db)
+                .await;
+            }
 
             // Promote registry citations the model actually cited in its prose
             // (kanoon doc URLs / "<statute> s.<section>") from referred → cited.
@@ -6524,35 +6545,67 @@ async fn get_chat(
         with_annot,
     );
 
-    let messages: Vec<Value> = msg_rows
-        .into_iter()
-        .map(|(mid, role, content, created_at, annotations)| {
-            let content_value = if role == "assistant" {
-                json!([{ "type": "content", "text": content.unwrap_or_default() }])
-            } else {
-                json!(content.unwrap_or_default())
-            };
-            // Hydrate annotations the same way the live SSE event does,
-            // so the chat-history loader path delivers identical shape.
-            // Re-apply `strip_page_markers` to each KB quote: rows
-            // persisted before that fix landed contain the literal
-            // `[Page N]` markers that PDF.js can't match — sanitising
-            // on read makes old chats render correctly without a
-            // destructive migration.
-            let annotations_value = annotations
-                .as_deref()
-                .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                .map(sanitise_annotations_quotes)
-                .unwrap_or_else(|| Value::Array(Vec::new()));
-            json!({
-                "id": mid,
-                "role": role,
-                "content": content_value,
-                "created_at": created_at,
-                "annotations": annotations_value,
-            })
-        })
-        .collect();
+    let mut messages: Vec<Value> = Vec::with_capacity(msg_rows.len());
+    for (mid, role, content, created_at, annotations) in msg_rows.into_iter() {
+        let content_value = if role == "assistant" {
+            // Rebuild the assistant turn's content array exactly as the live SSE
+            // stream produced it: any markdown drafts linked to this message are
+            // replayed as doc_created cards (card + formatted panel) BEFORE the
+            // prose content, so reload == live. Older messages (no linked docs,
+            // pre-0045 chats) yield just the content event — fully backward compat.
+            let docs: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
+                "SELECT id, filename, markdown_source, storage_path FROM documents \
+                 WHERE message_id = ? ORDER BY created_at ASC",
+            )
+            .bind(&mid)
+            .fetch_all(&state.db)
+            .await
+            .unwrap_or_default();
+
+            let mut events: Vec<Value> = Vec::with_capacity(docs.len() + 1);
+            for (doc_id, filename, markdown_source, storage_path) in docs {
+                let rendered = storage_path.is_some();
+                let download_url = if rendered {
+                    format!("/document/{doc_id}/docx")
+                } else {
+                    String::new()
+                };
+                events.push(json!({
+                    "type": "doc_created",
+                    "filename": filename,
+                    "document_id": doc_id,
+                    "body": markdown_source.unwrap_or_default(),
+                    "rendered": rendered,
+                    "download_url": download_url,
+                    "version_id": Value::Null,
+                    "version_number": Value::Null,
+                }));
+            }
+            events.push(json!({ "type": "content", "text": content.unwrap_or_default() }));
+            Value::Array(events)
+        } else {
+            json!(content.unwrap_or_default())
+        };
+        // Hydrate annotations the same way the live SSE event does,
+        // so the chat-history loader path delivers identical shape.
+        // Re-apply `strip_page_markers` to each KB quote: rows
+        // persisted before that fix landed contain the literal
+        // `[Page N]` markers that PDF.js can't match — sanitising
+        // on read makes old chats render correctly without a
+        // destructive migration.
+        let annotations_value = annotations
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<Value>(s).ok())
+            .map(sanitise_annotations_quotes)
+            .unwrap_or_else(|| Value::Array(Vec::new()));
+        messages.push(json!({
+            "id": mid,
+            "role": role,
+            "content": content_value,
+            "created_at": created_at,
+            "annotations": annotations_value,
+        }));
+    }
 
     Ok(Json(json!({
         "chat": {
@@ -7276,7 +7329,7 @@ fn truncate_on_char_boundary(text: &str, max: usize) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_citations_block, sanitise_annotations_quotes, strip_page_markers, clean_draft_text, extract_text_from_model_json, truncate_on_char_boundary, validate_kanoon_quotes};
+    use super::{extract_citations_block, sanitise_annotations_quotes, strip_page_markers, clean_draft_text, extract_text_from_model_json, truncate_on_char_boundary};
     use serde_json::{json, Value};
 
     #[test]
@@ -7297,24 +7350,6 @@ mod tests {
     #[test]
     fn truncate_on_char_boundary_keeps_short_text_intact() {
         assert_eq!(truncate_on_char_boundary("नमस्ते ₹", 3000), "नमस्ते ₹");
-    }
-
-    #[test]
-    fn validate_kanoon_quotes_no_panic_on_devanagari_window_bounds() {
-        // PT4 regression: the citation-quote window (`link_start ± N`) sliced
-        // `response` at raw byte offsets that could land mid-codepoint on
-        // Devanagari, panicking (`byte index N is not a char boundary`). Build a
-        // 300-byte Devanagari pad ('अ' = 3 bytes) so the link sits past byte 200
-        // and `link_start - 200` falls inside a multibyte char.
-        let pad = "अ".repeat(100); // 300 bytes
-        let response =
-            format!("{pad}[केस शीर्षक](https://indiankanoon.org/doc/12345/) कुछ पाठ");
-        // Must not panic; the citation has no verbatim quote, so it is reported missing.
-        let missing = validate_kanoon_quotes(&response);
-        assert!(
-            missing.iter().any(|t| t.contains("केस")),
-            "expected the uncited Devanagari case flagged, got {missing:?}"
-        );
     }
 
     #[test]

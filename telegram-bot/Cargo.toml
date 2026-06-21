@@ -15,7 +15,7 @@ description = "Thin Telegram front-end for the Mike aur Donna /chat endpoint"
 # and is not in Teloxide's default feature set; ctrlc_handler + native-tls are.
 teloxide = { path = "../../teloxide-master/crates/teloxide", features = ["macros"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
 serde_json = "1"
 futures-util = "0.3"
 anyhow = "1"

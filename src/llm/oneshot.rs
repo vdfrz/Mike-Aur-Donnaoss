@@ -44,6 +44,37 @@ pub async fn complete(config: &OneshotConfig, system: &str, user_msg: &str) -> R
     }
 }
 
+/// Like [`complete`], but raises the local provider's output-token cap. The
+/// default one-shot local cap is 512, which truncates large structured replies
+/// (e.g. statute section extraction). Claude and Gemini already allow large
+/// outputs, so only the local path needs the override.
+pub async fn complete_with_max(
+    config: &OneshotConfig,
+    system: &str,
+    user_msg: &str,
+    max_tokens: u32,
+) -> Result<String> {
+    let params = StreamParams {
+        model: config.model.clone(),
+        system_prompt: system.to_string(),
+        system_volatile: String::new(),
+        messages: vec![Message::user(user_msg.to_string())],
+        tools: vec![],
+        max_iterations: 1,
+        enable_thinking: false,
+        local_config: config.local_config.clone(),
+        claude_api_key: config.claude_api_key.clone(),
+        gemini_api_key: config.gemini_api_key.clone(),
+        gemini_region: config.gemini_region.clone(),
+    };
+
+    match llm::provider_for_model(&config.model) {
+        llm::Provider::Claude => llm::claude::complete(params).await,
+        llm::Provider::OpenAI => llm::local::complete_with_max(params, max_tokens).await,
+        llm::Provider::Gemini => llm::gemini::complete(params).await,
+    }
+}
+
 /// Build a `OneshotConfig` from a user's saved LLM settings.
 pub fn config_from_settings(settings: &Option<LlmSettings>) -> OneshotConfig {
     let (model, local_config) = resolve_analysis_model(settings);

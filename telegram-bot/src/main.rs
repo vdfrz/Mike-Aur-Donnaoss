@@ -28,11 +28,9 @@ use anyhow::{anyhow, Result};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 use teloxide::{
-    net::Download,
     prelude::*,
     types::{
-        CallbackQuery, ChatAction, FileId, InlineKeyboardButton, InlineKeyboardMarkup, InputFile,
-        MessageId,
+        CallbackQuery, ChatAction, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, MessageId,
     },
     utils::command::BotCommands,
 };
@@ -40,21 +38,6 @@ use tokio::sync::{oneshot, Mutex};
 
 /// Telegram rejects messages longer than 4096 characters.
 const TELEGRAM_LIMIT: usize = 4096;
-
-/// Largest `.docx` the bot will accept for redlining. Sized to a real pleading
-/// bundle plus headroom (a few-hundred-page brief is only a few MB), kept as the
-/// single source of truth so the gate and the post-download check agree.
-const MAX_DOC_BYTES: usize = 20 * 1024 * 1024;
-
-/// The Word `.docx` MIME type, used both to gate uploads and to label the
-/// multipart part we POST to the backend.
-const DOCX_MIME: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-
-/// Reply when the user sends a non-`.docx` document to redline. Caught bot-side
-/// so the user isn't bounced through an upload first (mirrors the backend
-/// `edit_document` guard in `builtin_tools.rs`).
-const DOCX_ONLY_MSG: &str =
-    "I can only redline Word `.docx` files for now — please re-send as `.docx`.";
 
 /// Keep at most this many messages (user + assistant) per chat, dropping the
 /// oldest. ~20 turns of back-and-forth context handed to the backend each call.
@@ -145,6 +128,28 @@ struct BotConfig {
     model: Option<String>,
 }
 
+/// Sentinel error text meaning "the backend rejected our token (401)".
+/// `handle_text` matches on it to drop the stale per-chat token and nudge the
+/// user to `/login` again, instead of surfacing a raw "backend returned 401".
+const AUTH_ERR: &str =
+    "🔐 Session expired or you're not logged in — send /login <PIN> to continue.";
+
+/// Per-Telegram-chat Mike session token, set by `/login <PIN>`. A newtype so
+/// dptree injects it distinctly from the other `ChatId → String` maps below.
+#[derive(Clone, Default)]
+struct Tokens(Arc<Mutex<HashMap<ChatId, String>>>);
+
+/// Telegram chat → the Mike `chat_id` it's attached to, so messages land in the
+/// same persisted thread as the laptop. Set by resuming via `/chats`, or
+/// captured from the stream's `chat_id` event when a fresh thread is created.
+#[derive(Clone, Default)]
+struct ActiveChats(Arc<Mutex<HashMap<ChatId, String>>>);
+
+/// Per-chat cache of `document_id → filename` from the last `/docs` listing, so
+/// a tapped document is delivered to the phone with its real name.
+#[derive(Clone, Default)]
+struct DocNames(Arc<Mutex<HashMap<ChatId, HashMap<String, String>>>>);
+
 // ---------------------------------------------------------------------------
 // Clarifying-question model (mirrors the backend `ask_clarifying_questions`
 // tool schema and the `/chat/client-tool-result` contract).
@@ -226,8 +231,16 @@ enum Command {
     Reset,
     #[command(description = "cancel a pending clarifying question")]
     Cancel,
-    #[command(description = "teach Mike a lasting rule: /remember <text>")]
-    Remember(String),
+    #[command(description = "log in with your Mike PIN: /login <PIN>")]
+    Login(String),
+    #[command(description = "log out — clear this chat's saved session")]
+    Logout,
+    #[command(description = "list & resume one of your saved conversations")]
+    Chats,
+    #[command(description = "start a fresh conversation")]
+    New,
+    #[command(description = "list & download your documents")]
+    Docs,
 }
 
 #[tokio::main]
@@ -254,18 +267,47 @@ async fn main() {
     tracing::info!("Mike telegram bot starting — backend at {}", cfg.api_url);
     if cfg.session_token.is_empty() {
         tracing::warn!(
-            "MIKE_SESSION_TOKEN is empty — calls will only succeed if the backend \
-             runs with MIKE_BYPASS_AUTH=true."
+            "MIKE_SESSION_TOKEN is empty — users must authenticate in-chat with \
+             /login <PIN>, unless the backend runs with MIKE_BYPASS_AUTH=true."
         );
     }
 
     let bot = Bot::new(token);
 
+    // Consistent branding across every self-hosted install: the slash-command
+    // menu and the profile blurbs are set from code at startup, so each cloned
+    // bot looks the same with no manual BotFather steps. (The avatar is the one
+    // exception — it's BotFather-only; see telegram-bot/assets/README.md.)
+    // Failures are non-fatal (e.g. Telegram rate limits), so log and carry on.
+    if let Err(e) = bot.set_my_commands(Command::bot_commands()).await {
+        tracing::warn!("could not set the command menu: {e}");
+    }
+    if let Err(e) = bot
+        .set_my_short_description()
+        .short_description("Donna — your Mike aur Donna legal assistant on Telegram.")
+        .await
+    {
+        tracing::warn!("could not set the short description: {e}");
+    }
+    if let Err(e) = bot
+        .set_my_description()
+        .description(
+            "Donna is the Telegram half of Mike aur Donna, your local legal assistant. \
+             Send /login <PIN> to connect to your account, then ask a question, use /chats \
+             to continue a conversation from your laptop, or /docs to download a draft.",
+        )
+        .await
+    {
+        tracing::warn!("could not set the description: {e}");
+    }
+
     let history: History = Arc::new(Mutex::new(HashMap::new()));
     let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
     let warned: Warned = Arc::new(Mutex::new(HashSet::new()));
     let in_flight: InFlight = Arc::new(StdMutex::new(HashSet::new()));
-    let redlines: Redlines = Arc::new(Mutex::new(HashMap::new()));
+    let tokens = Tokens::default();
+    let active = ActiveChats::default();
+    let docnames = DocNames::default();
 
     let handler = dptree::entry()
         .branch(
@@ -280,7 +322,9 @@ async fn main() {
         .branch(Update::filter_callback_query().endpoint(handle_callback));
 
     Dispatcher::builder(bot, handler)
-        .dependencies(dptree::deps![cfg, history, pending, warned, in_flight, redlines])
+        .dependencies(dptree::deps![
+            cfg, history, pending, warned, in_flight, tokens, active, docnames
+        ])
         // Process every update concurrently (not serialized per chat) so a
         // button tap can be handled *while* its `handle_text` is still parked
         // waiting for that tap — otherwise the two would deadlock.
@@ -291,10 +335,8 @@ async fn main() {
         .await;
 }
 
-/// `/start`, `/help`, `/reset`, `/cancel` — static / state-only, no backend
-/// round-trip (except `/cancel`, which wakes a waiting clarify flow).
-// dptree injects every handler argument by type; allow the extra one.
-#[allow(clippy::too_many_arguments)]
+/// Slash commands. Most are state-only; `/login`, `/chats` and `/docs` hit the
+/// backend (delegated to helpers below).
 async fn handle_command(
     bot: Bot,
     msg: Message,
@@ -303,58 +345,96 @@ async fn handle_command(
     history: History,
     pending: Pending,
     warned: Warned,
-    redlines: Redlines,
+    tokens: Tokens,
+    active: ActiveChats,
+    docnames: DocNames,
 ) -> ResponseResult<()> {
-    let text = match cmd {
-        Command::Start => "👋 Mike aur Donna legal assistant.\n\n\
-             Send me a question and I'll route it through your local backend \
-             (research, drafting, and more). Use /help for details."
-            .to_string(),
-        Command::Help => "Send any message and I'll forward it to your Mike backend and stream \
-             the answer back here. Long answers are split across messages.\n\n\
-             If I need a decision before drafting, I'll show tappable buttons — \
-             pick one (or several, then ✅ Done) and I'll continue.\n\n\
-             /start — welcome message\n/help — this text\n\
-             /reset — clear this chat's conversation history\n\
-             /cancel — drop a pending clarifying question\n\
-             /remember <text> — teach me a lasting rule I'll keep in mind"
-            .to_string(),
+    match cmd {
+        Command::Start => {
+            bot.send_message(
+                msg.chat.id,
+                "👋 Mike aur Donna legal assistant.\n\n\
+                 First, log in so I act as you and sync with your laptop:\n\
+                 /login <your PIN>\n\n\
+                 Then send a question, or use /chats to continue a laptop \
+                 conversation and /docs to pull a draft to your phone. \
+                 See /help for the full list.",
+            )
+            .await?;
+        }
+        Command::Help => {
+            bot.send_message(
+                msg.chat.id,
+                "Send any message and I'll forward it to your Mike backend and \
+                 stream the answer back. Long answers are split across messages. \
+                 If I need a decision before drafting, I'll show tappable buttons.\n\n\
+                 /login <PIN> — log in (syncs me with your laptop account)\n\
+                 /logout — clear this chat's saved session\n\
+                 /chats — list & resume a saved conversation\n\
+                 /new — start a fresh conversation\n\
+                 /docs — list & download your documents\n\
+                 /reset — clear this chat's in-memory history\n\
+                 /cancel — drop a pending clarifying question\n\
+                 /start — welcome message",
+            )
+            .await?;
+        }
         Command::Reset => {
             history.lock().await.remove(&msg.chat.id);
             warned.lock().await.remove(&msg.chat.id);
-            redlines.lock().await.remove(&msg.chat.id);
-            "🧹 Conversation history cleared.".to_string()
+            bot.send_message(msg.chat.id, "🧹 In-memory history cleared.")
+                .await?;
         }
         Command::Cancel => {
             let entry = pending.lock().await.remove(&msg.chat.id);
-            match entry {
+            let text = match entry {
                 Some(entry) => {
                     // Clear the dangling keyboard and wake the parked call_chat.
                     let _ = bot
                         .edit_message_text(msg.chat.id, entry.keyboard_msg, "🚫 Cancelled.")
                         .await;
                     let _ = entry.tx.send(ClarifyOutcome::Cancelled);
-                    "🚫 Cancelled — tell me what you'd like to do instead.".to_string()
+                    "🚫 Cancelled — tell me what you'd like to do instead."
                 }
-                None => "Nothing to cancel right now.".to_string(),
-            }
+                None => "Nothing to cancel right now.",
+            };
+            bot.send_message(msg.chat.id, text).await?;
         }
-        Command::Remember(rule) => {
-            // Sends its own confirmation/usage/error reply, so return early
-            // instead of falling through to the trailing send_message.
-            remember_rule(&bot, msg.chat.id, &cfg, rule.trim()).await?;
-            return Ok(());
+        Command::Login(pin) => cmd_login(&bot, &msg, &cfg, &tokens, &pin).await?,
+        Command::Logout => {
+            tokens.0.lock().await.remove(&msg.chat.id);
+            active.0.lock().await.remove(&msg.chat.id);
+            bot.send_message(
+                msg.chat.id,
+                "👋 Logged out. Send /login <PIN> when you want to continue.",
+            )
+            .await?;
         }
-    };
-    bot.send_message(msg.chat.id, text).await?;
+        Command::New => {
+            history.lock().await.remove(&msg.chat.id);
+            warned.lock().await.remove(&msg.chat.id);
+            active.0.lock().await.remove(&msg.chat.id);
+            bot.send_message(
+                msg.chat.id,
+                "🆕 Started a new conversation. It'll appear on your laptop once \
+                 you send your first message.",
+            )
+            .await?;
+        }
+        Command::Chats => {
+            let cfg2 = with_token(&cfg, resolve_token(&tokens, msg.chat.id, &cfg).await);
+            cmd_chats(&bot, msg.chat.id, &cfg2).await?;
+        }
+        Command::Docs => {
+            let cfg2 = with_token(&cfg, resolve_token(&tokens, msg.chat.id, &cfg).await);
+            cmd_docs(&bot, msg.chat.id, &cfg2, &docnames).await?;
+        }
+    }
     Ok(())
 }
 
 /// Any non-command text message → forward to `/chat` with this chat's running
 /// history, reply with the answer (plus any drafts and a sources footnote).
-// dptree injects every handler argument by type, so these can't be bundled into
-// a struct without losing the injection — allow the extra arg.
-#[allow(clippy::too_many_arguments)]
 async fn handle_text(
     bot: Bot,
     msg: Message,
@@ -363,30 +443,14 @@ async fn handle_text(
     pending: Pending,
     warned: Warned,
     in_flight: InFlight,
-    redlines: Redlines,
+    tokens: Tokens,
+    active: ActiveChats,
 ) -> ResponseResult<()> {
-    // A document upload → redline review flow (handled before the text-only
-    // reject below, so a `.docx` no longer hits "I can only handle text…").
-    if msg.document().is_some() {
-        return handle_document(&bot, &msg, &cfg, &pending, &redlines).await;
-    }
-
     let Some(user_text) = msg.text().map(str::to_string) else {
         bot.send_message(msg.chat.id, "I can only handle text messages for now.")
             .await?;
         return Ok(());
     };
-
-    // If a document is parked awaiting "apply these as tracked changes?", an
-    // affirmation runs the apply step instead of a normal chat turn. A
-    // non-affirmation leaves it parked, so a later "yes" still works and an
-    // ordinary question is answered normally.
-    if is_affirmative(&user_text) {
-        let parked = redlines.lock().await.remove(&msg.chat.id);
-        if let Some(rl) = parked {
-            return apply_redline(&bot, &msg, &cfg, &pending, rl).await;
-        }
-    }
 
     // Don't start a new turn while this chat still owes an answer to a pending
     // clarifying question — it would clobber the live wizard's state.
@@ -412,14 +476,14 @@ async fn handle_text(
         return Ok(());
     };
 
-    // Conservative "teach Mike a lasting rule" trigger: a message that clearly
-    // states a standing instruction is sent to the Mike-listens harness instead
-    // of being answered as a normal chat turn. Plain questions never match.
-    // (After the in-flight guard so this teaching turn is serialized too.)
-    if looks_like_a_rule(&user_text) {
-        remember_rule(&bot, msg.chat.id, &cfg, &user_text).await?;
-        return Ok(());
-    }
+    // Authenticate as the logged-in user (per-chat token from /login), falling
+    // back to the static env token / bypass. Shadowing `cfg` means every backend
+    // call below — chat stream, clarify POST, document fetch — acts as that user.
+    let cfg = with_token(&cfg, resolve_token(&tokens, msg.chat.id, &cfg).await);
+
+    // The persisted thread this chat is attached to (if any), so the turn lands
+    // in the same conversation as the laptop.
+    let active_chat_id = active.0.lock().await.get(&msg.chat.id).cloned();
 
     // "typing…" indicator + a visible "waiting on Mike" status the user can see.
     // We delete it once the answer is ready, or turn it into the error message
@@ -444,12 +508,13 @@ async fn handle_text(
         (turns.clone(), dropped)
     };
 
-    match call_chat(&bot, msg.chat.id, &cfg, &pending, &messages, None).await {
+    match call_chat(&bot, msg.chat.id, &cfg, &pending, &messages, active_chat_id.clone()).await {
         Ok(outcome) => {
             let ChatOutcome {
                 reply: model_reply,
                 citations,
                 docs,
+                chat_id: new_chat_id,
                 cancelled,
             } = outcome;
 
@@ -460,6 +525,12 @@ async fn handle_text(
                     let _ = bot.delete_message(msg.chat.id, id).await;
                 }
                 return Ok(());
+            }
+
+            // Attach to the thread the backend used/created so the next message
+            // continues it (and the conversation shows up on the laptop too).
+            if let Some(cid) = new_chat_id {
+                active.0.lock().await.insert(msg.chat.id, cid);
             }
 
             // Persist the assistant turn (the model's bare text, without the
@@ -532,6 +603,11 @@ async fn handle_text(
             // Surface the failure to the user instead of silently dropping it —
             // turn the "waiting on Mike" status into the error (e.g. the 404).
             tracing::error!("chat call failed: {e:#}");
+            // A 401 means the per-chat token expired/invalid — drop it so the
+            // next /login re-authenticates cleanly.
+            if e.to_string() == AUTH_ERR {
+                tokens.0.lock().await.remove(&msg.chat.id);
+            }
             let text = format!("⚠️ {e}");
             match status_msg {
                 Some(id) => {
@@ -549,12 +625,32 @@ async fn handle_text(
 /// A button was tapped on a clarifying-question keyboard. Advance the wizard
 /// for this chat, editing the keyboard message in place, and — when the last
 /// question is answered — wake the parked `call_chat` with the assembled result.
-async fn handle_callback(bot: Bot, q: CallbackQuery, pending: Pending) -> ResponseResult<()> {
+async fn handle_callback(
+    bot: Bot,
+    q: CallbackQuery,
+    cfg: BotConfig,
+    tokens: Tokens,
+    history: History,
+    active: ActiveChats,
+    docnames: DocNames,
+    pending: Pending,
+    in_flight: InFlight,
+) -> ResponseResult<()> {
     let Some(chat_id) = q.message.as_ref().map(|m| m.chat().id) else {
         bot.answer_callback_query(q.id).await?;
         return Ok(());
     };
-    let Some(action) = q.data.as_deref().and_then(parse_callback) else {
+    let data = q.data.clone().unwrap_or_default();
+    // `/chats` and `/docs` buttons route here too; their callback data is
+    // namespaced so it never collides with the clarify keyboard (`q…`/`proceed`).
+    if let Some(id) = data.strip_prefix("chat:") {
+        return resume_chat(&bot, &q, chat_id, id, &cfg, &tokens, &history, &active, &in_flight)
+            .await;
+    }
+    if let Some(id) = data.strip_prefix("doc:") {
+        return deliver_doc(&bot, &q, chat_id, id, &cfg, &tokens, &docnames).await;
+    }
+    let Some(action) = parse_callback(&data) else {
         bot.answer_callback_query(q.id).await?;
         return Ok(());
     };
@@ -610,6 +706,364 @@ async fn handle_callback(bot: Bot, q: CallbackQuery, pending: Pending) -> Respon
                 let _ = entry.tx.send(outcome);
             }
             bot.answer_callback_query(q.id).await?;
+        }
+    }
+    Ok(())
+}
+
+/// The per-chat session token if the user has run `/login`, else the static
+/// `MIKE_SESSION_TOKEN` fallback (which may be empty when the backend runs with
+/// MIKE_BYPASS_AUTH=true).
+async fn resolve_token(tokens: &Tokens, chat_id: ChatId, cfg: &BotConfig) -> String {
+    tokens
+        .0
+        .lock()
+        .await
+        .get(&chat_id)
+        .filter(|t| !t.is_empty())
+        .cloned()
+        .unwrap_or_else(|| cfg.session_token.clone())
+}
+
+/// A copy of `cfg` whose `session_token` is the caller's resolved per-chat
+/// token, so the existing `cfg.session_token`-based helpers authenticate as
+/// that user without any signature changes.
+fn with_token(cfg: &BotConfig, token: String) -> BotConfig {
+    BotConfig {
+        session_token: token,
+        ..cfg.clone()
+    }
+}
+
+/// GET a JSON endpoint with the chat's bearer token. Maps a 401 to `AUTH_ERR`.
+async fn api_get_json(cfg: &BotConfig, path: &str) -> Result<Value> {
+    let url = format!(
+        "{}/{}",
+        cfg.api_url.trim_end_matches('/'),
+        path.trim_start_matches('/')
+    );
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .header("authorization", format!("Bearer {}", cfg.session_token))
+        .send()
+        .await
+        .map_err(|e| anyhow!("could not reach backend at {url}: {e}"))?;
+    let status = resp.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(anyhow!("{AUTH_ERR}"));
+    }
+    if !status.is_success() {
+        return Err(anyhow!("backend returned {status}"));
+    }
+    resp.json::<Value>()
+        .await
+        .map_err(|e| anyhow!("bad response from {url}: {e}"))
+}
+
+/// Truncate a button label so the keyboard stays tidy (char-safe).
+fn truncate_label(s: &str, max: usize) -> String {
+    let s = s.trim();
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let kept: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{kept}…")
+    }
+}
+
+/// `/login <PIN>` → unlock the backend, cache the returned session token for this
+/// chat, and scrub the PIN message. A visible message on every outcome.
+async fn cmd_login(
+    bot: &Bot,
+    msg: &Message,
+    cfg: &BotConfig,
+    tokens: &Tokens,
+    pin: &str,
+) -> ResponseResult<()> {
+    let pin = pin.trim();
+    if pin.is_empty() {
+        bot.send_message(msg.chat.id, "Usage: /login <your PIN>")
+            .await?;
+        return Ok(());
+    }
+    let url = format!("{}/auth/unlock", cfg.api_url.trim_end_matches('/'));
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .json(&json!({ "pin": pin }))
+        .send()
+        .await;
+
+    // Scrub the PIN message regardless of outcome — it's already on Telegram's
+    // servers, but don't leave it sitting in the visible chat history.
+    let _ = bot.delete_message(msg.chat.id, msg.id).await;
+
+    match resp {
+        Ok(r) if r.status().is_success() => {
+            let body = r.json::<Value>().await.unwrap_or(Value::Null);
+            match body.get("token").and_then(Value::as_str) {
+                Some(token) if !token.is_empty() => {
+                    tokens.0.lock().await.insert(msg.chat.id, token.to_string());
+                    bot.send_message(
+                        msg.chat.id,
+                        "✅ Logged in — I'm now acting as you and syncing with your \
+                         laptop. (I deleted your PIN message for safety.)\n\n\
+                         Try /chats to continue a laptop conversation, or just ask \
+                         a question.",
+                    )
+                    .await?;
+                }
+                _ => {
+                    bot.send_message(
+                        msg.chat.id,
+                        "⚠️ Login succeeded but the backend returned no token — \
+                         please try /login again.",
+                    )
+                    .await?;
+                }
+            }
+        }
+        Ok(r) => {
+            let code = r.status();
+            bot.send_message(
+                msg.chat.id,
+                format!("❌ Login failed ({code}). Check your PIN and try /login again."),
+            )
+            .await?;
+        }
+        Err(e) => {
+            bot.send_message(
+                msg.chat.id,
+                format!("⚠️ Couldn't reach the backend to log in: {e}"),
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+/// `/chats` → list the user's saved conversations as tappable buttons.
+async fn cmd_chats(bot: &Bot, chat_id: ChatId, cfg: &BotConfig) -> ResponseResult<()> {
+    const MAX: usize = 10;
+    match api_get_json(cfg, "/chat").await {
+        Ok(v) => {
+            let chats = v
+                .get("chats")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            if chats.is_empty() {
+                bot.send_message(
+                    chat_id,
+                    "You have no saved conversations yet — send a message to start one.",
+                )
+                .await?;
+                return Ok(());
+            }
+            let mut rows: Vec<Vec<InlineKeyboardButton>> = Vec::new();
+            for c in chats.iter().take(MAX) {
+                let Some(id) = c.get("id").and_then(Value::as_str) else {
+                    continue;
+                };
+                let title = c
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or("Untitled conversation");
+                rows.push(vec![InlineKeyboardButton::callback(
+                    truncate_label(title, 60),
+                    format!("chat:{id}"),
+                )]);
+            }
+            let mut text = "📂 Pick a conversation to continue here:".to_string();
+            if chats.len() > MAX {
+                text.push_str(&format!(
+                    "\n(showing the {MAX} most recent of {})",
+                    chats.len()
+                ));
+            }
+            bot.send_message(chat_id, text)
+                .reply_markup(InlineKeyboardMarkup::new(rows))
+                .await?;
+        }
+        Err(e) => {
+            bot.send_message(chat_id, format!("⚠️ {e}")).await?;
+        }
+    }
+    Ok(())
+}
+
+/// `/docs` → list the user's documents as tappable buttons, caching their names
+/// so a tap can deliver the file under its real filename.
+async fn cmd_docs(
+    bot: &Bot,
+    chat_id: ChatId,
+    cfg: &BotConfig,
+    docnames: &DocNames,
+) -> ResponseResult<()> {
+    const MAX: usize = 10;
+    match api_get_json(cfg, "/document").await {
+        Ok(v) => {
+            let docs = v
+                .get("documents")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            if docs.is_empty() {
+                bot.send_message(chat_id, "You have no documents yet.")
+                    .await?;
+                return Ok(());
+            }
+            let mut rows: Vec<Vec<InlineKeyboardButton>> = Vec::new();
+            let mut names: HashMap<String, String> = HashMap::new();
+            for d in docs.iter().take(MAX) {
+                let Some(id) = d.get("id").and_then(Value::as_str) else {
+                    continue;
+                };
+                let filename = d
+                    .get("filename")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or("document.docx");
+                names.insert(id.to_string(), filename.to_string());
+                rows.push(vec![InlineKeyboardButton::callback(
+                    truncate_label(filename, 60),
+                    format!("doc:{id}"),
+                )]);
+            }
+            docnames.0.lock().await.insert(chat_id, names);
+            let mut text = "📎 Tap a document to download it here:".to_string();
+            if docs.len() > MAX {
+                text.push_str(&format!(
+                    "\n(showing the {MAX} most recent of {})",
+                    docs.len()
+                ));
+            }
+            bot.send_message(chat_id, text)
+                .reply_markup(InlineKeyboardMarkup::new(rows))
+                .await?;
+        }
+        Err(e) => {
+            bot.send_message(chat_id, format!("⚠️ {e}")).await?;
+        }
+    }
+    Ok(())
+}
+
+/// A `chat:<id>` button → load that thread's messages, seed this chat's history
+/// with them, and attach to the thread so further messages continue it.
+async fn resume_chat(
+    bot: &Bot,
+    q: &CallbackQuery,
+    chat_id: ChatId,
+    mike_chat_id: &str,
+    cfg: &BotConfig,
+    tokens: &Tokens,
+    history: &History,
+    active: &ActiveChats,
+    in_flight: &InFlight,
+) -> ResponseResult<()> {
+    // Answer first so Telegram's button spinner clears within its ~10s deadline,
+    // before we do any backend round-trip.
+    bot.answer_callback_query(q.id.clone()).await?;
+
+    // Reseeding history must be mutually exclusive with a turn that's mid-flight,
+    // or we'd clobber the Vec that `call_chat` is appending to. Hold the same
+    // per-chat slot `handle_text` uses; if a turn is running, ask them to retry.
+    let Some(_guard) = try_acquire_inflight(in_flight, chat_id) else {
+        bot.send_message(
+            chat_id,
+            "⏳ I'm still answering your last message — tap the conversation again once it's done.",
+        )
+        .await?;
+        return Ok(());
+    };
+
+    let cfg2 = with_token(cfg, resolve_token(tokens, chat_id, cfg).await);
+    let path = format!("/chat/{mike_chat_id}/messages");
+    match api_get_json(&cfg2, &path).await {
+        Ok(v) => {
+            let mut turns: Vec<ChatMsg> = v
+                .get("messages")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|m| {
+                            let role = m.get("role").and_then(Value::as_str)?;
+                            if role != "user" && role != "assistant" {
+                                return None;
+                            }
+                            let content = m.get("content").and_then(Value::as_str)?;
+                            Some(ChatMsg {
+                                role: role.to_string(),
+                                content: content.to_string(),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let dropped = trim_history(&mut turns);
+            let n = turns.len();
+            history.lock().await.insert(chat_id, turns);
+            active
+                .0
+                .lock()
+                .await
+                .insert(chat_id, mike_chat_id.to_string());
+            // Be honest when the thread was longer than I can hold in context.
+            let note = if dropped > 0 {
+                format!(
+                    "✅ Resumed — kept the most recent {n} message(s) (dropped {dropped} older \
+                     to fit my memory limit). Keep going here; replies and new drafts also show \
+                     up on your laptop."
+                )
+            } else {
+                format!(
+                    "✅ Resumed — loaded {n} earlier message(s). Keep going here; replies and \
+                     new drafts also show up on your laptop."
+                )
+            };
+            bot.send_message(chat_id, note).await?;
+        }
+        Err(e) => {
+            bot.send_message(chat_id, format!("⚠️ Couldn't load that conversation: {e}"))
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+/// A `doc:<id>` button → download the document and deliver it as a Word file.
+async fn deliver_doc(
+    bot: &Bot,
+    q: &CallbackQuery,
+    chat_id: ChatId,
+    document_id: &str,
+    cfg: &BotConfig,
+    tokens: &Tokens,
+    docnames: &DocNames,
+) -> ResponseResult<()> {
+    let cfg2 = with_token(cfg, resolve_token(tokens, chat_id, cfg).await);
+    let filename = docnames
+        .0
+        .lock()
+        .await
+        .get(&chat_id)
+        .and_then(|m| m.get(document_id))
+        .cloned()
+        .unwrap_or_else(|| "document.docx".to_string());
+    bot.answer_callback_query(q.id.clone()).await?;
+    match fetch_document(&cfg2, document_id).await {
+        Ok(bytes) => {
+            let file = InputFile::memory(bytes).file_name(filename.clone());
+            bot.send_document(chat_id, file).await?;
+        }
+        Err(e) => {
+            tracing::error!("doc download failed for {document_id}: {e:#}");
+            bot.send_message(
+                chat_id,
+                format!("⚠️ Couldn't download {filename} — please try /docs again."),
+            )
+            .await?;
         }
     }
     Ok(())
@@ -827,6 +1281,9 @@ struct ChatOutcome {
     reply: String,
     citations: Vec<Citation>,
     docs: Vec<DocRef>,
+    /// The persisted `chat_id` the backend used/created for this turn (captured
+    /// from the stream's `chat_id` event), so we can keep continuing the thread.
+    chat_id: Option<String>,
     /// Set when the user `/cancel`led mid-clarification.
     cancelled: bool,
 }
@@ -849,25 +1306,26 @@ async fn call_chat(
     cfg: &BotConfig,
     pending: &Pending,
     messages: &[ChatMsg],
-    attach_doc: Option<&str>,
+    active_chat_id: Option<String>,
 ) -> Result<ChatOutcome> {
-    let mut msg_json: Vec<Value> = messages
+    let msg_json: Vec<Value> = messages
         .iter()
         .map(|m| json!({ "role": m.role, "content": m.content }))
         .collect();
-    // Carry an uploaded document to the backend as `files[].document_id` on the
-    // last message — the backend collects file ids across all messages and maps
-    // them to chat-local labels (doc-0, …) at chat.rs:4420.
-    if let (Some(doc_id), Some(last)) = (attach_doc, msg_json.last_mut()) {
-        last["files"] = json!([{ "document_id": doc_id }]);
-    }
     let mut body = json!({ "messages": msg_json });
     if let Some(model) = &cfg.model {
         body["model"] = json!(model);
     }
+    // Continue the attached thread (so it persists to the same conversation the
+    // laptop sees); omit it to let the backend create a fresh one.
+    if let Some(cid) = &active_chat_id {
+        body["chat_id"] = json!(cid);
+    }
 
     let client = reqwest::Client::new();
-    let url = format!("{}/chat/", cfg.api_url.trim_end_matches('/'));
+    // No trailing slash: axum's `nest("/chat", …)` matches `/chat`, and a
+    // trailing-slash `/chat/` 404s. Same for the `/chat` and `/document` GETs.
+    let url = format!("{}/chat", cfg.api_url.trim_end_matches('/'));
     let resp = client
         .post(&url)
         .header("authorization", format!("Bearer {}", cfg.session_token))
@@ -879,6 +1337,9 @@ async fn call_chat(
 
     if !resp.status().is_success() {
         let status = resp.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(anyhow!("{AUTH_ERR}"));
+        }
         let detail = resp.text().await.unwrap_or_default();
         return Err(anyhow!(
             "backend returned {status}: {}",
@@ -1054,6 +1515,11 @@ fn apply_sse_event(raw_event: &str, state: &mut StreamState) {
                     state.outcome.reply.push_str(t);
                 }
             }
+            Some("chat_id") => {
+                if let Some(c) = value.get("chatId").and_then(Value::as_str) {
+                    state.outcome.chat_id = Some(c.to_string());
+                }
+            }
             Some("doc_created") => {
                 let filename = value.get("filename").and_then(Value::as_str);
                 let document_id = value.get("document_id").and_then(Value::as_str);
@@ -1215,15 +1681,33 @@ async fn post_tool_result(
 }
 
 /// Download a generated draft as raw `.docx` bytes from the backend.
+///
+/// Drafts are markdown-first: `draft_document` persists only the markdown and
+/// the `.docx` is rendered on demand. So we first ask the backend to render the
+/// markdown to a stored `.docx` (`POST /document/:id/render-word`), then stream
+/// it. A 409 means there is no markdown to render (an uploaded file that already
+/// has stored bytes) — fine, we fall through to the download either way.
 async fn fetch_document(cfg: &BotConfig, document_id: &str) -> Result<Vec<u8>> {
-    let url = format!(
-        "{}/document/{}/docx",
-        cfg.api_url.trim_end_matches('/'),
-        document_id
-    );
-    let resp = reqwest::Client::new()
+    let client = reqwest::Client::new();
+    let base = cfg.api_url.trim_end_matches('/');
+    let auth = format!("Bearer {}", cfg.session_token);
+
+    let render_url = format!("{base}/document/{document_id}/render-word");
+    match client
+        .post(&render_url)
+        .header("authorization", auth.as_str())
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() || r.status() == reqwest::StatusCode::CONFLICT => {}
+        Ok(r) => tracing::warn!("render-word returned {} for {render_url}", r.status()),
+        Err(e) => tracing::warn!("could not reach backend at {render_url}: {e}"),
+    }
+
+    let url = format!("{base}/document/{document_id}/docx");
+    let resp = client
         .get(&url)
-        .header("authorization", format!("Bearer {}", cfg.session_token))
+        .header("authorization", auth.as_str())
         .send()
         .await
         .map_err(|e| anyhow!("could not reach backend at {url}: {e}"))?;
@@ -1234,412 +1718,6 @@ async fn fetch_document(cfg: &BotConfig, document_id: &str) -> Result<Vec<u8>> {
         .await
         .map(|b| b.to_vec())
         .map_err(|e| anyhow!("could not read document bytes: {e}"))
-}
-
-// ---------------------------------------------------------------------------
-// Memory (Loop M): teach Mike a lasting rule via the Mike-listens harness.
-// ---------------------------------------------------------------------------
-
-/// Conservative natural-language detector for a standing instruction. Matches a
-/// small fixed set of phrases only, so an ordinary question never false-fires.
-fn looks_like_a_rule(t: &str) -> bool {
-    let l = t.to_lowercase();
-    [
-        "remember",
-        "from now on",
-        "in future",
-        "in the future",
-        "always",
-        "never",
-    ]
-    .iter()
-    .any(|p| l.contains(p))
-}
-
-/// POST a rule to the backend's Mike-listens harness (`/mike-feedback/chat`,
-/// multipart field `message`). The harness learns it and auto-injects it into
-/// every future `/chat`; the bot only triggers. Failures surface visibly.
-async fn remember_rule(bot: &Bot, chat_id: ChatId, cfg: &BotConfig, text: &str) -> ResponseResult<()> {
-    if text.is_empty() {
-        bot.send_message(chat_id, "Usage: /remember <the rule you want me to keep>")
-            .await?;
-        return Ok(());
-    }
-    let url = format!("{}/mike-feedback/chat", cfg.api_url.trim_end_matches('/'));
-    let form = reqwest::multipart::Form::new().text("message", text.to_string());
-    let resp = reqwest::Client::new()
-        .post(&url)
-        .header("authorization", format!("Bearer {}", cfg.session_token))
-        .multipart(form)
-        .send()
-        .await;
-    match resp {
-        Ok(r) if r.status().is_success() => {
-            // Drain the SSE so the harness commit completes server-side; the bot
-            // doesn't need to parse it.
-            let _ = r.bytes().await;
-            bot.send_message(
-                chat_id,
-                "✅ Got it — I'll keep that in mind from now on. You can review or remove \
-                 your saved rules on the Personalization page (Mike listens).",
-            )
-            .await?;
-        }
-        Ok(r) if r.status().as_u16() == 401 => {
-            bot.send_message(
-                chat_id,
-                "⚠️ Couldn't save that — Mike rejected the request (auth). Check the bot's \
-                 session token / backend bypass and try again.",
-            )
-            .await?;
-        }
-        _ => {
-            bot.send_message(
-                chat_id,
-                "⚠️ Couldn't save that rule right now — please try again in a moment.",
-            )
-            .await?;
-        }
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Document redlining (Loop D): receive a `.docx` → rubric risk-review → confirm
-// → `edit_document` tracked changes → deliver the redlined file back.
-// ---------------------------------------------------------------------------
-
-/// A document uploaded and risk-reviewed, parked until the user confirms with
-/// "yes" so we can apply the tracked changes. Keyed by chat. Cleared on /reset.
-struct RedlinePending {
-    /// Backend document id (carried as `files[].document_id` into the apply turn).
-    document_id: String,
-    /// Original upload name, used to label the redlined file we send back.
-    filename: String,
-    /// The turn-1 review text, replayed as history so the apply turn has context.
-    review: String,
-}
-
-/// Per-chat documents awaiting an "apply these changes?" confirmation.
-type Redlines = Arc<Mutex<HashMap<ChatId, RedlinePending>>>;
-
-/// The routing decision for an incoming document, computed from plain values so
-/// it is unit-testable without teloxide or the network.
-#[derive(Debug, PartialEq)]
-enum DocGate {
-    /// A `.docx` with an instruction caption — run the redline flow.
-    Upload,
-    /// Wrong type or too large — reply with `msg` and stop.
-    Reject(String),
-    /// A `.docx` but no caption — ask the user what to review/change.
-    NeedCaption,
-}
-
-/// Gate an incoming document on (filename, mime, size, caption). Pure: no I/O.
-/// `.docx`-only (by extension, plus the docx MIME when Telegram provides one),
-/// under the size cap, and needs a caption (the instruction).
-fn gate_document(
-    file_name: Option<&str>,
-    mime: Option<&str>,
-    size: usize,
-    caption: Option<&str>,
-) -> DocGate {
-    let is_docx_name = file_name
-        .map(|n| n.to_ascii_lowercase().ends_with(".docx"))
-        .unwrap_or(false);
-    // When Telegram supplies a MIME, require the docx one; absence is allowed.
-    let mime_ok = mime.map(|m| m == DOCX_MIME).unwrap_or(true);
-    if !is_docx_name || !mime_ok {
-        return DocGate::Reject(DOCX_ONLY_MSG.to_string());
-    }
-    if size > MAX_DOC_BYTES {
-        return DocGate::Reject("That file is over the 20 MB limit.".to_string());
-    }
-    match caption {
-        Some(c) if !c.trim().is_empty() => DocGate::Upload,
-        _ => DocGate::NeedCaption,
-    }
-}
-
-/// Conservative "yes, apply it" detector for the redline confirm step. A plain
-/// follow-up question must NOT trigger an apply.
-fn is_affirmative(t: &str) -> bool {
-    let l = t.trim().to_lowercase();
-    matches!(
-        l.as_str(),
-        "yes" | "y" | "yep" | "yeah" | "yes please" | "ok" | "okay" | "apply" | "apply it"
-            | "go ahead" | "do it" | "sure"
-    ) || l.starts_with("yes")
-}
-
-/// Stream a Telegram file into memory via teloxide (no `io-util` feature needed),
-/// mirroring the byte-collection style already used elsewhere in the crate.
-async fn download_doc(bot: &Bot, file_id: &FileId) -> Result<Vec<u8>> {
-    let file = bot.get_file(file_id.clone()).await?;
-    let mut buf: Vec<u8> = Vec::new();
-    let mut stream = bot.download_file_stream(&file.path);
-    while let Some(chunk) = stream.next().await {
-        buf.extend_from_slice(&chunk?);
-    }
-    Ok(buf)
-}
-
-/// Upload the `.docx` bytes to the backend as multipart (`file` part +
-/// `cache=true` so `content_hash` is set and the chat-link survives) and return
-/// the new document id.
-async fn upload_doc(cfg: &BotConfig, bytes: Vec<u8>, filename: &str) -> Result<String> {
-    let part = reqwest::multipart::Part::bytes(bytes)
-        .file_name(filename.to_string())
-        .mime_str(DOCX_MIME)
-        .map_err(|e| anyhow!("bad multipart part: {e}"))?;
-    let form = reqwest::multipart::Form::new()
-        .part("file", part)
-        .text("cache", "true");
-    let url = format!("{}/document", cfg.api_url.trim_end_matches('/'));
-    let resp = reqwest::Client::new()
-        .post(&url)
-        .header("authorization", format!("Bearer {}", cfg.session_token))
-        .multipart(form)
-        .send()
-        .await
-        .map_err(|e| anyhow!("could not reach backend at {url}: {e}"))?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let detail = resp.text().await.unwrap_or_default();
-        return Err(anyhow!(
-            "upload returned {status}: {}",
-            detail.chars().take(200).collect::<String>()
-        ));
-    }
-    let v: Value = resp
-        .json()
-        .await
-        .map_err(|e| anyhow!("bad upload response: {e}"))?;
-    v.get("id")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .ok_or_else(|| anyhow!("upload response missing id"))
-}
-
-/// Handle a `.docx` upload: gate → download → upload → turn-1 rubric review →
-/// ask to confirm, parking the doc for the follow-up "yes".
-async fn handle_document(
-    bot: &Bot,
-    msg: &Message,
-    cfg: &BotConfig,
-    pending: &Pending,
-    redlines: &Redlines,
-) -> ResponseResult<()> {
-    let chat_id = msg.chat.id;
-    let Some(doc) = msg.document() else {
-        return Ok(());
-    };
-
-    let mime_owned = doc.mime_type.as_ref().map(|m| m.essence_str().to_string());
-    match gate_document(
-        doc.file_name.as_deref(),
-        mime_owned.as_deref(),
-        doc.file.size as usize,
-        msg.caption(),
-    ) {
-        DocGate::Reject(m) => {
-            bot.send_message(chat_id, m).await?;
-            return Ok(());
-        }
-        DocGate::NeedCaption => {
-            bot.send_message(
-                chat_id,
-                "Send the `.docx` again with a caption telling me what to review or \
-                 change (e.g. 'risk-review this settlement').",
-            )
-            .await?;
-            return Ok(());
-        }
-        DocGate::Upload => {}
-    }
-
-    let file_id = doc.file.id.clone();
-    let filename = doc
-        .file_name
-        .clone()
-        .unwrap_or_else(|| "document.docx".to_string());
-    let caption = msg.caption().unwrap_or("").trim().to_string();
-
-    let _ = bot.send_chat_action(chat_id, ChatAction::Typing).await;
-    let status = bot
-        .send_message(chat_id, "📄 Got the file — running a risk review…")
-        .await
-        .ok()
-        .map(|m| m.id);
-
-    // Download from Telegram (re-check the real byte length against the cap).
-    let bytes = match download_doc(bot, &file_id).await {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::error!("doc download failed: {e:#}");
-            let t = "⚠️ Couldn't download that file from Telegram — please try again.";
-            send_or_edit(bot, chat_id, status, t).await?;
-            return Ok(());
-        }
-    };
-    if bytes.len() > MAX_DOC_BYTES {
-        send_or_edit(bot, chat_id, status, "That file is over the 20 MB limit.").await?;
-        return Ok(());
-    }
-
-    // Upload to the backend.
-    let document_id = match upload_doc(cfg, bytes, &filename).await {
-        Ok(id) => id,
-        Err(e) => {
-            tracing::error!("upload failed: {e:#}");
-            send_or_edit(
-                bot,
-                chat_id,
-                status,
-                "⚠️ Couldn't upload that document to Mike — please try again.",
-            )
-            .await?;
-            return Ok(());
-        }
-    };
-
-    // Turn 1 — review only, no edits yet.
-    let review_prompt = format!(
-        "Risk-review this uploaded document against the litigation risk rubric. \
-         Produce the risk table only — do NOT edit yet.\n\nUser instruction: {caption}"
-    );
-    let turns = vec![ChatMsg {
-        role: "user".to_string(),
-        content: review_prompt,
-    }];
-    let outcome = match call_chat(bot, chat_id, cfg, pending, &turns, Some(&document_id)).await {
-        Ok(o) => o,
-        Err(e) => {
-            send_or_edit(bot, chat_id, status, &format!("⚠️ {e}")).await?;
-            return Ok(());
-        }
-    };
-
-    if let Some(id) = status {
-        let _ = bot.delete_message(chat_id, id).await;
-    }
-
-    let review = if outcome.reply.trim().is_empty() {
-        "(the backend returned an empty review)".to_string()
-    } else {
-        outcome.reply
-    };
-    for chunk in split_for_telegram(&review) {
-        bot.send_message(chat_id, chunk).await?;
-    }
-    bot.send_message(chat_id, "Apply these as tracked changes? Reply 'yes'.")
-        .await?;
-
-    redlines.lock().await.insert(
-        chat_id,
-        RedlinePending {
-            document_id,
-            filename,
-            review,
-        },
-    );
-    Ok(())
-}
-
-/// Turn 2 — the user confirmed: instruct `edit_document` to apply the proposed
-/// fixes as tracked changes, then deliver the redlined `.docx` back.
-async fn apply_redline(
-    bot: &Bot,
-    msg: &Message,
-    cfg: &BotConfig,
-    pending: &Pending,
-    rl: RedlinePending,
-) -> ResponseResult<()> {
-    let chat_id = msg.chat.id;
-    let _ = bot.send_chat_action(chat_id, ChatAction::Typing).await;
-    let status = bot
-        .send_message(chat_id, "✍️ Applying tracked changes…")
-        .await
-        .ok()
-        .map(|m| m.id);
-
-    let turns = vec![
-        ChatMsg {
-            role: "user".to_string(),
-            content: "Risk-review this uploaded document and propose tracked-change edits."
-                .to_string(),
-        },
-        ChatMsg {
-            role: "assistant".to_string(),
-            content: rl.review.clone(),
-        },
-        ChatMsg {
-            role: "user".to_string(),
-            content: "Apply your proposed fixes to the uploaded Word file as tracked changes \
-                      now using edit_document (doc_id \"doc-0\")."
-                .to_string(),
-        },
-    ];
-    let outcome = match call_chat(bot, chat_id, cfg, pending, &turns, Some(&rl.document_id)).await {
-        Ok(o) => o,
-        Err(e) => {
-            send_or_edit(bot, chat_id, status, &format!("⚠️ {e}")).await?;
-            return Ok(());
-        }
-    };
-
-    if let Some(id) = status {
-        let _ = bot.delete_message(chat_id, id).await;
-    }
-
-    // Relay the model's reply — it surfaces any `edit_document` error
-    // (e.g. clause-not-found) in prose rather than dropping it silently.
-    let reply = if outcome.reply.trim().is_empty() {
-        "Done — here is the redlined document.".to_string()
-    } else {
-        outcome.reply
-    };
-    for chunk in split_for_telegram(&reply) {
-        bot.send_message(chat_id, chunk).await?;
-    }
-
-    // Deliver the edited file (edit_document updated its storage_path).
-    match fetch_document(cfg, &rl.document_id).await {
-        Ok(bytes) => {
-            let out_name = format!("redlined-{}", rl.filename);
-            let file = InputFile::memory(bytes).file_name(out_name);
-            bot.send_document(chat_id, file).await?;
-        }
-        Err(e) => {
-            tracing::error!("redlined fetch failed for {}: {e:#}", rl.document_id);
-            bot.send_message(
-                chat_id,
-                "⚠️ Applied the review, but couldn't fetch the edited file — please try again.",
-            )
-            .await?;
-        }
-    }
-    Ok(())
-}
-
-/// Edit an existing status message in place, or send a fresh one if there isn't
-/// one — used so an error replaces the "running…" placeholder instead of
-/// leaving it dangling.
-async fn send_or_edit(
-    bot: &Bot,
-    chat_id: ChatId,
-    status: Option<MessageId>,
-    text: &str,
-) -> ResponseResult<()> {
-    match status {
-        Some(id) => {
-            let _ = bot.edit_message_text(chat_id, id, text).await;
-        }
-        None => {
-            bot.send_message(chat_id, text).await?;
-        }
-    }
-    Ok(())
 }
 
 /// Split a reply into <=4096-char chunks, preferring line boundaries so a long
@@ -1679,62 +1757,6 @@ fn split_for_telegram(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn gate_docx_with_caption_uploads() {
-        assert_eq!(
-            gate_document(Some("Brief.docx"), Some(DOCX_MIME), 1024, Some("risk-review this")),
-            DocGate::Upload
-        );
-    }
-
-    #[test]
-    fn gate_pdf_rejected_with_docx_message() {
-        match gate_document(Some("scan.pdf"), Some("application/pdf"), 1024, Some("review")) {
-            DocGate::Reject(m) => assert!(m.to_lowercase().contains("docx")),
-            other => panic!("expected Reject, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn gate_oversize_docx_rejected() {
-        match gate_document(Some("big.docx"), Some(DOCX_MIME), MAX_DOC_BYTES + 1, Some("review")) {
-            DocGate::Reject(m) => assert!(m.contains("20 MB")),
-            other => panic!("expected size Reject, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn gate_docx_without_caption_needs_caption() {
-        assert_eq!(
-            gate_document(Some("brief.docx"), None, 1024, Some("   ")),
-            DocGate::NeedCaption
-        );
-        assert_eq!(
-            gate_document(Some("brief.docx"), None, 1024, None),
-            DocGate::NeedCaption
-        );
-    }
-
-    #[test]
-    fn affirmative_detects_yes_not_questions() {
-        assert!(is_affirmative("yes"));
-        assert!(is_affirmative("Yes, apply it"));
-        assert!(is_affirmative("  OK  "));
-        assert!(!is_affirmative("what risks did you find?"));
-        assert!(!is_affirmative("no, leave it"));
-    }
-
-    #[test]
-    fn looks_like_a_rule_ignores_questions_catches_instructions() {
-        // The reproducible no-false-trigger guard (Loop M check 3).
-        assert!(!looks_like_a_rule(
-            "What is the limitation period to file a written statement?"
-        ));
-        assert!(looks_like_a_rule("From now on, never omit the verification clause."));
-        assert!(looks_like_a_rule("Remember to cite the section number."));
-        assert!(!looks_like_a_rule("I want to draft a contract."));
-    }
 
     #[test]
     fn accumulates_content_delta_in_order() {
