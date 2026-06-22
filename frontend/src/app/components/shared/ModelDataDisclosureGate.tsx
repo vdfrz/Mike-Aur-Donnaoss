@@ -23,42 +23,45 @@
 
 import { useEffect, useState } from "react";
 import { MikeIcon } from "@/components/chat/mike-icon";
+import { useSelectedModel } from "@/app/hooks/useSelectedModel";
 
-const ACK_KEY = "mike_legal_disclosure_ack_v1";
 // Takedown / data-rights contact.
 const CONTACT = "vedantopensource@gmail.com";
 
-export function hasAcknowledgedModelDisclosure(): boolean {
-    if (typeof window === "undefined") return false;
-    return window.localStorage.getItem(ACK_KEY) === "1";
-}
-
-export default function ModelDataDisclosureGate({
-    onAcknowledge,
-    onUseCloud,
-}: {
-    onAcknowledge: () => void;
-    onUseCloud?: () => void;
-}) {
+/**
+ * Global, self-contained disclosure gate. Pops EVERY time mike-legal becomes
+ * the selected model (re-armed on each model change), anywhere in the app, so
+ * it is not tied to the chat view. Mounted once in <Providers>.
+ */
+export default function ModelDataDisclosureGate() {
+    const [selectedModel, setSelectedModel] = useSelectedModel();
+    const [acked, setAcked] = useState(false);
     const [checked, setChecked] = useState(false);
 
-    // Lock background scroll while the gate is open.
+    // Re-arm on every model change: switching to (or re-selecting) mike-legal
+    // always re-shows the disclosure.
     useEffect(() => {
+        setAcked(false);
+        setChecked(false);
+    }, [selectedModel]);
+
+    const visible = selectedModel === "local:mike-legal" && !acked;
+
+    // Lock background scroll only while the gate is open.
+    useEffect(() => {
+        if (!visible) return;
         const prev = document.body.style.overflow;
         document.body.style.overflow = "hidden";
         return () => {
             document.body.style.overflow = prev;
         };
-    }, []);
+    }, [visible]);
+
+    if (!visible) return null;
 
     function accept() {
         if (!checked) return;
-        try {
-            window.localStorage.setItem(ACK_KEY, "1");
-        } catch {
-            /* storage may be unavailable; still let them proceed this session */
-        }
-        onAcknowledge();
+        setAcked(true);
     }
 
     return (
@@ -165,28 +168,19 @@ export default function ModelDataDisclosureGate({
                     </label>
 
                     <div className="mt-4 flex items-center justify-end gap-3">
-                        {onUseCloud && (
-                            <button
-                                type="button"
-                                onClick={onUseCloud}
-                                className="rounded-[8px] px-3 py-2 text-[13px] text-muted-foreground transition-colors hover:text-foreground"
-                            >
-                                Use a cloud model instead
-                            </button>
-                        )}
+                        <button
+                            type="button"
+                            onClick={() => setSelectedModel("local:deepseek-v4-flash")}
+                            className="rounded-[8px] px-3 py-2 text-[13px] text-muted-foreground transition-colors hover:text-foreground"
+                        >
+                            Use a cloud model instead
+                        </button>
                         <button
                             type="button"
                             onClick={accept}
                             disabled={!checked}
                             aria-disabled={!checked}
-                            className="rounded-[8px] px-4 py-2 text-[13px] font-medium text-white transition-colors disabled:cursor-not-allowed disabled:opacity-50"
-                            style={{ background: "var(--blue)" }}
-                            onMouseEnter={(e) => {
-                                if (checked) e.currentTarget.style.background = "var(--blue-700)";
-                            }}
-                            onMouseLeave={(e) => {
-                                e.currentTarget.style.background = "var(--blue)";
-                            }}
+                            className="rounded-[8px] bg-foreground px-4 py-2 text-[13px] font-medium text-background transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
                         >
                             I understand, continue
                         </button>
