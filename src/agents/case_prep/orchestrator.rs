@@ -218,6 +218,16 @@ pub async fn analyze_case(
         let doc_map = doc_text_map.clone();
         let tx = progress_tx.clone();
         let mut full_prompt = format!("{}\n\n{}", super::INDIAN_LEGAL_CONTEXT, system_prompt);
+        // Layer the litigation-risk rubric onto the risk + strategy agents so they
+        // screen against the same HIGH/MED/LOW + side taxonomy as the chat
+        // assistant. Re-assert the JSON-only contract so the prose rubric never
+        // tips the model into emitting a triage table instead of the schema.
+        if matches!(agent_name, "risk_assessor" | "strategy_recommender") {
+            full_prompt = format!(
+                "{full_prompt}\n\n---\n\n{}\n\nUSE THE RUBRIC ABOVE to broaden and prioritise what you flag, and record each item's severity (HIGH/MED/LOW) and the side it helps vs hurts inside the JSON fields (e.g. begin the description with \"[HIGH | hurts petitioner] ...\"). Still output ONLY the JSON object specified earlier — no prose, no tables, no markdown fences.",
+                super::LITIGATION_RISK_RUBRIC_BLOCK
+            );
+        }
         if !prefs_prompt.is_empty() {
             full_prompt = format!("{full_prompt}\n\n---\n\n{prefs_prompt}");
         }

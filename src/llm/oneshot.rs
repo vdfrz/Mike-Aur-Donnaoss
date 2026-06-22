@@ -44,10 +44,13 @@ pub async fn complete(config: &OneshotConfig, system: &str, user_msg: &str) -> R
     }
 }
 
-/// Like [`complete`], but raises the local provider's output-token cap. The
-/// default one-shot local cap is 512, which truncates large structured replies
-/// (e.g. statute section extraction). Claude and Gemini already allow large
-/// outputs, so only the local path needs the override.
+/// Like [`complete`], but raises every provider's output-token cap to
+/// `max_tokens`. The default one-shot cap is 512 for the local and Claude paths
+/// (Gemini defaults to 8192), which silently truncates large structured replies
+/// (case briefs, statute section extraction). Each provider's `complete_with_max`
+/// appends a `[…truncated at token limit]` marker if the model still stops on
+/// the cap, so a clipped result is never shipped silently. Mirrors the
+/// per-provider routing in `summarize.rs`.
 pub async fn complete_with_max(
     config: &OneshotConfig,
     system: &str,
@@ -69,9 +72,9 @@ pub async fn complete_with_max(
     };
 
     match llm::provider_for_model(&config.model) {
-        llm::Provider::Claude => llm::claude::complete(params).await,
+        llm::Provider::Claude => llm::claude::complete_with_max(params, max_tokens).await,
         llm::Provider::OpenAI => llm::local::complete_with_max(params, max_tokens).await,
-        llm::Provider::Gemini => llm::gemini::complete(params).await,
+        llm::Provider::Gemini => llm::gemini::complete_with_max(params, max_tokens).await,
     }
 }
 

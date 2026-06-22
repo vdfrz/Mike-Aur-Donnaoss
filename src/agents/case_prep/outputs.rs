@@ -23,8 +23,37 @@ struct GeneratedOutput {
     docx_bytes: Vec<u8>,
 }
 
+/// Output-token budget for the case-prep generators. 8192 matches the streaming
+/// path (`llm::local::stream`) and DeepSeek's per-response ceiling — ample for a
+/// full brief / memo / list-of-dates. The default one-shot cap is only 512,
+/// which silently clipped these documents. If a model still stops on the cap,
+/// `complete_with_max` appends a marker we surface as a banner (see
+/// `surface_truncation`) so a clipped output is never mistaken for a complete one.
+const OUTPUT_MAX_TOKENS: u32 = 8192;
+
+/// Exact marker that every provider's `complete_with_max` (claude/gemini/local)
+/// appends when the model stops on its token cap. Matched to raise a
+/// document-level truncation banner. Kept as the full bracketed token so it
+/// cannot false-positive on case text that merely mentions truncation.
+const TRUNCATION_SENTINEL: &str = "[…truncated at token limit]";
+
 async fn call_llm(config: &OutputConfig, system: &str, user_msg: &str) -> Result<String> {
-    crate::llm::oneshot::complete(config, system, user_msg).await
+    crate::llm::oneshot::complete_with_max(config, system, user_msg, OUTPUT_MAX_TOKENS).await
+}
+
+/// Prepend a visible warning banner when the generated markdown carries the
+/// low-level truncation marker, so a document cut off at the model's output
+/// limit can never be shipped as if complete. Returns `md` unchanged otherwise.
+fn surface_truncation(md: String) -> String {
+    if md.contains(TRUNCATION_SENTINEL) {
+        format!(
+            "> **WARNING — OUTPUT TRUNCATED.** This document reached the model's output \
+             limit and is incomplete. Regenerate it (or split the case into fewer documents) \
+             before relying on it.\n\n{md}"
+        )
+    } else {
+        md
+    }
 }
 
 /// Score how strongly each candidate case actually supports a point of law.
@@ -141,18 +170,6 @@ fn format_findings_block(findings_json: &[serde_json::Value]) -> String {
     out
 }
 
-fn format_documents_block(documents: &[serde_json::Value]) -> String {
-    let mut out = String::new();
-    for (i, d) in documents.iter().enumerate() {
-        let filename = d.get("filename").and_then(|v| v.as_str()).unwrap_or("(unnamed)");
-        let dtype = d.get("document_type").and_then(|v| v.as_str()).unwrap_or("");
-        let pages = d.get("page_count").and_then(|v| v.as_i64());
-        let pages_str = pages.map(|p| format!(" | {p} page(s)")).unwrap_or_default();
-        out.push_str(&format!("{}. {filename} [{dtype}]{pages_str}\n", i + 1));
-    }
-    out
-}
-
 async fn persist_output(
     db: &SqlitePool,
     case_id: &str,
@@ -233,8 +250,15 @@ pub async fn generate_case_brief(
          ## Strategic Recommendations\n\
          ## Risk Assessment\n\n\
          Use **bold** for key terms. Use bullet lists for multi-item sections. \
+         Use Indian conventions throughout (cause-title \"X v Y\", honorifics Sh./Smt./Hon'ble, \
+         IPC/CrPC/IEA with BNS/BNSS/BSA equivalents in parentheses). \
          Include inline citations in the format [Agent: exact quote] when referencing agent findings. \
-         Every section must have substantive content drawn from the provided findings."
+         Every section must have substantive content drawn from the provided findings.\n\n\
+         RISK FRAMING — drive the Risk Assessment and Strategic Recommendations sections off this \
+         rubric. Tag each risk HIGH/MED/LOW and say which side it helps vs hurts, and surface \
+         statutory bars (limitation, jurisdiction, mandatory notices, non-joinder) PROACTIVELY \
+         even when they hurt the client:\n{}",
+        super::LITIGATION_RISK_RUBRIC_BLOCK
     );
 
     let user_msg = format!(
@@ -259,6 +283,7 @@ pub async fn generate_case_brief(
         }
     };
 
+    let content_md = surface_truncation(content_md);
     let resolved = crate::drafting::crossrefs::resolve_crossrefs(db, case_id, &content_md).await;
     let docx_bytes = markdown_to_docx("Case Brief", &resolved.markdown)?;
     let generated = GeneratedOutput { content_md, docx_bytes };
@@ -294,7 +319,11 @@ pub async fn generate_strategy_memo(
          Table format. One row per anticipated argument.\n\
          ## Required Research\n\
          Bullet list of precedents, statutes, or authorities still needed.\n\n\
-         Use **bold** for action items. Include inline citations [Agent: quote] from findings."
+         Use **bold** for action items. Include inline citations [Agent: quote] from findings.\n\n\
+         RISK FRAMING — when stating the primary risk and the opposition's moves, screen against \
+         this rubric; tag each risk HIGH/MED/LOW and which side it helps vs hurts, and flag statutory \
+         bars (limitation, jurisdiction, mandatory pre-conditions, non-joinder) PROACTIVELY:\n{}",
+        super::LITIGATION_RISK_RUBRIC_BLOCK
     );
 
     let user_msg = format!(
@@ -319,6 +348,7 @@ pub async fn generate_strategy_memo(
         }
     };
 
+    let content_md = surface_truncation(content_md);
     let resolved = crate::drafting::crossrefs::resolve_crossrefs(db, case_id, &content_md).await;
     let docx_bytes = markdown_to_docx("Strategy Memo", &resolved.markdown)?;
     let generated = GeneratedOutput { content_md, docx_bytes };
@@ -385,6 +415,7 @@ pub async fn generate_hearing_prep(
         }
     };
 
+    let content_md = surface_truncation(content_md);
     let resolved = crate::drafting::crossrefs::resolve_crossrefs(db, case_id, &content_md).await;
     let docx_bytes = markdown_to_docx("Hearing Preparation Brief", &resolved.markdown)?;
     let generated = GeneratedOutput { content_md, docx_bytes };
@@ -404,26 +435,27 @@ pub async fn generate_list_of_dates(
     config: &OutputConfig,
 ) -> Result<String> {
     let system = format!(
-        "You are a litigation associate preparing a \"List of Dates\" in Markdown, \
-         in the exact format used in Indian court pleadings (writ petitions, tribunal applications).\n\n\
+        "You are a litigation associate preparing a \"List of Dates and Events\" in Markdown, \
+         in the exact format used in Indian court pleadings and tribunal appeals (writ petitions, Original Applications, memoranda of appeal).\n\n\
          {NO_PROCESS_TEXT}\n\n\
-         FORMAT — output ONLY this table, with no synopsis, key points, or arguments:\n\
-         # List of Dates\n\
-         | Dates | Events |\n\
-         |---|---|\n\
-         One row per dated event, strictly chronological with the earliest first, Dates in DD.MM.YYYY format.\n\
-         - Begin with the statutory or contextual origin (when the governing Act, Rule or scheme came into force), \
-         then the specific events and impugned actions, ending with the filing of the present matter \
-         (e.g. \"Hence, the present Writ Petition / Original Application.\").\n\
-         - Write each event as a formal, factual full sentence in the third person, naming the relevant document \
-         by its exact identifier (Order No., Notification No., letter No. and date). State facts only — no argument.\n\
+         FORMAT — output ONLY this heading and table, with no synopsis, key points, or arguments:\n\
+         # List of Dates and Events\n\
+         | S. No. | Date | Particulars |\n\
+         |---|---|---|\n\
+         - One row per dated event, strictly chronological with the EARLIEST first; S. No. runs 1, 2, 3 ... in that order.\n\
+         - Dates in DD.MM.YYYY format. If only a month/year is known, use it as-is; if a date is genuinely unknown leave the Date cell blank — never invent one.\n\
+         - Begin with the statutory or contextual origin (when the governing Act, Rule or scheme came into force, or the foundational transaction), \
+         then the specific events and impugned actions/orders, ending with the filing of the present matter \
+         (final row Particulars e.g. \"Hence, the present Writ Petition / Original Application / Appeal.\").\n\
+         - Write each Particulars cell as a formal, factual full sentence in the third person, naming the relevant document \
+         by its exact identifier (Order No., Notification No., letter No., Form No.). State facts only — no argument.\n\
          - Use the parties' roles as in the record (Applicant, Respondent No. 1, etc.), \
          with an inline citation [Agent: quote] identifying the finding each event is drawn from.\n\
-         Do NOT invent dates or events. If the findings conflict on a date, note both."
+         Do NOT invent dates or events. If the findings conflict on a date, note both in the Particulars cell."
     );
 
     let user_msg = format!(
-        "Produce a Synopsis and List of Dates for case {case_id} using these agent findings:\n{}",
+        "Produce a List of Dates and Events for case {case_id} using these agent findings:\n{}",
         format_findings_block(findings)
     );
 
@@ -435,7 +467,7 @@ pub async fn generate_list_of_dates(
     } else {
         let retry_system = format!(
             "{system}\n\nCRITICAL: Your previous output was rejected. \
-             Start DIRECTLY with '# List of Dates'. No preamble."
+             Start DIRECTLY with '# List of Dates and Events'. No preamble."
         );
         let raw_retry = call_llm(config, &retry_system, &user_msg).await?;
         let retry = clean_markdown(&raw_retry);
@@ -444,8 +476,9 @@ pub async fn generate_list_of_dates(
         }
     };
 
+    let content_md = surface_truncation(content_md);
     let resolved = crate::drafting::crossrefs::resolve_crossrefs(db, case_id, &content_md).await;
-    let docx_bytes = markdown_to_docx("List of Dates", &resolved.markdown)?;
+    let docx_bytes = markdown_to_docx("List of Dates and Events", &resolved.markdown)?;
     let generated = GeneratedOutput { content_md, docx_bytes };
 
     persist_output(db, case_id, user_id, "list_of_dates", "List_of_Dates.docx", &generated).await
@@ -455,55 +488,66 @@ pub async fn generate_list_of_dates(
 // Annexure Index
 // ---------------------------------------------------------------------------
 
+/// Build the Annexure Index deterministically from the drafting registry rather
+/// than asking the LLM to guess one. We first seed `case_annexures` from every
+/// attached document (idempotent) so the index is COMPLETE — no attached doc is
+/// ever omitted — then render the table and the body cross-reference sentences
+/// using the SAME `Annexure {side}-{serial}` numbering the cross-ref resolver
+/// emits, so the index and the pleading body always reconcile. No LLM call here,
+/// so there is nothing to truncate.
 pub async fn generate_annexure_index(
     db: &SqlitePool,
     case_id: &str,
     user_id: &str,
-    documents: &[serde_json::Value],
-    config: &OutputConfig,
 ) -> Result<String> {
-    let system = format!(
-        "You are a litigation associate preparing an Annexure Index in Markdown — the numbered list of \
-         annexures as they would be filed with a pleading or petition before an Indian court.\n\n\
-         {NO_PROCESS_TEXT}\n\n\
-         FORMAT:\n\
-         # Annexure Index\n\
-         | Annexure No. | Description of Document | Date of Document |\n\
-         |---|---|---|\n\
-         Number annexures sequentially as Annexure A-1, A-2, A-3 ... in the order listed. \
-         Write each description as \"A true copy of <document> dated <date>\". \
-         Use DD.MM.YYYY for dates; leave the Date cell blank if the document gives no date.\n\
-         ## Cross-references\n\
-         For each annexure, give the exact sentence to paste into the body of the pleading, e.g. \
-         \"A true copy of the ... dated 10.01.2024 is annexed hereto and marked as **Annexure A-1**.\"\n\n\
-         Use ONLY the documents listed below. Do NOT invent documents. \
-         Base each description on the document's file name and type; if the date is not evident, leave it blank."
+    // Completeness: register any attached document not yet in the registry.
+    crate::drafting::registry::seed_annexures_from_documents(db, case_id).await?;
+
+    // Read the registry in filing order (petitioner side first, then by serial).
+    // Petitioner annexures first, then respondent, then any other side; by serial
+    // within each. Explicit CASE so a future side value cannot reorder the index
+    // by alphabetic accident.
+    let rows: Vec<(Option<String>, Option<String>, String, i64)> = sqlx::query_as(
+        "SELECT description, doc_date, side, serial_no \
+         FROM case_annexures WHERE case_id = ? \
+         ORDER BY CASE side WHEN 'P' THEN 0 WHEN 'R' THEN 1 ELSE 2 END, serial_no",
+    )
+    .bind(case_id)
+    .fetch_all(db)
+    .await?;
+
+    if rows.is_empty() {
+        return Err(anyhow!("no annexures to index for case {case_id}"));
+    }
+
+    let mut table = String::from(
+        "# Annexure Index\n\n| Annexure No. | Description of Document | Date of Document |\n|---|---|---|\n",
+    );
+    let mut crossrefs = String::from(
+        "\n## Cross-references\n\nPaste the matching sentence into the body where each annexure is first relied upon:\n\n",
     );
 
-    let user_msg = format!(
-        "Prepare an Annexure Index for case {case_id} from these attached documents (in order):\n{}",
-        format_documents_block(documents)
-    );
+    for (description, doc_date, side, serial_no) in &rows {
+        let label = format!("Annexure {side}-{serial_no}");
+        let desc = description
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("________");
+        let date = doc_date
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("");
+        table.push_str(&format!("| **{label}** | {desc} | {date} |\n"));
+        let dated = if date.is_empty() { String::new() } else { format!(" dated {date}") };
+        crossrefs.push_str(&format!(
+            "- {desc}{dated} is annexed hereto and marked as **{label}**.\n"
+        ));
+    }
 
-    let raw = call_llm(config, &system, &user_msg).await?;
-    let md = clean_markdown(&raw);
-
-    let content_md = if validate_markdown(&md) {
-        md
-    } else {
-        let retry_system = format!(
-            "{system}\n\nCRITICAL: Your previous output was rejected. \
-             Start DIRECTLY with '# Annexure Index'. No preamble."
-        );
-        let raw_retry = call_llm(config, &retry_system, &user_msg).await?;
-        let retry = clean_markdown(&raw_retry);
-        if validate_markdown(&retry) { retry } else {
-            return Err(anyhow!("LLM failed to produce valid Markdown after retry"));
-        }
-    };
-
-    let resolved = crate::drafting::crossrefs::resolve_crossrefs(db, case_id, &content_md).await;
-    let docx_bytes = markdown_to_docx("Annexure Index", &resolved.markdown)?;
+    let content_md = format!("{table}{crossrefs}");
+    let docx_bytes = markdown_to_docx("Annexure Index", &content_md)?;
     let generated = GeneratedOutput { content_md, docx_bytes };
 
     persist_output(db, case_id, user_id, "annexure_index", "Annexure_Index.docx", &generated).await

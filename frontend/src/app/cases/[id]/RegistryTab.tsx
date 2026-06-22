@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Copy, Trash2, ChevronUp, ChevronDown, Plus, Sparkles, ExternalLink, Check } from "lucide-react";
 import type { CaseDocument } from "@/app/components/shared/types";
 import {
@@ -28,9 +28,12 @@ import {
 interface RegistryTabProps {
     caseId: string;
     documents: CaseDocument[];
+    /** True once the case has analysis findings — gates the one-time
+     *  auto-populate of parties from the analysis. */
+    hasFindings?: boolean;
 }
 
-export function RegistryTab({ caseId, documents }: RegistryTabProps) {
+export function RegistryTab({ caseId, documents, hasFindings = false }: RegistryTabProps) {
     const [parties, setParties] = useState<CasePartyRecord[]>([]);
     const [annexures, setAnnexures] = useState<CaseAnnexure[]>([]);
     const [citations, setCitations] = useState<{ judgments: CaseCitation[]; statutes: CaseCitation[] }>({ judgments: [], statutes: [] });
@@ -82,6 +85,19 @@ export function RegistryTab({ caseId, documents }: RegistryTabProps) {
     useEffect(() => {
         loadData();
     }, [caseId]);
+
+    // Auto-populate parties from the analysis the first time the registry is
+    // opened for an analysed case that has none yet. Runs once; the user can
+    // still edit, reorder or delete afterwards.
+    const autoPopulatedRef = useRef(false);
+    useEffect(() => {
+        if (loading || autoPopulatedRef.current) return;
+        if (hasFindings && parties.length === 0) {
+            autoPopulatedRef.current = true;
+            handleAiPopulateParties();
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [loading, hasFindings, parties.length]);
 
     const copyToClipboard = (slug: string) => {
         navigator.clipboard.writeText(`@${slug}`);

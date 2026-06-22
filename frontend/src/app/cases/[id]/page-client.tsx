@@ -40,6 +40,7 @@ import {
 import { useOfflineMode } from "@/app/hooks/useOfflineMode";
 import type {
     AnalysisProgress,
+    AssistantEvent,
     CaseDetail,
     CaseDocument,
     CaseFinding,
@@ -52,6 +53,9 @@ import { getRandomSnippet } from "@/app/data/thinkingSnippets";
 import { ToolbarTabs } from "@/app/components/shared/ToolbarTabs";
 import { PreResponseWrapper } from "@/app/components/shared/PreResponseWrapper";
 import { AssistantWorkflowModal } from "@/app/components/assistant/AssistantWorkflowModal";
+import { ToolActivityStream } from "@/app/components/assistant/ToolActivityStream";
+import { DocumentCard } from "@/app/components/assistant/DocumentCard";
+import { EditCard } from "@/app/components/assistant/EditCard";
 import { ProgressChecklist } from "./ProgressChecklist";
 import { InsightFeed } from "./InsightFeed";
 import { AnalysisStatsBar, HeartbeatBand } from "./AnalysisStatsBar";
@@ -274,6 +278,17 @@ interface CaseChatCitation {
     quote: string;
 }
 
+/** A case-chat message. Mirrors the assistant's MikeMessage shape (content +
+ *  streamed agentic `events`) so the bespoke case chat can show real thinking,
+ *  tool activity and redline edits while keeping its OWN case-scoped history. */
+type CaseChatMsg = {
+    role: string;
+    content: string;
+    citations?: CaseChatCitation[];
+    events?: AssistantEvent[];
+    workflow?: { id: string; title: string; prompt_md?: string | null };
+};
+
 /** Extract citations from <CITATIONS> block and return cleaned text + parsed citations */
 function extractCaseChatCitations(text: string): { cleaned: string; citations: CaseChatCitation[] } {
     let citations: CaseChatCitation[] = [];
@@ -347,16 +362,67 @@ function ThinkingDots({ snippets }: { snippets: string[] }) {
     );
 }
 
-function CaseChatBubble({ msg, blurNames }: {
-    msg: { role: string; content: string; citations?: CaseChatCitation[] };
+// Resolve a (possibly relative) backend download URL to an absolute one.
+const CASE_API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
+function resolveDocUrl(u: string): string {
+    if (!u) return u;
+    return /^https?:\/\//i.test(u) ? u : `${CASE_API_BASE}${u}`;
+}
+
+/** Collapsible reasoning panel for the case chat — mirrors the assistant's
+ *  thinking disclosure and ToolActivityStream header styling. Auto-expands
+ *  while streaming, collapses once the turn ends. */
+function CaseThinkingBlock({ text, isStreaming }: { text: string; isStreaming: boolean }) {
+    // Default-open while streaming, auto-collapsed once the turn ends, but a
+    // manual toggle (once set) wins. Derived — no setState-in-effect.
+    const [userToggled, setUserToggled] = useState<boolean | null>(null);
+    const open = userToggled ?? isStreaming;
+    if (!text.trim()) return null;
+    return (
+        <div className="rounded-lg border border-gray-200 bg-white overflow-hidden">
+            <button
+                onClick={() => setUserToggled(!open)}
+                className="w-full flex items-center justify-between px-3 py-2 font-serif text-xs text-gray-600 hover:bg-gray-50 transition-colors"
+            >
+                <span className="flex items-center gap-2 min-w-0">
+                    <span className="w-1.5 h-1.5 rounded-full bg-blue-500 shrink-0" />
+                    <span className="font-medium">{isStreaming ? "Thinking…" : "Reasoning"}</span>
+                </span>
+                <ChevronDown size={12} className={`shrink-0 ml-2 transition-transform duration-200 ${open ? "" : "-rotate-90"}`} />
+            </button>
+            {open && (
+                <div className="px-3 pb-2.5 text-xs text-gray-500 italic whitespace-pre-wrap leading-relaxed max-h-48 overflow-y-auto">
+                    {text}
+                </div>
+            )}
+        </div>
+    );
+}
+
+function CaseChatBubble({ msg, blurNames, isStreaming = false }: {
+    msg: CaseChatMsg;
     blurNames: string[];
+    isStreaming?: boolean;
 }) {
     const [activeCitation, setActiveCitation] = useState<CaseChatCitation | null>(null);
     const citations = msg.citations || [];
+    const events = msg.events ?? [];
 
     // Strip <CITATIONS> block and preprocess [N] markers before ReactMarkdown
     const rawContent = msg.content.replace(/<CITATIONS>[\s\S]*?<\/CITATIONS>\s*$/i, "").trimEnd();
     const displayContent = preprocessCaseCitations(rawContent);
+
+    // Streamed agentic events — same path as the global assistant.
+    const reasoningText = events
+        .filter((e): e is Extract<AssistantEvent, { type: "reasoning" }> => e.type === "reasoning")
+        .map((e) => e.text)
+        .join("\n\n")
+        .trim();
+    const hasTools = events.some((e) => e.type === "tool_call_start");
+    const docCreated = events.filter((e): e is Extract<AssistantEvent, { type: "doc_created" }> => e.type === "doc_created");
+    const docEdited = events.filter((e): e is Extract<AssistantEvent, { type: "doc_edited" }> => e.type === "doc_edited");
+    const hasAgentic = reasoningText.length > 0 || hasTools || docCreated.length > 0 || docEdited.length > 0;
+    const showThinkingDots = !msg.content && !hasAgentic;
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const mdComponents: Record<string, any> = {
@@ -394,9 +460,14 @@ function CaseChatBubble({ msg, blurNames }: {
     };
 
     return (
-        <div className="max-w-[85%] bg-gray-50 rounded-2xl rounded-bl-md px-4 py-3 text-gray-900 font-serif text-sm prose prose-sm max-w-none">
-            {msg.content ? (
-                <>
+        <div className="flex flex-col gap-2 max-w-[85%] min-w-0">
+            {/* Real reasoning + tool activity, mirroring the assistant */}
+            {reasoningText && <CaseThinkingBlock text={reasoningText} isStreaming={isStreaming} />}
+            {hasTools && <ToolActivityStream events={events} isStreaming={isStreaming} />}
+
+            {/* Assistant text */}
+            {msg.content && (
+                <div className="bg-gray-50 rounded-2xl rounded-bl-md px-4 py-3 text-gray-900 font-serif text-sm prose prose-sm max-w-none">
                     <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
                         {displayContent}
                     </ReactMarkdown>
@@ -416,9 +487,54 @@ function CaseChatBubble({ msg, blurNames }: {
                             <p className="text-gray-700 italic leading-relaxed">&ldquo;{activeCitation.quote}&rdquo;</p>
                         </div>
                     )}
-                </>
-            ) : (
-                <div className="py-1">
+                </div>
+            )}
+
+            {/* Redline + generated documents — same path as the assistant */}
+            {(docCreated.length > 0 || docEdited.length > 0) && (
+                <div className="space-y-2">
+                    {docCreated.map((d, i) => (
+                        <DocumentCard
+                            key={`dc-${i}`}
+                            filename={d.filename}
+                            downloadUrl={resolveDocUrl(d.download_url)}
+                            versionNumber={d.version_number ?? null}
+                            isLoading={d.isStreaming}
+                            onDownload={() => {
+                                const u = resolveDocUrl(d.download_url);
+                                if (u) window.open(u, "_blank");
+                            }}
+                        />
+                    ))}
+                    {docEdited.map((d, i) => (
+                        <div key={`de-${i}`} className="space-y-2">
+                            <DocumentCard
+                                filename={d.filename}
+                                downloadUrl={resolveDocUrl(d.download_url)}
+                                versionNumber={d.version_number ?? null}
+                                isLoading={d.isStreaming}
+                                onDownload={() => {
+                                    const u = resolveDocUrl(d.download_url);
+                                    if (u) window.open(u, "_blank");
+                                }}
+                            />
+                            {d.error ? (
+                                <p className="text-xs text-red-600">{d.error}</p>
+                            ) : d.annotations.length > 0 ? (
+                                <div className="space-y-2">
+                                    {d.annotations.map((ann) => (
+                                        <EditCard key={ann.edit_id} annotation={ann} />
+                                    ))}
+                                </div>
+                            ) : null}
+                        </div>
+                    ))}
+                </div>
+            )}
+
+            {/* Initial connecting indicator */}
+            {showThinkingDots && (
+                <div className="w-fit bg-gray-50 rounded-2xl rounded-bl-md px-4 py-3">
                     <ThinkingDots snippets={CHAT_THINKING} />
                 </div>
             )}
@@ -514,9 +630,7 @@ export default function CaseWorkspacePage() {
     const uploadInputRef = useRef<HTMLInputElement | null>(null);
 
     // Chat
-    const [chatMessages, setChatMessages] = useState<
-        { role: string; content: string; citations?: CaseChatCitation[]; workflow?: { id: string; title: string; prompt_md?: string | null } }[]
-    >([]);
+    const [chatMessages, setChatMessages] = useState<CaseChatMsg[]>([]);
     const [chatInput, setChatInput] = useState("");
     const [chatLoading, setChatLoading] = useState(false);
     const [selectedWorkflow, setSelectedWorkflow] = useState<{ id: string; title: string; prompt_md?: string | null } | null>(null);
@@ -1081,8 +1195,25 @@ export default function CaseWorkspacePage() {
             const decoder = new TextDecoder();
             let buffer = "";
             let assistantText = "";
-            // Placeholder assistant bubble already appended on send; the
-            // deltas below update that last message in place.
+            const events: AssistantEvent[] = [];
+            // Placeholder assistant bubble already appended on send. The case
+            // chat runs the SAME agentic chat root as the global assistant, so
+            // it streams real reasoning, tool activity and redline edits — we
+            // fold those into `events` (mirroring the assistant) and update the
+            // last message in place, keeping this case's own history.
+            const flush = () => {
+                const txt = assistantText;
+                const evs = events.length ? [...events] : undefined;
+                setChatMessages((prev) => {
+                    const next = [...prev];
+                    next[next.length - 1] = {
+                        role: "assistant",
+                        content: txt,
+                        events: evs,
+                    };
+                    return next;
+                });
+            };
             while (true) {
                 const { done, value } = await reader.read();
                 if (done) break;
@@ -1096,31 +1227,95 @@ export default function CaseWorkspacePage() {
                     if (dataStr === "[DONE]") continue;
                     try {
                         const data = JSON.parse(dataStr);
-                        if (data.type === "content_delta") {
-                            assistantText += data.text;
-                            const txt = assistantText;
-                            setChatMessages((prev) => {
-                                const next = [...prev];
-                                next[next.length - 1] = {
-                                    role: "assistant",
-                                    content: txt,
+                        switch (data.type) {
+                            case "content_delta":
+                                assistantText += data.text ?? "";
+                                break;
+                            case "reasoning_delta": {
+                                const last = events[events.length - 1];
+                                if (last?.type === "reasoning" && last.isStreaming) {
+                                    events[events.length - 1] = { type: "reasoning", text: last.text + (data.text ?? ""), isStreaming: true };
+                                } else {
+                                    events.push({ type: "reasoning", text: data.text ?? "", isStreaming: true });
+                                }
+                                break;
+                            }
+                            case "reasoning_block_end": {
+                                const last = events[events.length - 1];
+                                if (last?.type === "reasoning" && last.isStreaming) {
+                                    events[events.length - 1] = { type: "reasoning", text: last.text };
+                                }
+                                break;
+                            }
+                            case "tool_call_start":
+                                events.push({ type: "tool_call_start", name: data.name, isStreaming: true });
+                                break;
+                            case "tool_call_progress": {
+                                for (let i = events.length - 1; i >= 0; i--) {
+                                    const e = events[i];
+                                    if (e.type === "tool_call_start" && e.isStreaming) {
+                                        events[i] = { ...e, elapsedSecs: typeof data.elapsed_secs === "number" ? data.elapsed_secs : e.elapsedSecs };
+                                        break;
+                                    }
+                                }
+                                break;
+                            }
+                            case "doc_created_start":
+                                events.push({ type: "doc_created", filename: data.filename, download_url: "", isStreaming: true });
+                                break;
+                            case "doc_created": {
+                                const idx = events.findIndex((e) => e.type === "doc_created" && e.isStreaming && e.filename === data.filename);
+                                const doc: AssistantEvent = {
+                                    type: "doc_created",
+                                    filename: data.filename,
+                                    download_url: typeof data.download_url === "string" ? data.download_url : "",
+                                    document_id: typeof data.document_id === "string" ? data.document_id : undefined,
+                                    version_id: typeof data.version_id === "string" ? data.version_id : undefined,
+                                    version_number: typeof data.version_number === "number" ? data.version_number : undefined,
+                                    isStreaming: false,
                                 };
-                                return next;
-                            });
+                                if (idx >= 0) events[idx] = doc; else events.push(doc);
+                                break;
+                            }
+                            case "doc_edited_start":
+                                events.push({ type: "doc_edited", filename: data.filename, document_id: "", version_id: "", download_url: "", annotations: [], isStreaming: true });
+                                break;
+                            case "doc_edited": {
+                                const idx = events.findIndex((e) => e.type === "doc_edited" && e.isStreaming && e.filename === data.filename);
+                                const ed: AssistantEvent = {
+                                    type: "doc_edited",
+                                    filename: data.filename,
+                                    document_id: typeof data.document_id === "string" ? data.document_id : "",
+                                    version_id: typeof data.version_id === "string" ? data.version_id : "",
+                                    version_number: typeof data.version_number === "number" ? data.version_number : null,
+                                    download_url: typeof data.download_url === "string" ? data.download_url : "",
+                                    annotations: Array.isArray(data.annotations) ? data.annotations : [],
+                                    error: typeof data.error === "string" ? data.error : undefined,
+                                    isStreaming: false,
+                                };
+                                if (idx >= 0) events[idx] = ed; else events.push(ed);
+                                break;
+                            }
+                            default:
+                                break;
                         }
+                        flush();
                     } catch {
-                        // skip
+                        // skip malformed event
                     }
                 }
             }
-            // Stream done — parse citations from the final text
+            // Stream done — strip the <CITATIONS> block out of the visible text,
+            // attach parsed citations, and keep the streamed agentic events.
             const { cleaned, citations: parsedCitations } = extractCaseChatCitations(assistantText);
+            const finalEvents = events.length ? [...events] : undefined;
             setChatMessages((prev) => {
                 const next = [...prev];
                 next[next.length - 1] = {
                     role: "assistant",
                     content: cleaned,
                     citations: parsedCitations.length > 0 ? parsedCitations : undefined,
+                    events: finalEvents,
                 };
                 return next;
             });
@@ -1607,7 +1802,7 @@ export default function CaseWorkspacePage() {
                         />
                     )}
                     {activeTab === "registry" && (
-                        <RegistryTab caseId={caseId} documents={documents} />
+                        <RegistryTab caseId={caseId} documents={documents} hasFindings={findings.length > 0} />
                     )}
                 </div>
             </div>
@@ -1852,6 +2047,19 @@ function FindingsTab({
         });
     };
 
+    // When viewing a finished analysis (e.g. after a reload) the agent cards
+    // arrive collapsed, so results read as a wall of closed accordions. Expand
+    // them once so findings are visible immediately; the user can still
+    // collapse any card afterwards.
+    const didAutoExpandRef = useRef(false);
+    useEffect(() => {
+        if (didAutoExpandRef.current || analysisRunning) return;
+        if (findingsByAgent.size > 0) {
+            didAutoExpandRef.current = true;
+            setExpandedAgents((prev) => (prev.size === 0 ? new Set(findingsByAgent.keys()) : prev));
+        }
+    }, [analysisRunning, findingsByAgent, setExpandedAgents]);
+
     if (findingsByAgent.size === 0 && !analysisRunning && !analysisError) {
         return (
             <div className="flex flex-col items-center justify-center py-20 px-6 text-center">
@@ -2021,8 +2229,19 @@ function AgentThinkingRow({
         return () => clearInterval(interval);
     }, [agent.status]);
 
+    // Real reasoning streamed from the backend's agent_thinking SSE. Show
+    // the live tail so the row reflects what the agent is actually thinking;
+    // fall back to a rotating snippet only until the first token lands so the
+    // row is never a dead spinner.
+    const liveThinking = (agent.thinking ?? "").replace(/\s+/g, " ").trim();
+    const runningLabel = liveThinking
+        ? liveThinking.length > 200
+            ? "…" + liveThinking.slice(-200)
+            : liveThinking
+        : snippet;
+
     return (
-        <div className="flex items-center gap-2">
+        <div className="flex items-start gap-2">
             <MikeIcon
                 spin={agent.status === "running"}
                 done={agent.status === "done"}
@@ -2030,16 +2249,17 @@ function AgentThinkingRow({
                 size={14}
             />
             <span
-                className={`text-sm font-serif ${
+                title={agent.status === "running" && liveThinking ? liveThinking : undefined}
+                className={`text-sm font-serif min-w-0 ${
                     agent.status === "running"
-                        ? "text-gray-500"
+                        ? "text-gray-500 italic line-clamp-2"
                         : agent.status === "error"
                           ? "text-red-600 text-xs"
                           : "text-gray-700"
                 }`}
             >
                 {agent.status === "running"
-                    ? snippet
+                    ? runningLabel
                     : agent.status === "error"
                       ? agent.error || "Error"
                       : t(AGENT_LABELS[agent.agent_name] ?? agent.agent_name)}
@@ -2292,7 +2512,7 @@ function ChatTab({
     onSelectWorkflow,
     onClearWorkflow,
 }: {
-    messages: { role: string; content: string; workflow?: { id: string; title: string; prompt_md?: string | null } }[];
+    messages: CaseChatMsg[];
     input: string;
     loading: boolean;
     onInputChange: (v: string) => void;
@@ -2355,7 +2575,7 @@ function ChatTab({
                                     {msg.content}
                                 </div>
                             ) : (
-                                <CaseChatBubble msg={msg} blurNames={blurNames} />
+                                <CaseChatBubble msg={msg} blurNames={blurNames} isStreaming={loading && i === messages.length - 1} />
                             )}
                         </div>
                     ))}

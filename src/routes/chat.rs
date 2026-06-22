@@ -1095,10 +1095,18 @@ const MIKE_SYSTEM_PROMPT_LITE: &str = r#"You are Mike, an AI legal assistant for
 - Answer the user's legal question directly, concisely, and accurately.
 - Focus on Indian statutes and procedure. Use the current successor codes (BNS, BNSS, and BSA) in place of the older IPC, CrPC, and Evidence Act where relevant.
 - Only cite a section, case, or authority if you are confident it is real and correctly stated. If you are unsure, say so plainly. Never invent a citation, section number, or case name.
+- STAY IN YOUR LANE: you only do Indian legal work, meaning legal questions, statutes, procedure, and drafting legal documents. If asked for anything else (arithmetic like "2x2", a poem or story, recipes, code, or general chit-chat), refuse in ONE short firm sentence and redirect, for example "I only help with Indian legal work. Tell me the legal question or document you need." Do not comply, joke, or give a partial answer.
+- NEVER FABRICATE PII: when drafting, use only the names, parentage, ages, addresses, dates, and amounts the user actually gave you. For any detail the user did not provide, leave a "________" blank for them to fill in. Never invent or guess a name, Aadhaar number, PAN, phone number, or address. A blank is always correct; a made-up identifier is never acceptable.
 - You are offline: you cannot search live case-law databases (Indian Kanoon), browse the web, or open the user's uploaded documents. If a question genuinely needs those, tell the user to go back online for the full assistant.
 - Be practical and clear. This is general legal information, not formal legal advice."#;
 
 const MIKE_SYSTEM_PROMPT: &str = r#"You are Mike, an AI legal assistant that helps lawyers and legal professionals analyze documents, answer legal questions, and draft legal documents.
+
+SCOPE (LEGAL WORK ONLY):
+You only assist with legal work: legal questions, legal research, analysis of the user's documents, and drafting legal documents. If the user asks for something outside that lane, such as arithmetic ("2x2"), a poem or story ("a children's poem"), recipes, code, trivia, or general chit-chat, refuse firmly in ONE short sentence and redirect to legal work, for example "I'm Mike, a legal assistant, so I can't help with that. What legal question or document can I help you with?" Do not comply, do not give a "fun" or partial answer, and do not tack the off-topic content on as an aside.
+
+ADDING A CASE OR CITATION:
+If the user asks you to "add" or "cite" a specific case, FIRST call kanoon_search (and kanoon_verify_case) to confirm the case exists and to check whether it actually supports the point. Never add a citation you could not retrieve and verify this turn. If the verified case fits, add it in proper citation form. If the verified case does NOT fit the argument, you may still add it because the user asked, but you MUST flag it with the exact words: "this case does not appear to fit, but I may be wrong". Never present an unverified or off-point case as settled authority.
 
 DOCUMENT CITATION INSTRUCTIONS:
 When you reference specific content from a document, place a numbered marker [1], [2], etc. inline in your prose at the point of reference.
@@ -1549,6 +1557,7 @@ CRITICAL RULES:
 - The example values above (Rajesh Sharma, H-42 Sector 7, 5,00,000 etc.) are STRUCTURE ONLY. NEVER copy them into your output.
 - If the user wrote "Priya Sharma daughter of Ramesh Sharma", you MUST output complainant_name="Priya Sharma" and complainant_parent="D/o Sh. Ramesh Sharma" (D/o for daughter, S/o for son).
 - If user did not provide a field, OMIT it from the JSON — do not invent a value.
+- NEVER fabricate or guess a name, parentage, age, address, date, amount, Aadhaar number, PAN, or phone number. If the user did not state it, OMIT the field; the drafter inserts a "________" blank in its place. The example values above are STRUCTURE ONLY: never emit them, or any invented identifier, as if they were real PII.
 - For other doc types: include all party names, addresses, amounts, dates from the message.
 - Indian number format. JSON only. No explanation.
 "#;
@@ -1693,6 +1702,8 @@ fn format_clarifying_answers(raw: &str) -> String {
 /// Trimmed drafting prompt for larger models (Claude, GPT, Qwen 7B+).
 /// These can handle direct document generation without JSON extraction.
 const DRAFTING_CORE: &str = r#"
+STAY IN LANE: this is legal drafting only. If the user pivots to something non-legal (arithmetic, a poem, casual chat), decline in one short sentence and steer back to the legal document. Do not break character to answer it.
+
 You draft Indian legal documents for advocates. THE GOVERNING CODE IS FIXED BY THE DATE THE OFFENCE WAS COMMITTED, not by today's date: an offence committed ON OR AFTER 1 July 2024 is charged under the BNS / BNSS / BSA (the 2023 codes); an offence committed BEFORE 1 July 2024 is charged under the IPC / CrPC / IEA (saving clause). Work out the offence date from the facts and apply that ONE code consistently to the entire document. If the facts do not make the offence date clear, ASK (one clarifying question) rather than guessing — the date is what decides the code. (For non-penal / civil / transactional drafting where no offence date applies, use the law currently in force.)
 
 CLARIFY SMARTLY — ASK ONLY WHEN THE ANSWER CHANGES THE DOCUMENT'S SHAPE OR STRATEGY; otherwise infer the obvious choice, state it in ONE line, and draft. Run this three-part test on every drafting instruction before you act:
@@ -1707,6 +1718,7 @@ STATUTE ACCURACY: Before citing any penal / procedural / evidence section, call 
 CASE LAW IN DRAFTS — INJECT IT FOR ARGUMENTATIVE DRAFTS, NOT FOR PLEADINGS. The document type decides whether precedent belongs IN the body:
   • STATUTES ONLY — NO case law in the body, and do NOT call kanoon_search for these: complaint, plaint / civil suit, legal notice, affidavit, written statement, reply / counter-affidavit, rejoinder, deed / agreement, power of attorney, partnership deed, family settlement, matrimonial petition. These plead facts and statute, not precedent — citing cases in the body is wrong. If a case genuinely bears on STRATEGY, mention it to the user in your prose advice, never in the pleading.
   • WEAVE IN VERIFIED CASE LAW — these turn on precedent: writ petition, appeal / grounds of appeal, bail application, interim / stay application, written submissions, condonation of delay, and any "grounds"-based argument. For these, AFTER the facts are settled: (1) run kanoon_search for the 2-3 legal propositions the grounds rest on; (2) call kanoon_verify_case for every case you will actually cite; (3) weave each verified authority into the specific ground it supports, in CONVENTIONAL COURT CITATION FORM inside the body — e.g. "It is respectfully submitted that in [Case Name], (Year) Vol Journal Page, the Hon'ble [Court] held that '…', which squarely covers the present facts." In a DRAFTED DOCUMENT use conventional citation form, NOT markdown links (the markdown-link / verbatim-quote citation rules elsewhere govern CHAT ANSWERS, not the body of a filing). NEVER cite a case you did not retrieve AND verify this turn — an unverified or remembered case in a filing is a serious error.
+  • IF THE USER ASKS TO ADD A SPECIFIC CASE: call kanoon_search, then kanoon_verify_case, for THAT case BEFORE you add it. Never add a case you could not retrieve and verify this turn. If it verifies and is on point, weave it into the ground it supports. If it verifies but does NOT fit the proposition, add it only with the exact hedge "this case does not appear to fit, but I may be wrong" so the user can decide. Never pass off an unverified or off-point authority as settled law.
 
 NEVER FABRICATE — STATE ONLY WHAT THE USER GAVE YOU. Do not invent, assume, or "fill in" ANY fact, event, or document the user did not mention. This means NOT ONLY names, dates, addresses, hospital/police-station names and amounts, but EQUALLY any procedural event or annexure the user never stated — e.g. do NOT write that a legal notice was sent (or returned unserved), that an FIR was lodged, that receipts / an agreement / WhatsApp chats exist, or that anything is "annexed hereto and marked as Annexure A/B". If the user did not say it, do NOT assert it. Where a fact or party the document structurally needs is unknown, leave a "_______________" placeholder; where an OPTIONAL clause (a prior legal notice, an annexure, an earlier complaint, etc.) was not mentioned, simply OMIT it rather than invent it. A blank is always better than a made-up fact. If you think an extra step is legally advisable, say so in plain words to the user — do not bake the assumption into the document.
 
@@ -1826,6 +1838,124 @@ DOCUMENT TYPE — BAIL APPLICATION: cause-title + "Application u/s 483 BNSS [reg
 const DRAFT_CONDONATION: &str = r#"
 DOCUMENT TYPE — CONDONATION OF DELAY: "Application for condonation of delay of ___ days in filing the [appeal / petition]" → "MOST RESPECTFULLY SHOWETH:" → the impugned order's date and the prescribed limitation / last date → numbered reasons for the delay (e.g. not made aware of the order / notice wrongly addressed / medical reasons / registry or records delay) and the prompt curative steps taken → "That the delay is neither intentional nor deliberate but occasioned by reasons beyond the applicant's control, and it is in the interest of justice, equity and good conscience that it be condoned" → "PRAYER" to condone the delay and admit the [appeal] → supporting affidavit.
 "#;
+
+/// Most firm templates surfaced into one drafting prompt.
+const MAX_FIRM_TEMPLATES: usize = 3;
+/// Per-template char cap for the cloud-model template injection.
+const FIRM_TEMPLATE_CAP: usize = 4000;
+
+/// True when the latest (lowercased) message asks Mike to produce a document
+/// (an action verb plus a document noun). Shared by prompt assembly (firm
+/// template injection) and the streaming hybrid-draft path so both agree on
+/// "is this a drafting turn".
+fn is_drafting_query(q_lower: &str) -> bool {
+    let action_verbs = [
+        "draft", "write", "create", "generate", "prepare", "formulate", "make a", "redigere",
+        "scrivere",
+    ];
+    let doc_nouns = [
+        "affidavit", "petition", "agreement", "contract", "deed", "power of attorney", "notice",
+        "reply", "complaint", "will", "memo", "memorandum", "letter", "application", "suit", "plaint",
+    ];
+    action_verbs.iter().any(|v| q_lower.contains(v)) && doc_nouns.iter().any(|n| q_lower.contains(n))
+}
+
+/// Render firm templates as a drafting reference for cloud models. Capped at
+/// `max` templates and `per_cap` chars each so a large firm library can't blow
+/// the prompt budget. Empty string when there are no templates. [task 4]
+fn build_firm_templates_prompt(
+    templates: &[crate::corpus::tools::FirmTemplate],
+    max: usize,
+    per_cap: usize,
+) -> String {
+    if templates.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from(
+        "FIRM TEMPLATES: These are templates this lawyer reuses.\n\
+         When the document you are drafting matches one of these, mirror its \
+         structure, headings, and stock phrasing; fill the {{placeholders}} from \
+         the user's facts and leave ________ where a fact is unknown. Prefer the \
+         firm's own template over generic boilerplate.\n\n",
+    );
+    for t in templates.iter().take(max) {
+        let body: String = t.template_md.chars().take(per_cap).collect();
+        s.push_str(&format!("--- Template: {} ---\n{}\n\n", t.filename, body));
+    }
+    s
+}
+
+/// Append `block` (itself capped to `block_cap` chars) to `out`, but only while
+/// the running total stays under `total_cap`. Keeps the offline prompt bounded.
+fn push_capped(out: &mut String, block: &str, block_cap: usize, total_cap: usize) {
+    let used = out.chars().count();
+    // Reserve room for the "\n\n" separator so the running total stays bounded.
+    let sep = if out.is_empty() { 0 } else { 2 };
+    let remaining = total_cap.saturating_sub(used + sep);
+    if remaining == 0 {
+        return;
+    }
+    let piece: String = block.chars().take(block_cap.min(remaining)).collect();
+    if piece.trim().is_empty() {
+        return;
+    }
+    if !out.is_empty() {
+        out.push_str("\n\n");
+    }
+    out.push_str(&piece);
+}
+
+/// Trimmed preferences + firm knowledge for small / offline models. The full
+/// cloud injections (harness rules, profile, KB block, firm-corpus tool) are
+/// otherwise skipped for these models because their context window is ~8k; this
+/// packs the same signals into one hard-capped block so the offline model still
+/// respects the lawyer's learned rules and reuses firm work. [task 3]
+fn build_offline_context_prompt(
+    harness_rules: &str,
+    profile_text: &str,
+    snippets: &[crate::corpus::tools::FirmSnippet],
+    templates: &[crate::corpus::tools::FirmTemplate],
+) -> String {
+    const TOTAL_CAP: usize = 2800;
+    let mut out = String::new();
+
+    // 1. Learned drafting rules — the "Mike listens" preferences. Highest
+    //    priority: this is the signal the offline path used to drop entirely.
+    push_capped(&mut out, harness_rules.trim(), 800, TOTAL_CAP);
+
+    // 2. One firm template skeleton to mirror, if any.
+    if let Some(t) = templates.first() {
+        let body: String = t.template_md.chars().take(1000).collect();
+        let block = format!(
+            "## Firm template (mirror this structure)\n\
+             These are templates this lawyer reuses. Mirror the structure and stock \
+             phrasing of \"{}\"; fill {{{{placeholders}}}} from the user's facts and \
+             leave ________ where a fact is unknown.\n\n{}",
+            t.filename, body
+        );
+        push_capped(&mut out, &block, 1100, TOTAL_CAP);
+    }
+
+    // 3. Firm's own past phrasing (BM25 hits — no tool call needed offline).
+    if !snippets.is_empty() {
+        let mut s = String::from("## Firm's own past phrasing (reuse where it fits)\n");
+        for sn in snippets.iter().take(2) {
+            let label = sn.heading.as_deref().unwrap_or(&sn.filename);
+            let body: String = sn.text.chars().take(360).collect();
+            s.push_str(&format!("- ({label}) {body}\n"));
+        }
+        push_capped(&mut out, &s, 900, TOTAL_CAP);
+    }
+
+    // 4. Free-text "how this lawyer works" profile, if room remains.
+    let prof = profile_text.trim();
+    if !prof.is_empty() {
+        let block = format!("## How this lawyer works (their own words)\n{prof}");
+        push_capped(&mut out, &block, 500, TOTAL_CAP);
+    }
+
+    out
+}
 
 /// Pick the type-specific drafting chunk for a (lowercased) user query. Order
 /// matters — more specific keywords are tested before generic ones. Exactly one
@@ -4360,6 +4490,48 @@ async fn create_chat_record(
     (StatusCode::OK, Json(json!({ "id": id }))).into_response()
 }
 
+/// Edit intent for a chat turn that targets an existing draft.
+#[derive(Debug, PartialEq)]
+enum EditKind {
+    None,
+    Content,
+    Formatting,
+}
+
+/// Classify a user turn as a document edit. `has_active_doc` is true when the
+/// chat already holds a draft (restored at the start of the turn). A follow-up
+/// that names a part of that draft ("change point 4", "populate the defendant
+/// section", "redline this") is then an edit even though it never says the word
+/// "document". Without this, edit_kind stays `None` on a plain-text turn, the
+/// tracked-change path never fires, and the model just replies that it never
+/// drafted anything.
+fn detect_edit_kind(query: &str, has_active_doc: bool) -> EditKind {
+    let q = query.to_lowercase();
+    let doc_refs = ["document", "affidavit", "petition", "draft", "complaint",
+        "agreement", "contract", "deed", "notice", "letter"];
+    // Parts of a draft the user can point at without naming the document.
+    let structural = ["point", "clause", "paragraph", "section", "heading",
+        "prayer", "defendant", "petitioner", "respondent", "plaintiff"];
+    // Verbs that mean "edit the open document" on their own.
+    let intrinsic_edit = ["redline", "populate", "tracked change"];
+    let implicit_ref = has_active_doc
+        && (structural.iter().any(|n| q.contains(n))
+            || intrinsic_edit.iter().any(|v| q.contains(v)));
+    let has_doc_ref = doc_refs.iter().any(|n| q.contains(n)) || implicit_ref;
+    let fmt = ["bold", "underline", "italic", "heading", "spacing",
+        "font size", "center", "align"];
+    let content = ["change", "replace", "update", "fix", "correct", "modify",
+        "rename", "add clause", "add paragraph", "add point",
+        "add section", "remove", "delete", "insert", "populate", "redline"];
+    if has_doc_ref && fmt.iter().any(|v| q.contains(v)) {
+        EditKind::Formatting
+    } else if has_doc_ref && content.iter().any(|v| q.contains(v)) {
+        EditKind::Content
+    } else {
+        EditKind::None
+    }
+}
+
 /// SSE handler for the upstream-Mike `POST /chat` shape.
 /// Body: { messages: [{role, content}], chat_id?, model? }
 /// Emits `data: {type: ...}` events that useAssistantChat parses.
@@ -4667,6 +4839,24 @@ pub(crate) async fn stream_chat_root(
     } else {
         build_ik_system_prompt(&ik_results)
     };
+
+    // Firm templates (reusable {{placeholder}} skeletons) and, for offline
+    // models, firm-corpus snippets — surfaced so drafts mirror the firm's own
+    // work even when the model can't call search_firm_corpus. Templates are
+    // fetched only on drafting turns; offline snippets help Q&A too. [tasks 3+4]
+    let is_drafting_request = is_drafting_query(&last_user_query.to_lowercase());
+    let firm_templates_list = if is_drafting_request {
+        crate::corpus::tools::firm_templates(&state.db, &auth.user_id, MAX_FIRM_TEMPLATES as i64)
+            .await
+    } else {
+        Vec::new()
+    };
+    let firm_snippets = if is_small {
+        crate::corpus::tools::top_firm_snippets(&state.db, &auth.user_id, &last_user_query, 3).await
+    } else {
+        Vec::new()
+    };
+
     let mut sections: Vec<String> = Vec::new();
     if is_local_model && is_tiny {
         sections.push(
@@ -4699,7 +4889,20 @@ pub(crate) async fn stream_chat_root(
             profile_text.trim()
         ));
     }
-    if !harness_rules.trim().is_empty() && !is_small {
+    if is_small {
+        // Offline models: one hard-capped block (learned rules + a firm
+        // template skeleton + firm-corpus snippets + profile) in place of the
+        // full cloud injections, which overflow an ~8k window. [task 3]
+        let offline = build_offline_context_prompt(
+            &harness_rules,
+            &profile_text,
+            &firm_snippets,
+            &firm_templates_list,
+        );
+        if !offline.trim().is_empty() {
+            sections.push(offline);
+        }
+    } else if !harness_rules.trim().is_empty() {
         sections.push(harness_rules);
     }
     sections.push(TONE_RULES.trim().to_string());
@@ -4747,6 +4950,15 @@ pub(crate) async fn stream_chat_root(
         }
         if wants_pwdva {
             sections.push(TEMPLATE_PWDVA.trim().to_string());
+        }
+        // Firm's own reusable templates, so a draft mirrors their structure
+        // without the lawyer having to pick the template workflow. [task 4]
+        if !firm_templates_list.is_empty() {
+            sections.push(build_firm_templates_prompt(
+                &firm_templates_list,
+                MAX_FIRM_TEMPLATES,
+                FIRM_TEMPLATE_CAP,
+            ));
         }
     }
     if wants_case_search && !is_small {
@@ -4923,8 +5135,15 @@ pub(crate) async fn stream_chat_root(
         llm::summarize::maybe_compress_history(messages, &raw_model, &summarizer_creds, extra_payload_chars)
             .await;
 
-    // ── PII anonymization (gate: PII_ANONYMIZE=1) ───────────────────
-    let (messages, pii_mapping) = if crate::pii::pii_enabled() {
+    // ── PII anonymization ───────────────────────────────────────────
+    // Gate: on globally via PII_ANONYMIZE=1, OR ALWAYS on for the small /
+    // on-device drafting path (is_small). That path is the non-negotiable
+    // privacy gate: user PII (Aadhaar/PAN/phone/email by regex, plus names
+    // via GLiNER when the sidecar is up) is masked before it reaches the
+    // model and restored on the way out, so the model never sees or emits
+    // real identifiers. GLiNER is best-effort (instant regex-only fallback
+    // when the sidecar at 127.0.0.1:4010 is down), so this never blocks offline.
+    let (messages, pii_mapping) = if crate::pii::pii_enabled() || is_small {
         let (anon_msgs, mapping) = crate::pii::anonymize_messages(&messages).await;
         if !mapping.to_original.is_empty() {
             tracing::info!(
@@ -4937,34 +5156,42 @@ pub(crate) async fn stream_chat_root(
         (messages, None)
     };
 
-    let is_drafting_request = {
-        let q = last_user_query.to_lowercase();
-        let action_verbs = ["draft", "write", "create", "generate", "prepare", "formulate", "make a", "redigere", "scrivere"];
-        let doc_nouns = ["affidavit", "petition", "agreement", "contract", "deed", "power of attorney", "notice", "reply", "complaint", "will", "memo", "memorandum", "letter", "application", "suit", "plaint"];
-        action_verbs.iter().any(|v| q.contains(v)) && doc_nouns.iter().any(|n| q.contains(n))
+    // Restore the chat's active draft at the START of the turn, before any
+    // generation. A draft is created on an earlier request and `last_doc_uuid`
+    // is per-request, so a later edit turn ("change point 4") would otherwise
+    // have no target and the model just replies that it never drafted anything.
+    // Only when no docs are explicitly attached — an attached doc is named in
+    // the edit-intent check below, so it doesn't need this implicit restore.
+    let active_doc_uuid: Option<String> = if doc_label_map.is_empty() {
+        sqlx::query_as::<_, (String,)>(
+            "SELECT id FROM documents WHERE chat_id = ? AND user_id = ? \
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(&chat_id)
+        .bind(&auth.user_id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .map(|(id,)| id)
+    } else {
+        None
     };
 
-    #[derive(PartialEq)]
-    enum EditKind { None, Content, Formatting }
+    // `is_drafting_request` is computed once during prompt assembly (above) and
+    // reused here for the streaming hybrid-draft path.
 
-    let edit_kind = {
-        let q = last_user_query.to_lowercase();
-        let doc_refs = ["document", "affidavit", "petition", "draft", "complaint",
-            "agreement", "contract", "deed", "notice", "letter"];
-        let has_doc_ref = doc_refs.iter().any(|n| q.contains(n));
-        let fmt = ["bold", "underline", "italic", "heading", "spacing",
-            "font size", "center", "align"];
-        let content = ["change", "replace", "update", "fix", "correct", "modify",
-            "rename", "add clause", "add paragraph", "add point",
-            "add section", "remove", "delete", "insert"];
-        if has_doc_ref && fmt.iter().any(|v| q.contains(v)) {
-            EditKind::Formatting
-        } else if has_doc_ref && content.iter().any(|v| q.contains(v)) {
-            EditKind::Content
-        } else {
-            EditKind::None
+    let edit_kind = detect_edit_kind(&last_user_query, active_doc_uuid.is_some());
+
+    // An edit that targets the chat's existing draft: expose that draft as
+    // `doc-0` so the tracked-change path (and the edit_document tool) resolve a
+    // target. `last_doc_uuid` is deliberately left untouched — it carries
+    // "drafted this turn" semantics used for message-linking after generation.
+    if edit_kind != EditKind::None {
+        if let Some(ref uuid) = active_doc_uuid {
+            doc_label_map.insert("doc-0".to_string(), uuid.clone());
         }
-    };
+    }
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(64);
     let state_clone = state.clone();
@@ -7354,7 +7581,7 @@ fn truncate_on_char_boundary(text: &str, max: usize) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_citations_block, sanitise_annotations_quotes, strip_page_markers, clean_draft_text, extract_text_from_model_json, truncate_on_char_boundary};
+    use super::{extract_citations_block, sanitise_annotations_quotes, strip_page_markers, clean_draft_text, extract_text_from_model_json, truncate_on_char_boundary, detect_edit_kind, EditKind};
     use serde_json::{json, Value};
 
     #[test]
@@ -7540,5 +7767,53 @@ mod tests {
         let text = "<CITATIONS>[1]</CITATIONS> ... <CITATIONS>[2]</CITATIONS>";
         let v = extract_citations_block(text).unwrap();
         assert_eq!(v, json!([2]));
+    }
+
+    // ── detect_edit_kind: a second-turn edit targets the chat's prior draft ──
+
+    #[test]
+    fn change_point_is_an_edit_when_a_draft_exists() {
+        // The bug: after a draft, "change point 4" replied "I haven't drafted
+        // anything" because edit_kind was None. With the draft restored at turn
+        // start (has_active_doc = true), the turn is recognised as an edit.
+        assert_eq!(detect_edit_kind("change point 4", true), EditKind::Content);
+    }
+
+    #[test]
+    fn populate_defendant_part_is_an_edit_when_a_draft_exists() {
+        assert_eq!(
+            detect_edit_kind("populate the defendant part with 'Mr Rakesh'", true),
+            EditKind::Content,
+        );
+    }
+
+    #[test]
+    fn redline_is_an_edit_when_a_draft_exists() {
+        assert_eq!(detect_edit_kind("redline this", true), EditKind::Content);
+    }
+
+    #[test]
+    fn point_edit_without_a_draft_is_not_an_edit() {
+        // No active draft: a bare "change point 4" must NOT be misread as an
+        // edit — there is nothing to target. This guard is what keeps the
+        // broadened detection from firing on ordinary chat.
+        assert_eq!(detect_edit_kind("change point 4", false), EditKind::None);
+    }
+
+    #[test]
+    fn plain_chat_is_not_an_edit_even_with_a_draft() {
+        assert_eq!(
+            detect_edit_kind("what are the chances of bail being granted?", true),
+            EditKind::None,
+        );
+    }
+
+    #[test]
+    fn explicit_doc_reference_still_edits_without_the_draft_flag() {
+        // Pre-existing behaviour for named documents is preserved.
+        assert_eq!(
+            detect_edit_kind("change the heading in the affidavit", false),
+            EditKind::Formatting,
+        );
     }
 }

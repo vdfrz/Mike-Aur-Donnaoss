@@ -587,6 +587,71 @@ pub async fn exec_expand_chunk(state: &AppState, user_id: &str, args: &Value) ->
     .to_string()
 }
 
+// ── Direct injection helpers (small / offline models) ────────────────────────
+//
+// Small local models get no tool schemas, so they can never call
+// `search_firm_corpus`. These helpers let the chat route pull the same firm
+// knowledge directly and inject a trimmed copy into the system prompt instead.
+
+/// A firm template the lawyer marked reusable, cleaned into a `{{placeholder}}`
+/// markdown skeleton at upload time (see `routes::corpus::build_template`).
+pub struct FirmTemplate {
+    pub filename: String,
+    pub template_md: String,
+}
+
+/// Ready firm templates that already have a built skeleton, newest first.
+/// Empty on any error — template injection is best-effort.
+pub async fn firm_templates(db: &SqlitePool, user_id: &str, limit: i64) -> Vec<FirmTemplate> {
+    sqlx::query_as::<_, (String, String)>(
+        "SELECT filename, template_md FROM corpus_files \
+         WHERE user_id = ? AND status = 'ready' AND is_template = 1 \
+           AND template_md IS NOT NULL AND template_md != '' \
+         ORDER BY created_at DESC LIMIT ?",
+    )
+    .bind(user_id)
+    .bind(limit.clamp(1, 5))
+    .fetch_all(db)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|(filename, template_md)| FirmTemplate { filename, template_md })
+    .collect()
+}
+
+/// One firm-corpus passage for direct prompt injection.
+pub struct FirmSnippet {
+    pub filename: String,
+    pub heading: Option<String>,
+    pub text: String,
+}
+
+/// Top firm-corpus passages for a query, BM25-only so it needs no embedding
+/// model (works offline). Empty on no match or any error.
+pub async fn top_firm_snippets(
+    db: &SqlitePool,
+    user_id: &str,
+    query: &str,
+    limit: i64,
+) -> Vec<FirmSnippet> {
+    let q = sanitize_fts_query(query);
+    if q.trim().is_empty() {
+        return Vec::new();
+    }
+    let filters = Filters::default();
+    match bm25_candidates(db, user_id, &q, &filters, limit.clamp(1, 6)).await {
+        Ok(hits) => hits
+            .into_iter()
+            .map(|(h, _score)| FirmSnippet {
+                filename: h.filename,
+                heading: h.heading,
+                text: h.text,
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -933,35 +933,25 @@ async fn generate_output(
     // Call the real LLM-backed output generator.
     // The annexure index lists the attached documents; the others build on analysis findings.
     let doc_id = if output_type == "annexure-index" {
-        let docs: Vec<(Option<String>, Option<String>, Option<i64>)> = sqlx::query_as(
-            "SELECT d.filename, cd.document_type, d.page_count \
-             FROM case_documents cd LEFT JOIN documents d ON d.id = cd.document_id \
-             WHERE cd.case_id = ?",
+        // The annexure index is built deterministically off the drafting registry
+        // (seeded from the attached documents) inside generate_annexure_index. We
+        // only guard the empty case here so the user gets a clear 422, not a 500.
+        let doc_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM case_documents WHERE case_id = ?",
         )
         .bind(case_id)
-        .fetch_all(&state.db)
+        .fetch_one(&state.db)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
-        if docs.is_empty() {
+        if doc_count == 0 {
             return Err(err(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "No documents attached to this case.",
             ));
         }
 
-        let documents_json: Vec<serde_json::Value> = docs
-            .into_iter()
-            .map(|(filename, doc_type, page_count)| {
-                json!({
-                    "filename": filename,
-                    "document_type": doc_type,
-                    "page_count": page_count,
-                })
-            })
-            .collect();
-
-        case_outputs::generate_annexure_index(&state.db, case_id, user_id, &documents_json, &config)
+        case_outputs::generate_annexure_index(&state.db, case_id, user_id)
             .await
     } else {
         let findings: Vec<(String, String)> = sqlx::query_as(

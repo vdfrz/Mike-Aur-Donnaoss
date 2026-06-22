@@ -151,6 +151,49 @@ CITATION FORMAT:
   Never fabricate citations; cite only cases from this turn's tool outputs or from the provided documents.
 ---"#;
 
+/// Litigation-risk screening rubric, condensed from
+/// `docs/LITIGATION_RISK_RUBRIC_PROMPT_BLOCK.md` and stripped of the interactive
+/// chat directives ("return a triage table", "ask which side", "redline") that
+/// would conflict with the JSON-only agent contracts. The risk/strategy agents
+/// and the brief/memo generators layer this on top of their own instructions so
+/// they screen against the same HIGH/MED/LOW + side taxonomy the chat assistant
+/// uses. It does NOT replace any agent's output schema — callers add the
+/// output-mode framing (JSON vs Markdown) at the injection site.
+pub const LITIGATION_RISK_RUBRIC_BLOCK: &str = r#"LITIGATION-RISK SCREENING RUBRIC (India; ~85% pleadings, ~15% transactional).
+Screen the case against this taxonomy. Tag every risk you raise HIGH / MED / LOW and say which SIDE it helps vs hurts — the same defect is a sword for one party and a wound for the other:
+- HIGH = can get the pleading rejected/dismissed/time-barred/struck (a filing-killer); flag it even if it hurts the client.
+- MED = weakens the case, invites a successful preliminary objection, or costs an amendment.
+- LOW = polish, hygiene, persuasiveness.
+Never fabricate citations/sections/dates/names/amounts; unknown facts stay "________".
+
+CROSS-CUTTING (almost every pleading):
+- LIMITATION (Limitation Act 1963) — HIGH. A time-barred suit is dismissed even unpleaded (s.3). State the Article, the date the cause of action arose, and the LAST date. APPEALS run from RECEIPT of the certified/impugned order, not its date. s.12 (event day / certified-copy time) and s.14 (bona fide wrong forum) excluded; s.18/19 acknowledgment/part-payment resets. If late: a SEPARATE condonation application + supporting affidavit (s.5; IT appeals s.249(3)) — never a foot-of-prayer line.
+- JURISDICTION — HIGH. Territorial (s.20 CPC), pecuniary, subject-matter; wrong forum → plaint returned (O7R10). Watch tribunal exclusivity (AFT/ITAT/GSTAT/NCLT/RERA/DRT/Labour) and the WRONG-STATUTE trap (consumer complaint under the repealed CP Act 1986 vs the 2019 Act — fatal).
+- CAUSE OF ACTION — HIGH. None/defective → rejection under Order VII Rule 11(a). On an O7R11 application ONLY the plaint is seen, not the WS. Plead the operative facts + the date each arose.
+- COURT FEE & VALUATION — MED/HIGH. Ad valorem on the relief's value; state valuation-for-jurisdiction and fee-affixed; declaration needs the right fee head.
+- VERIFICATION & AFFIDAVIT — HIGH. Order VI Rule 15 (split knowledge vs information&belief), place/date, deponent capacity (board resolution for a company); supporting affidavit s.26(2) CPC for fact-pleadings; affidavit sworn before a notary/oath commissioner.
+- MATERIAL FACTS vs EVIDENCE & SUPPRESSION — HIGH (writs especially). Plead material facts, not evidence (O6R2); suppression defeats a writ (clean hands) — disclose adverse facts.
+- PARTIES — HIGH. Non-joinder of a NECESSARY party can dismiss (e.g. all co-owners in partition); correct CAPACITY (karta, guardian O32, legal heirs O22, firm O30); government as "Union of India through Secretary, Ministry of ___"; representative suits O1R8.
+- STATUTORY PRE-CONDITIONS — HIGH. S.80 CPC 2-month govt notice; S.12A Commercial Courts pre-institution mediation (unless urgent relief); S.138 NI chain (demand notice within 30 days of the dishonour memo → 15-day pay window → complaint within 1 month of expiry, s.142(b); only payee/holder-in-due-course); S.69 Partnership unregistered-firm bar; s.21 A&C notice.
+- PRAYER/RELIEF — MED/HIGH. Relief must trace to a pleaded fact; declaration needs CONSEQUENTIAL relief (s.34 SRA); plead specific AND alternative relief; pray interim relief separately.
+- INTERIM RELIEF — HIGH. Plead the three-fold test separately (prima facie case, balance of convenience, irreparable injury); justify ex-parte under O39R3; add the damages undertaking; define the status quo.
+- DENIAL DISCIPLINE (WS/replies) — HIGH. Evasive/vague denial = ADMISSION (O8 R3-5). General denial + preliminary objections + PARA-WISE reply, each averment admitted/denied/"put to strict proof". Plead set-off/counterclaim (O8R6/6A) with its own court fee + limitation.
+- ANNEXURE & CROSS-REF INTEGRITY — MED. Cite each annexure in the body exactly once; never list an uncited annexure; reconcile index / List of Dates / body; renumber paras after edits.
+- SIGNATURE/VAKALATNAMA — MED/HIGH. Signed by party AND counsel; vakalatnama, court fee, exemption application, and certified copy of the impugned order in the bundle.
+
+DOCUMENT-TYPE FLAGS:
+- Plaint: cause of action + jurisdiction + valuation + limitation paras; pre-conditions; O37 averment for summary suits.
+- Written Statement: file in 30 days (commercial suits: 120-day HARD limit); para-wise denials; all preliminary objections; set-off/counterclaim.
+- Writ (226/32): alternative remedy, delay & laches, locus, NO suppression (affidavit of full disclosure); correct State respondents.
+- S.138 NI / criminal complaint: the timeline above + director liability s.141.
+- Bail/anticipatory (BNSS §480/§483/§482): flight risk, tampering, witness influence, gravity, parity; flag NDPS/UAPA/PMLA statutory rigour; don't concede guilt.
+- Appeal/revision (civil/ITAT/AFT/GSTAT/CIC): limitation from receipt of order; annex certified copy; condonation if late; numbered grounds + "craves leave to add grounds"; statutory pre-deposit.
+- Consumer: 2-year limitation; pecuniary jurisdiction on consideration paid; FILE UNDER 2019 ACT; establish "consumer" (non-commercial).
+- Matrimonial: jurisdiction (HMA s.19 / DV Act §27); plead marriage/rites/residence; cruelty/desertion with dated particulars; assets affidavit for maintenance (Rajnesh v. Neha).
+- Eviction/property: relationship + statutory ground + s.106 TPA / Rent-Act notice to quit; partition arrays ALL co-sharers; market-value valuation.
+
+TRANSACTIONAL (~15%): stamp duty & registration (§17 Reg. Act — unregistered sale/gift/>11-month lease passes no title; unstamped = inadmissible); §74 penalty vs genuine pre-estimate; §27 void post-employment non-compete; indemnity/liability-cap carve-outs; arbitration seat/venue + §28 bar; force majeure vs §56; termination & survival; reps/warranties + disclosure schedule; e-sign §10A IT Act."#;
+
 pub const CASE_SUMMARY_AGENT: &str = r#"You are a case-digest agent. You receive all documents attached to a legal case and produce a structured 1-page case summary.
 
 INPUT: One or more documents, each tagged with a source_doc_id (e.g. "doc-0", "doc-1"). Read every document in full before producing output.
