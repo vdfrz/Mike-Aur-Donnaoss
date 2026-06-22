@@ -46,6 +46,7 @@ export default function AccountLayout({
                 { id: "personalization", label: tAccount("personalizationLink"), href: "/account/personalization" },
                 { id: "models", label: tAccount("modelsLink"), href: "/account/models" },
                 { id: "mcp", label: tAccount("mcpLink"), href: "/account/mcp" },
+                { id: "telegram", label: tAccount("telegramLink"), href: "/account/telegram" },
             ],
         },
         {
