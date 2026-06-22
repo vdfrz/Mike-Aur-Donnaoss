@@ -1,4 +1,5 @@
 pub mod docx_writer;
+pub mod pandoc;
 
 #[cfg(feature = "pdf")]
 pub mod md_pdf;

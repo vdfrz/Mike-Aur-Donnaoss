@@ -33,20 +33,25 @@ fi
 command -v npm >/dev/null 2>&1 || \
   fail "Node.js (v18+) is required. Install it from https://nodejs.org/ and re-run."
 
-# 3. System libraries for OCR / PDF -----------------------------------------
+# 3. System libraries for OCR / PDF / DOCX ----------------------------------
+# pandoc is the optional, redline-path-only docx→markdown converter (see
+# docs/DOCX.md). The desktop app bundles its own copy under src-tauri/pandoc/,
+# but installing it here puts a `pandoc` on PATH so the server/dev surface
+# (cargo run, the bot backend) also gets the higher-fidelity reader. Absent
+# pandoc, the pure-Rust extractor still handles every redline — just flatter.
 if [ "$OS" = "Darwin" ]; then
   if command -v brew >/dev/null 2>&1; then
-    note "Installing system libraries (tesseract, leptonica, pkg-config)…"
-    brew install tesseract leptonica pkg-config >/dev/null || true
+    note "Installing system libraries (tesseract, leptonica, pkg-config, pandoc)…"
+    brew install tesseract leptonica pkg-config pandoc >/dev/null || true
   else
     echo "!! Homebrew not found — the OCR build step may fail."
     echo "   Install Homebrew from https://brew.sh then run:"
-    echo "   brew install tesseract leptonica pkg-config"
+    echo "   brew install tesseract leptonica pkg-config pandoc"
   fi
 elif [ "$OS" = "Linux" ] && command -v apt-get >/dev/null 2>&1; then
-  note "Installing system libraries (tesseract, leptonica, pkg-config)…"
+  note "Installing system libraries (tesseract, leptonica, pkg-config, pandoc)…"
   sudo apt-get update -y && \
-    sudo apt-get install -y libtesseract-dev libleptonica-dev pkg-config || true
+    sudo apt-get install -y libtesseract-dev libleptonica-dev pkg-config pandoc || true
 fi
 
 # 4. Tauri CLI --------------------------------------------------------------

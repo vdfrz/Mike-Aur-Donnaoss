@@ -874,18 +874,298 @@ fn patch_document_xml_tracked(xml: &str, edits: &[DocxEdit]) -> (String, Vec<Tra
     let mut changes = Vec::new();
     let mut working = xml.to_string();
     let mut next_id = find_max_w_id(&working) + 1;
+    let timestamp = "2025-01-01T00:00:00Z";
 
     for ed in edits {
-        if ed.find.is_empty() { continue; }
+        // Pure insertion: no anchor text, append the clause as a tracked <w:ins>.
+        if ed.find.is_empty() {
+            if ed.replace.is_empty() { continue; }
+            if let Some((new_xml, tcs)) = insert_tracked_paragraph(
+                &working, &ed.replace, ed.format.as_deref(), &mut next_id, timestamp,
+            ) {
+                working = new_xml;
+                changes.extend(tcs);
+            }
+            continue;
+        }
+
+        // Format-only reformat (same text, new run properties): a word diff
+        // would be a no-op, so keep the whole-run del+ins path.
+        if ed.find == ed.replace {
+            if let Some((new_xml, change)) = tracked_replace_in_run(
+                &working, &ed.find, &ed.replace, ed.format.as_deref(), &mut next_id,
+            ) {
+                working = new_xml;
+                changes.push(change);
+            }
+            continue;
+        }
+
+        // Word-level diff: lands across run splits and marks only changed words.
+        if let Some((new_xml, tcs)) = diff_replace_span(
+            &working, &ed.find, &ed.replace, ed.format.as_deref(), &mut next_id, timestamp,
+        ) {
+            working = new_xml;
+            changes.extend(tcs);
+            continue;
+        }
+
+        // Fallback: whole-run tolerant replace (case-insensitive, cross-run).
+        // Keeps edits landing when `find` is not an exact substring.
         if let Some((new_xml, change)) = tracked_replace_in_run(
             &working, &ed.find, &ed.replace, ed.format.as_deref(), &mut next_id,
         ) {
             working = new_xml;
             changes.push(change);
         }
+        // else: clause not found -> no change pushed (caller surfaces the error)
     }
 
     (working, changes)
+}
+
+/// Word-level diff of `original` -> `replace`, emitted as tracked-change OOXML.
+/// Unchanged words become plain <w:r> (preserving `rpr`); deleted words go into
+/// <w:del>, inserted words into <w:ins> (with optional `format`). Returns the
+/// XML fragment plus one TrackedChange per del/ins hunk. A pure insertion
+/// (empty `original`) yields ins-only hunks with no <w:del>.
+fn apply_revision_tracked(
+    original: &str,
+    replace: &str,
+    rpr: &str,
+    format: Option<&str>,
+    next_id: &mut u32,
+    timestamp: &str,
+) -> (String, Vec<TrackedChange>) {
+    use similar::{ChangeTag, TextDiff};
+
+    let ins_rpr = build_ins_rpr(
+        &(if rpr.is_empty() { None } else { Some(rpr.to_string()) }),
+        format,
+    );
+
+    let diff = TextDiff::from_words(original, replace);
+    let mut out = String::new();
+    let mut changes = Vec::new();
+    let mut eq = String::new();
+    let mut del = String::new();
+    let mut ins = String::new();
+
+    // Emit accumulated unchanged words as a plain run.
+    let flush_eq = |out: &mut String, eq: &mut String| {
+        if !eq.is_empty() {
+            out.push_str(&format!(
+                "<w:r>{}<w:t xml:space=\"preserve\">{}</w:t></w:r>",
+                rpr,
+                xml_escape_static(eq)
+            ));
+            eq.clear();
+        }
+    };
+    // Emit an accumulated del/ins hunk and record one TrackedChange.
+    let flush_hunk = |out: &mut String,
+                      changes: &mut Vec<TrackedChange>,
+                      del: &mut String,
+                      ins: &mut String,
+                      next_id: &mut u32| {
+        if del.is_empty() && ins.is_empty() {
+            return;
+        }
+        let del_id = if !del.is_empty() {
+            let id = *next_id;
+            *next_id += 1;
+            Some(id)
+        } else {
+            None
+        };
+        let ins_id = if !ins.is_empty() {
+            let id = *next_id;
+            *next_id += 1;
+            Some(id)
+        } else {
+            None
+        };
+        if let Some(id) = del_id {
+            out.push_str(&format!(
+                "<w:del w:id=\"{}\" w:author=\"Mike\" w:date=\"{}\"><w:r>{}<w:delText xml:space=\"preserve\">{}</w:delText></w:r></w:del>",
+                id, timestamp, rpr, xml_escape_static(del)
+            ));
+        }
+        if let Some(id) = ins_id {
+            out.push_str(&format!(
+                "<w:ins w:id=\"{}\" w:author=\"Mike\" w:date=\"{}\"><w:r>{}<w:t xml:space=\"preserve\">{}</w:t></w:r></w:ins>",
+                id, timestamp, ins_rpr, xml_escape_static(ins)
+            ));
+        }
+        changes.push(TrackedChange {
+            del_w_id: del_id.map(|i| i.to_string()),
+            ins_w_id: ins_id.map(|i| i.to_string()),
+            deleted_text: del.clone(),
+            inserted_text: ins.clone(),
+        });
+        del.clear();
+        ins.clear();
+    };
+
+    for ch in diff.iter_all_changes() {
+        match ch.tag() {
+            ChangeTag::Equal => {
+                flush_hunk(&mut out, &mut changes, &mut del, &mut ins, next_id);
+                eq.push_str(ch.value());
+            }
+            ChangeTag::Delete => {
+                flush_eq(&mut out, &mut eq);
+                del.push_str(ch.value());
+            }
+            ChangeTag::Insert => {
+                flush_eq(&mut out, &mut eq);
+                ins.push_str(ch.value());
+            }
+        }
+    }
+    flush_hunk(&mut out, &mut changes, &mut del, &mut ins, next_id);
+    flush_eq(&mut out, &mut eq);
+
+    (out, changes)
+}
+
+/// Locate `find` across one or more runs and replace that span with a
+/// word-level tracked-change diff. Returns None if `find` is not an exact
+/// substring of the concatenated run text (the caller then falls back).
+fn diff_replace_span(
+    xml: &str,
+    find: &str,
+    replace: &str,
+    format: Option<&str>,
+    next_id: &mut u32,
+    timestamp: &str,
+) -> Option<(String, Vec<TrackedChange>)> {
+    // Collect runs as (start, end, rpr, unescaped_text).
+    let mut runs: Vec<(usize, usize, String, String)> = Vec::new();
+    let mut pos = 0;
+    while let Some(r_start) = next_run_start(xml, pos) {
+        let r_end = run_end_after(xml, r_start)?;
+        let run_xml = &xml[r_start..r_end];
+        let rpr = extract_rpr(run_xml).unwrap_or_default();
+        let text = html_unescape(&run_visible_text(run_xml));
+        runs.push((r_start, r_end, rpr, text));
+        pos = r_end;
+    }
+    if runs.is_empty() {
+        return None;
+    }
+
+    // Concatenated visible text + per-run start offsets within it.
+    let mut combined = String::new();
+    let mut starts: Vec<usize> = Vec::with_capacity(runs.len());
+    for (_, _, _, t) in &runs {
+        starts.push(combined.len());
+        combined.push_str(t);
+    }
+
+    let mpos = combined.find(find)?;
+    let mend = mpos + find.len();
+
+    // First run containing the match start; last run containing the match end.
+    let mut first_idx = 0;
+    let mut local_start = 0;
+    for (i, (_, _, _, t)) in runs.iter().enumerate() {
+        let s = starts[i];
+        let e = s + t.len();
+        if mpos >= s && mpos < e {
+            first_idx = i;
+            local_start = mpos - s;
+            break;
+        }
+    }
+    let mut last_idx = runs.len() - 1;
+    let mut local_end = runs[last_idx].3.len();
+    for (i, (_, _, _, t)) in runs.iter().enumerate() {
+        let s = starts[i];
+        let e = s + t.len();
+        if mend > s && mend <= e {
+            last_idx = i;
+            local_end = mend - s;
+            break;
+        }
+    }
+
+    // Safety: never splice across a paragraph boundary. Runs are concatenated
+    // doc-wide with no separator, so a `find` straddling two <w:p> would
+    // otherwise delete the intervening </w:p><w:p> structure and corrupt the
+    // document. Bail to the fallback (which only ever rewrites within a run).
+    if last_idx > first_idx
+        && xml[runs[first_idx].1..runs[last_idx].0].contains("</w:p>")
+    {
+        return None;
+    }
+
+    let first_rpr = runs[first_idx].2.clone();
+    let last_rpr = runs[last_idx].2.clone();
+    let before = &runs[first_idx].3[..local_start];
+    let after = &runs[last_idx].3[local_end..];
+
+    let mut fragment = String::new();
+    if !before.is_empty() {
+        fragment.push_str(&format!(
+            "<w:r>{}<w:t xml:space=\"preserve\">{}</w:t></w:r>",
+            first_rpr,
+            xml_escape_static(before)
+        ));
+    }
+    let (diff_xml, changes) =
+        apply_revision_tracked(find, replace, &first_rpr, format, next_id, timestamp);
+    fragment.push_str(&diff_xml);
+    if !after.is_empty() {
+        fragment.push_str(&format!(
+            "<w:r>{}<w:t xml:space=\"preserve\">{}</w:t></w:r>",
+            last_rpr,
+            xml_escape_static(after)
+        ));
+    }
+    if changes.is_empty() {
+        return None;
+    }
+
+    let span_start = runs[first_idx].0;
+    let span_end = runs[last_idx].1;
+    let mut new_xml = String::with_capacity(xml.len() + fragment.len());
+    new_xml.push_str(&xml[..span_start]);
+    new_xml.push_str(&fragment);
+    new_xml.push_str(&xml[span_end..]);
+    Some((new_xml, changes))
+}
+
+/// Append `replace` as a new tracked-insertion paragraph before the section
+/// properties (or the end of the body). Pure insertion: <w:ins> only, no del.
+fn insert_tracked_paragraph(
+    xml: &str,
+    replace: &str,
+    format: Option<&str>,
+    next_id: &mut u32,
+    timestamp: &str,
+) -> Option<(String, Vec<TrackedChange>)> {
+    let ins_id = *next_id;
+    *next_id += 1;
+    let ins_rpr = build_ins_rpr(&None, format);
+    let para = format!(
+        "<w:p><w:ins w:id=\"{}\" w:author=\"Mike\" w:date=\"{}\"><w:r>{}<w:t xml:space=\"preserve\">{}</w:t></w:r></w:ins></w:p>",
+        ins_id, timestamp, ins_rpr, xml_escape_static(replace)
+    );
+    let insert_at = xml.find("<w:sectPr").or_else(|| xml.find("</w:body>"))?;
+    let mut new_xml = String::with_capacity(xml.len() + para.len());
+    new_xml.push_str(&xml[..insert_at]);
+    new_xml.push_str(&para);
+    new_xml.push_str(&xml[insert_at..]);
+    Some((
+        new_xml,
+        vec![TrackedChange {
+            del_w_id: None,
+            ins_w_id: Some(ins_id.to_string()),
+            deleted_text: String::new(),
+            inserted_text: replace.to_string(),
+        }],
+    ))
 }
 
 /// Find the highest w:id value in the XML so new IDs don't collide.
@@ -1460,5 +1740,149 @@ mod tests {
             from = close + 6;
         }
         out
+    }
+
+    // ---- diff-driven tracked changes (apply_revision_tracked) ----
+
+    /// Test helper: zip a minimal .docx around a document.xml body.
+    fn make_docx(document_xml: &str) -> Vec<u8> {
+        let buf = Vec::new();
+        let mut zip = zip::ZipWriter::new(Cursor::new(buf));
+        let opts: zip::write::SimpleFileOptions =
+            zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        zip.start_file("word/document.xml", opts).unwrap();
+        zip.write_all(document_xml.as_bytes()).unwrap();
+        zip.finish().unwrap().into_inner()
+    }
+
+    /// Test helper: visible text of a whole .docx.
+    fn docx_visible_text(docx: &[u8]) -> String {
+        let mut a = zip::ZipArchive::new(Cursor::new(docx.to_vec())).unwrap();
+        let mut xml = String::new();
+        for i in 0..a.len() {
+            let mut f = a.by_index(i).unwrap();
+            if f.name() == "word/document.xml" {
+                f.read_to_string(&mut xml).unwrap();
+            }
+        }
+        visible_text(&xml)
+    }
+
+    #[test]
+    fn diff_minimal_redline_changes_only_one_word() {
+        // 12-word clause; only "old" -> "tired" changes. Exactly one del+ins
+        // pair; the other 11 words stay in plain runs.
+        let xml = r#"<w:body><w:p><w:r><w:t xml:space="preserve">The quick brown fox jumps over the lazy old grey sleepy dog</w:t></w:r></w:p></w:body>"#;
+        let edits = vec![DocxEdit {
+            find: "The quick brown fox jumps over the lazy old grey sleepy dog".to_string(),
+            replace: "The quick brown fox jumps over the lazy tired grey sleepy dog".to_string(),
+            format: None,
+        }];
+        let (result, changes) = patch_document_xml_tracked(xml, &edits);
+        assert_eq!(result.matches("<w:del ").count(), 1, "exactly one del: {result}");
+        assert_eq!(result.matches("<w:ins ").count(), 1, "exactly one ins: {result}");
+        assert!(result.contains("<w:delText xml:space=\"preserve\">old</w:delText>"), "del holds only the old word: {result}");
+        assert!(result.contains("tired"), "ins holds the new word: {result}");
+        assert_eq!(changes.len(), 1);
+        // The unchanged words survive as plain text in the output.
+        assert!(visible_text(&result).contains("quick brown fox"), "unchanged words preserved: {result}");
+    }
+
+    #[test]
+    fn diff_run_split_edit_lands() {
+        // "Hello World" is split across two runs with different rPr. The edit
+        // must still land as tracked changes.
+        let xml = concat!(
+            r#"<w:body><w:p>"#,
+            r#"<w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">Hello </w:t></w:r>"#,
+            r#"<w:r><w:t>World</w:t></w:r>"#,
+            r#"</w:p></w:body>"#,
+        );
+        let edits = vec![DocxEdit {
+            find: "Hello World".to_string(),
+            replace: "Goodbye Mars".to_string(),
+            format: None,
+        }];
+        let (result, changes) = patch_document_xml_tracked(xml, &edits);
+        assert!(result.contains("<w:ins "), "has ins: {result}");
+        assert!(result.contains("<w:del "), "has del: {result}");
+        assert!(result.contains("<w:delText"), "has delText: {result}");
+        assert!(result.contains("Goodbye"), "new words present: {result}");
+        assert!(result.contains("Mars"), "new words present: {result}");
+        assert!(!changes.is_empty(), "produced at least one hunk");
+    }
+
+    #[test]
+    fn pure_insertion_emits_ins_no_del() {
+        // Empty find = insertion. Append a new clause as <w:ins>, no <w:del>.
+        let xml = r#"<w:body><w:p><w:r><w:t>Existing clause.</w:t></w:r></w:p><w:sectPr/></w:body>"#;
+        let edits = vec![DocxEdit {
+            find: String::new(),
+            replace: "A new verification clause.".to_string(),
+            format: None,
+        }];
+        let (result, changes) = patch_document_xml_tracked(xml, &edits);
+        assert!(result.contains("<w:ins "), "has ins: {result}");
+        assert!(!result.contains("<w:del "), "no del for pure insertion: {result}");
+        assert!(result.contains("A new verification clause."), "inserted text present: {result}");
+        assert_eq!(changes.len(), 1);
+        assert!(changes[0].del_w_id.is_none(), "insertion has no del id");
+        assert!(changes[0].ins_w_id.is_some(), "insertion has an ins id");
+        let ins_at = result.find("<w:ins ").unwrap();
+        let sect_at = result.find("<w:sectPr").unwrap();
+        assert!(ins_at < sect_at, "insertion lands before sectPr: {result}");
+    }
+
+    #[test]
+    fn diff_does_not_corrupt_across_paragraphs() {
+        // A find that straddles a paragraph boundary must NOT delete the
+        // </w:p><w:p> structure. The writer bails (no change) rather than corrupt.
+        let xml = concat!(
+            r#"<w:body>"#,
+            r#"<w:p><w:r><w:t xml:space="preserve">First paragraph ends here</w:t></w:r></w:p>"#,
+            r#"<w:p><w:r><w:t xml:space="preserve">Second paragraph starts here</w:t></w:r></w:p>"#,
+            r#"</w:body>"#,
+        );
+        // "hereSecond" straddles the join (runs concatenate with no separator).
+        let edits = vec![DocxEdit {
+            find: "hereSecond".to_string(),
+            replace: "here. Brand new Second".to_string(),
+            format: None,
+        }];
+        let (result, _changes) = patch_document_xml_tracked(xml, &edits);
+        assert_eq!(result.matches("<w:p>").count(), 2, "both paragraphs preserved: {result}");
+        assert_eq!(result.matches("</w:p>").count(), 2, "both paragraph closes preserved: {result}");
+    }
+
+    #[test]
+    fn diff_redline_roundtrips_through_resolve() {
+        let body = r#"<w:document><w:body><w:p><w:r><w:t xml:space="preserve">The cat sat on the mat</w:t></w:r></w:p></w:body></w:document>"#;
+        let docx = make_docx(body);
+        let edits = vec![DocxEdit {
+            find: "The cat sat on the mat".to_string(),
+            replace: "The dog sat on the rug".to_string(),
+            format: None,
+        }];
+        let res = apply_tracked_edits(&docx, &edits).unwrap();
+        let ids = extract_tracked_change_ids(&res.bytes).unwrap();
+        assert!(!ids.is_empty(), "produced tracked-change ids");
+
+        // Accept every change -> the revised text.
+        let mut accepted = res.bytes.clone();
+        for (_kind, id) in &ids {
+            if let Some(b) = resolve_tracked_change(&accepted, id, true).unwrap() {
+                accepted = b;
+            }
+        }
+        assert_eq!(docx_visible_text(&accepted), "The dog sat on the rug", "accept yields revised text");
+
+        // Reject every change -> the original text.
+        let mut rejected = res.bytes.clone();
+        for (_kind, id) in &ids {
+            if let Some(b) = resolve_tracked_change(&rejected, id, false).unwrap() {
+                rejected = b;
+            }
+        }
+        assert_eq!(docx_visible_text(&rejected), "The cat sat on the mat", "reject yields original text");
     }
 }

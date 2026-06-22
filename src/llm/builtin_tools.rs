@@ -71,13 +71,18 @@ pub fn schemas() -> Vec<ToolSchema> {
     vec![
         fun(
             READ_DOCUMENT,
-            "Read the full text content of a document attached by the user. Always call this before answering questions about, summarising, or citing from a document.",
+            "Read the full text content of a document attached by the user. Always call this before answering questions about, summarising, or citing from a document. When you are about to redline or edit a .docx, pass format:\"markdown\" to get a structured view (clause numbering, tables, and any existing tracked changes) instead of flat text.",
             json!({
                 "type": "object",
                 "properties": {
                     "doc_id": {
                         "type": "string",
                         "description": "The document ID to read (e.g. 'doc-0', 'doc-1')"
+                    },
+                    "format": {
+                        "type": "string",
+                        "enum": ["text", "markdown"],
+                        "description": "Output format. 'text' (default) returns plain extracted text. 'markdown' returns a structured Markdown view of a .docx preserving clause numbers, tables, and tracked changes; use it when redlining or editing a Word document. Ignored for non-.docx files."
                     }
                 },
                 "required": ["doc_id"]
@@ -502,7 +507,16 @@ async fn exec_read_document(
         },
         None => return json!({"error": "storage backend unavailable"}).to_string(),
     };
-    let text = extract_text(&file_type, &filename, &bytes);
+    // Optional structured-Markdown view for the redline path. Only meaningful
+    // for .docx; the default ("text") and every other file type use the
+    // pure-Rust hot extractor unchanged, so behavior is byte-identical when
+    // `format` is absent.
+    let want_markdown = arguments.get("format").and_then(|v| v.as_str()) == Some("markdown");
+    let text = if want_markdown && file_type == "docx" {
+        docx_markdown_view(&bytes)
+    } else {
+        extract_text(&file_type, &filename, &bytes)
+    };
     json!({
         "doc_id": doc_label,
         "filename": filename,
@@ -1071,9 +1085,75 @@ fn extract_text(file_type: &str, filename: &str, bytes: &[u8]) -> String {
     }
 }
 
+/// Structured-Markdown view of a `.docx` for the redline path: pandoc when it
+/// is available, otherwise the pure-Rust `extract_docx_text` with a one-line
+/// note prepended so the model knows it is looking at the flat fallback, not
+/// structured Markdown. Never errors — a missing or failing pandoc degrades to
+/// plain text rather than failing the read_document tool.
+fn docx_markdown_view(bytes: &[u8]) -> String {
+    // One pandoc probe, not two: docx_to_markdown resolves the binary itself
+    // and returns Err if pandoc is missing or the conversion fails. On any
+    // error we degrade to the pure-Rust extractor, so a missing or broken
+    // pandoc never fails the read_document tool.
+    match crate::pdf::pandoc::docx_to_markdown(bytes) {
+        Ok(md) => md,
+        Err(e) => {
+            tracing::warn!(
+                "[read_document] structured markdown unavailable, plain-text fallback: {e}"
+            );
+            let plain = crate::pdf::extract_docx_text(bytes).unwrap_or_default();
+            format!("(pandoc unavailable - plain-text view)\n{plain}")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Minimal `.docx` (a ZIP carrying only `word/document.xml`) — what the
+    /// pure-Rust `extract_docx_text` reads. Used to exercise the markdown-view
+    /// fallback without packaging a full Word document.
+    fn minimal_docx(text: &str) -> Vec<u8> {
+        use std::io::Write;
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        {
+            let mut zipw = zip::ZipWriter::new(&mut cursor);
+            zipw.start_file("word/document.xml", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            let xml = format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+                 <w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\
+                 <w:body><w:p><w:r><w:t xml:space=\"preserve\">{text}</w:t></w:r></w:p></w:body>\
+                 </w:document>"
+            );
+            zipw.write_all(xml.as_bytes()).unwrap();
+            zipw.finish().unwrap();
+        }
+        cursor.into_inner()
+    }
+
+    #[test]
+    fn docx_markdown_view_falls_back_to_plain_text_without_pandoc() {
+        // When pandoc is unavailable the markdown view must NOT error: it
+        // returns the pure-Rust extraction with the "(pandoc unavailable ...)"
+        // note prepended. Deterministic when pandoc is absent (this env / CI);
+        // skips when pandoc is installed (the round-trip test covers that).
+        if crate::pdf::pandoc::pandoc_available() {
+            eprintln!("skipping fallback assertion: pandoc is present");
+            return;
+        }
+        let docx = minimal_docx("Clause 1. The fee is 50000 rupees.");
+        let view = docx_markdown_view(&docx);
+        assert!(
+            view.starts_with("(pandoc unavailable - plain-text view)"),
+            "expected plain-text fallback note, got: {view}"
+        );
+        assert!(
+            view.contains("Clause 1."),
+            "fallback must include the pure-Rust extracted text, got: {view}"
+        );
+    }
 
     #[test]
     fn context_snippet_does_not_panic_on_multibyte_boundaries() {

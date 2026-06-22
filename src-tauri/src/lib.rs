@@ -59,6 +59,30 @@ pub fn run() {
                 }
             }
 
+            // Same idea for pandoc: the redline reader (src/pdf/pandoc.rs) prefers
+            // $PANDOC_PATH, then falls back to a `pandoc` on PATH, then to the
+            // pure-Rust extractor. When installed as a bundle there's no system
+            // pandoc, so point it at the per-platform binary bundled under the
+            // resource dir. Absence is non-fatal: if the binary isn't there we
+            // leave PANDOC_PATH unset and the PATH lookup / pure-Rust fallback
+            // takes over.
+            if std::env::var_os("PANDOC_PATH").is_none() {
+                if let Ok(res_dir) = app.path().resource_dir() {
+                    let pandoc_bin = res_dir
+                        .join("pandoc")
+                        .join(if cfg!(windows) { "pandoc.exe" } else { "pandoc" });
+                    if pandoc_bin.is_file() {
+                        // SAFETY: set once during setup. pandoc is only spawned on
+                        // the user-initiated redline path, long after startup, so
+                        // no other thread reads this var concurrently here.
+                        unsafe {
+                            std::env::set_var("PANDOC_PATH", &pandoc_bin);
+                        }
+                        tracing::info!("[docx] using bundled pandoc at {}", pandoc_bin.display());
+                    }
+                }
+            }
+
             #[cfg(debug_assertions)]
             app.get_webview_window("main")
                 .expect("main window")

@@ -111,6 +111,7 @@ tiff = "0.9"
 zip = "2"
 quick-xml = { version = "0.37", features = ["serialize"] }
 pulldown-cmark = { version = "0.12", default-features = false }
+similar = "2" # word-level diff for minimal tracked-change redlines
 # HTML scraping for the EUR-Lex adapter — strips the rendered legal-
 # content page down to the article body so we can chunk + embed it.
 # pure-Rust, ~1MB of compile-time cost; no native deps.

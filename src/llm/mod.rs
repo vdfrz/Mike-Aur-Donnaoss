@@ -62,6 +62,19 @@ pub fn is_deepseek_model(model: &str) -> bool {
     strip_model_prefix(model).starts_with("deepseek")
 }
 
+/// Single source of truth for "treat this as a small / on-device model".
+/// A tiny param count (3b/2b/1.5b), or a non-DeepSeek model served through a
+/// `local_config` (Ollama / on-device), counts as small. Cloud DeepSeek never
+/// does. Both the chat dispatcher and `post_message` gate the PII masking and
+/// prompt-trimming on this, so it must live in one place to avoid drift.
+/// Callers pass their own provider-aware `is_deepseek` (model name alone is not
+/// enough — a deepseek-named model can be pointed at a local endpoint).
+pub fn is_small_local(model: &str, has_local_config: bool, is_deepseek: bool) -> bool {
+    let is_tiny =
+        model.contains("3b") || model.contains("2b") || model.contains("1.5b");
+    is_tiny || (has_local_config && !is_deepseek)
+}
+
 /// Best-effort detection of models that handle a long `tools` schema
 /// reliably. Used by the chat dispatcher to decide whether to inject
 /// **MCP** tool schemas alongside the always-on Mike builtins.

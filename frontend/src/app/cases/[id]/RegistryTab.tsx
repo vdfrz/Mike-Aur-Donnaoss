@@ -323,7 +323,7 @@ export function RegistryTab({ caseId, documents, hasFindings = false }: Registry
             {numberingChanged && (
                 <div className="rounded-lg bg-amber-50 border border-amber-200 px-4 py-3">
                     <p className="text-xs text-amber-800">
-                        Numbering updated — regenerate outputs / rebuild drafts to apply.
+                        Numbering updated. Regenerate outputs / rebuild drafts to apply.
                     </p>
                 </div>
             )}
@@ -548,7 +548,7 @@ export function RegistryTab({ caseId, documents, hasFindings = false }: Registry
 
                     {parties.length === 0 && (
                         <p className="text-xs text-gray-400 py-4 text-center">
-                            No parties yet — add one or click AI populate
+                            No parties yet. Add one or click AI populate.
                         </p>
                     )}
 

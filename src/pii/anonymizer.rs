@@ -703,6 +703,26 @@ mod tests {
         assert!(restored.contains("arun@example.com"));
     }
 
+    /// Locks the gate invariant: the model-facing query (`anon_user_query` in
+    /// stream_chat_root, derived from the anonymized text) must carry NONE of
+    /// the real identifiers. Assert no value in `to_original` survives into the
+    /// anonymized output. Guards against a future refactor reordering the
+    /// message-masking and re-leaking raw PII to the on-device model.
+    #[test]
+    fn no_raw_identifier_survives_into_anonymized_text() {
+        let query = "Draft a bail application for Shri Rajesh Kumar, \
+                     Aadhaar 1234 5678 9012, PAN ABCDE1234F, \
+                     phone +91 9876543210, email rajesh@example.com.";
+        let (anon, map) = anon_sync(query);
+        assert!(!map.to_original.is_empty(), "expected PII to be detected");
+        for original in map.to_original.values() {
+            assert!(
+                !anon.contains(original.as_str()),
+                "raw identifier {original:?} leaked into anonymized text: {anon:?}"
+            );
+        }
+    }
+
     #[test]
     fn ifsc_detected() {
         let (anon, _) = anon_sync("IFSC: SBIN0001234 for the branch.");

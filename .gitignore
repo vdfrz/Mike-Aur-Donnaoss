@@ -148,3 +148,4 @@ training documents/
 *.db.bak-*
 *.db.backup-*
 src-tauri/data/storage/
+.gstack/

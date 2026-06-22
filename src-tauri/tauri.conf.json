@@ -31,7 +31,8 @@
     "active": true,
     "targets": "all",
     "resources": [
-      "pdfium/*"
+      "pdfium/*",
+      "pandoc/*"
     ],
     "icon": [
       "icons/32x32.png",

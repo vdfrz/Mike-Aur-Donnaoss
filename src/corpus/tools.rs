@@ -613,7 +613,10 @@ pub async fn firm_templates(db: &SqlitePool, user_id: &str, limit: i64) -> Vec<F
     .bind(limit.clamp(1, 5))
     .fetch_all(db)
     .await
-    .unwrap_or_default()
+    .unwrap_or_else(|e| {
+        tracing::warn!("[corpus] firm_templates query failed, drafting will proceed without firm templates: {e}");
+        Vec::new()
+    })
     .into_iter()
     .map(|(filename, template_md)| FirmTemplate { filename, template_md })
     .collect()
@@ -648,7 +651,10 @@ pub async fn top_firm_snippets(
                 text: h.text,
             })
             .collect(),
-        Err(_) => Vec::new(),
+        Err(e) => {
+            tracing::warn!("[corpus] top_firm_snippets BM25 search failed, drafting will proceed without firm snippets: {e}");
+            Vec::new()
+        }
     }
 }
 

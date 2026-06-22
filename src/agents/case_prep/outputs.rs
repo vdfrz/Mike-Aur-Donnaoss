@@ -390,7 +390,12 @@ pub async fn generate_hearing_prep(
          Numbered list — case name, citation, key ratio.\n\
          ## Documents to Reference\n\
          Bullet list — document name, relevant page/section numbers.\n\n\
-         Keep every item concise — this is a quick-reference sheet, not a narrative."
+         Keep every item concise — this is a quick-reference sheet, not a narrative.\n\n\
+         RISK FRAMING — when anticipating the bench's questions and stating our position, \
+         screen against this rubric; flag the HIGH/MED/LOW risks behind each likely question and \
+         surface statutory bars (limitation, jurisdiction, mandatory pre-conditions, non-joinder) \
+         PROACTIVELY so counsel is not blindsided:\n{}",
+        super::LITIGATION_RISK_RUBRIC_BLOCK
     );
 
     let user_msg = format!(

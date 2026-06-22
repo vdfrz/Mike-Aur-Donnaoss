@@ -1,0 +1,7 @@
+# The pandoc binary is bundled into the packaged app at build/packaging time —
+# it is a large, platform-specific binary and is not committed. This folder is
+# kept so the bundle resource path ("pandoc/*") always resolves. At runtime
+# src-tauri/src/lib.rs sets PANDOC_PATH from here when the binary is present;
+# otherwise the redline path falls back to pandoc on PATH (scripts/setup.sh).
+*
+!.gitignore

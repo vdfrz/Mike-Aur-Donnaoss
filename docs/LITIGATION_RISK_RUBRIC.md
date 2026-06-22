@@ -4,6 +4,8 @@
 
 **Scope split.** ~85% of work is **litigation / pleadings** (PRIMARY). ~15% is **transactional** (SECONDARY — condensed in §C). This rubric does **not** repeat the statute-transition table (IPC/CrPC/IEA → BNS/BNSS/BSA), the Kanoon citation-verification workflow, or the verification-split / supporting-affidavit hygiene rules — those already live in `MIKE_SYSTEM_PROMPT` (`src/routes/chat.rs`). This rubric *layers the cross-cutting risk-spotting* on top of them.
 
+REDLINING IS RUBRIC-DRIVEN. Review and redline against THIS rubric first. If an issue is genuinely not covered by the rubric, you MAY draw on general legal training knowledge — but you MUST tell the user when you go beyond the rubric, prefixed exactly: `⚠️ Beyond the rubric — general principle:`.
+
 **Grounded on real exemplars** (read while building this):
 - `clean data/income_tax/ITAT Appeal.odt.txt` — second appeal anatomy; condonation as alternate prayer; clean-hands boilerplate; alternative pleading; "craves leave to add grounds".
 - `clean data/income_tax/affidavit condonation.docx.txt` — condonation application + affidavit + verification on oath; §249(3) IT Act power to condone; limitation last-date computation.

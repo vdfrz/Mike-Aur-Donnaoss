@@ -18,6 +18,16 @@ if [ ! -f "$PDFIUM_DIR/libpdfium.so" ]; then
   echo "pdfium installed to $PDFIUM_DIR"
 fi
 
+# Install pandoc — optional higher-fidelity docx→markdown reader for the
+# redline path (see docs/DOCX.md). This is the non-Tauri backend surface, so
+# there's no bundled binary here; a `pandoc` on PATH lets it use the structured
+# reader. Non-fatal (|| true): the pure-Rust extractor covers every path
+# without it, so a missing package never aborts the container build.
+if ! command -v pandoc >/dev/null 2>&1; then
+  echo "Installing pandoc..."
+  sudo apt-get update -y && sudo apt-get install -y pandoc || true
+fi
+
 # Install frontend dependencies
 cd frontend && npm install && cd ..
 

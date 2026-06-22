@@ -1,6 +1,6 @@
 # DOCX extraction
 
-MikeRust extracts text from `.docx` files in pure Rust — no LibreOffice, no Pandoc, no external process. The extractor lives at [src/pdf/mod.rs](../src/pdf/mod.rs) (`extract_docx_text`) and is reused by:
+MikeRust extracts `.docx` text on its **hot path** — folder indexing, the upload cache, and `read_document`'s default text view — in **pure Rust**: no LibreOffice, no `mammoth`, no per-extraction process spawn. The extractor lives at [src/pdf/mod.rs](../src/pdf/mod.rs) (`extract_docx_text`) and is reused by:
 
 1. The folder scanner (`src/sync/scanner.rs::extract_text_dispatch`) when indexing `.docx` files into the embedding store.
 2. The chat-upload pipeline (`src/routes/documents.rs::upload_document`, cache path) when an attached docx is hashed and pre-extracted to `data/storage/cache/<hash>.txt`.
@@ -15,6 +15,16 @@ The upstream `willchen96/mike` and its forks (e.g. `marklok/danishmike`) shell o
 - **Mammoth loses redline information** — its HTML output drops `<w:del>` and visual strikes silently.
 
 `zip` + `quick-xml` give us streaming ZIP entry access and a low-allocation XML reader. The extractor stays well under 200 lines and runs in microseconds for typical contracts.
+
+## Pandoc on the redline path (optional, bundled)
+
+The "pure Rust, no external process" rule above governs the **hot extraction path** — high-frequency, embedding-bound, latency-critical. The **redline path** is the opposite: user-initiated, one contract at a time, latency-tolerant. There, higher input fidelity is worth an external process, so an **optional** Pandoc converter *augments* (never replaces) the pure-Rust extractor on that path alone:
+
+- `src/pdf/pandoc.rs` exposes `pandoc_available()` / `docx_to_markdown()`; the `read_document` builtin reaches for it **only** when asked for `format:"markdown"` while redlining, and **falls back** to `extract_docx_text` when Pandoc is absent. No hot-path call site (scanner, upload cache) is rerouted.
+- Pandoc is resolved from `$PANDOC_PATH` first — the desktop app bundles a per-platform binary under `src-tauri/pandoc/` and points `PANDOC_PATH` at it during Tauri setup, mirroring the pdfium bundling — then from a `pandoc` on `PATH` (`scripts/setup.sh` and the devcontainer install it for the server/dev surface). Missing on both → pure-Rust fallback, no error.
+- The objections above were written against the upstream LibreOffice + `mammoth` approach on the hot path, and they still hold there. Pandoc on the **redline-quality path** is a different trade: a single, on-demand conversion of one contract, where a ~1 s spawn buys precise clause / table / tracked-change fidelity. It is never wired into the scanner or upload cache.
+
+See [PANDOC_LOOPS.md](PANDOC_LOOPS.md) for the full design — the structured reader, the diff-driven tracked-change writer, and this bundling.
 
 ## Output format
 
