@@ -1,0 +1,24 @@
+# mike-legal - Qwen3-4B LoRA fine-tune (drafting register + Indian-legal style).
+# Citations are served by the app's RAG layer, NOT the weights.
+#
+# No SYSTEM line on purpose: the Mike app sends its own system prompt per request
+# (see src/llm/local.rs -> to_wire_messages), and the model was trained on both
+# the comprehension and drafting system prompts.
+#
+# Only needed to REBUILD the model from the raw gguf. If "mike-legal" already
+# exists in `ollama list`, you do not need this file to publish (see README.md).
+
+# The shipped artifact: the quantized GGUF (~2.5 GB).
+# (Produced from mike-legal-f16.gguf via `ollama create --quantize q4_K_M`.)
+FROM ./mike-legal-q4_K_M.gguf
+
+# Qwen3 ChatML stop tokens.
+PARAMETER stop "<|im_start|>"
+PARAMETER stop "<|im_end|>"
+
+# App requests up to 8192 output tokens; match the training/deploy context.
+PARAMETER num_ctx 8192
+
+# Conservative sampling for a legal assistant (app sends no temperature of its own).
+PARAMETER temperature 0.3
+PARAMETER top_p 0.9
