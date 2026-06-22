@@ -1029,9 +1029,49 @@ fn apply_revision_tracked(
     (out, changes)
 }
 
+/// Whitespace- and case-tolerant span match: find a consecutive run of
+/// whole words in `combined` matching the words of `find`, ignoring differences
+/// in surrounding/intervening whitespace and case. Returns the byte span in
+/// `combined`. Models often paraphrase whitespace/case in the `find` they emit,
+/// so without this an edit either fails to land (split across runs) or falls to
+/// a blunt whole-run strike. Word-aligned, so it never splits a word.
+fn find_tolerant_span(combined: &str, find: &str) -> Option<(usize, usize)> {
+    fn tokens(s: &str) -> Vec<(String, usize, usize)> {
+        let mut out = Vec::new();
+        let mut start: Option<usize> = None;
+        for (i, ch) in s.char_indices() {
+            if ch.is_whitespace() {
+                if let Some(st) = start.take() {
+                    out.push((s[st..i].to_lowercase(), st, i));
+                }
+            } else if start.is_none() {
+                start = Some(i);
+            }
+        }
+        if let Some(st) = start {
+            out.push((s[st..].to_lowercase(), st, s.len()));
+        }
+        out
+    }
+    let hay = tokens(combined);
+    let needle: Vec<String> = find.split_whitespace().map(|w| w.to_lowercase()).collect();
+    if needle.is_empty() || hay.len() < needle.len() {
+        return None;
+    }
+    for i in 0..=hay.len() - needle.len() {
+        if (0..needle.len()).all(|j| hay[i + j].0 == needle[j]) {
+            return Some((hay[i].1, hay[i + needle.len() - 1].2));
+        }
+    }
+    None
+}
+
 /// Locate `find` across one or more runs and replace that span with a
-/// word-level tracked-change diff. Returns None if `find` is not an exact
-/// substring of the concatenated run text (the caller then falls back).
+/// word-level tracked-change diff. Tries an exact substring match first, then a
+/// whitespace/case-tolerant word-aligned match (`find_tolerant_span`). Returns
+/// None only if neither matches (the caller then falls back). The diff is taken
+/// against the *actual* matched span, so the deletion text always equals the
+/// real document text even when the model's `find` differed in whitespace/case.
 fn diff_replace_span(
     xml: &str,
     find: &str,
@@ -1063,8 +1103,10 @@ fn diff_replace_span(
         combined.push_str(t);
     }
 
-    let mpos = combined.find(find)?;
-    let mend = mpos + find.len();
+    let (mpos, mend) = match combined.find(find) {
+        Some(p) => (p, p + find.len()),
+        None => find_tolerant_span(&combined, find)?,
+    };
 
     // First run containing the match start; last run containing the match end.
     let mut first_idx = 0;
@@ -1113,8 +1155,12 @@ fn diff_replace_span(
             xml_escape_static(before)
         ));
     }
+    // Diff against the ACTUAL matched span (not the model's `find`, which may
+    // differ in whitespace/case under tolerant matching) so the deletion text
+    // equals the real document content.
+    let matched = &combined[mpos..mend];
     let (diff_xml, changes) =
-        apply_revision_tracked(find, replace, &first_rpr, format, next_id, timestamp);
+        apply_revision_tracked(matched, replace, &first_rpr, format, next_id, timestamp);
     fragment.push_str(&diff_xml);
     if !after.is_empty() {
         fragment.push_str(&format!(
@@ -1612,6 +1658,110 @@ mod tests {
         // Accept also means removing the del
         let after_del = resolve_change_in_xml(xml, "1", true).unwrap();
         assert!(!after_del.contains("<w:del"), "del should be removed");
+    }
+
+    #[test]
+    fn cross_run_exact_find_lands_across_split() {
+        // "anticipatory bail" is split across runs: "anticipatory" + bold " bail".
+        // An exact find must still produce a tracked change spanning the split.
+        let xml = concat!(
+            r#"<w:body><w:p>"#,
+            r#"<w:r><w:t xml:space="preserve">The Applicant seeks </w:t></w:r>"#,
+            r#"<w:r><w:t xml:space="preserve">anticipatory</w:t></w:r>"#,
+            r#"<w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve"> bail</w:t></w:r>"#,
+            r#"<w:r><w:t xml:space="preserve"> in connection.</w:t></w:r>"#,
+            r#"</w:p></w:body>"#,
+        );
+        let edits = vec![DocxEdit {
+            find: "anticipatory bail".to_string(),
+            replace: "regular bail".to_string(),
+            format: None,
+        }];
+        let (result, changes) = patch_document_xml_tracked(xml, &edits);
+        assert!(!changes.is_empty(), "edit must land across the run split");
+        assert!(result.contains("<w:del "), "should delete the changed word");
+        assert!(result.contains("regular"), "should insert the new word");
+        assert!(result.contains("<w:delText"), "delText present");
+    }
+
+    #[test]
+    fn cross_run_tolerant_find_lands() {
+        // Model emits `find` with different case + extra whitespace; the tolerant
+        // word-aligned matcher must still locate and minimally edit the span,
+        // deleting the REAL document text rather than the mis-cased find.
+        let xml = concat!(
+            r#"<w:body><w:p>"#,
+            r#"<w:r><w:t xml:space="preserve">The Applicant seeks </w:t></w:r>"#,
+            r#"<w:r><w:t xml:space="preserve">anticipatory</w:t></w:r>"#,
+            r#"<w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve"> bail</w:t></w:r>"#,
+            r#"<w:r><w:t xml:space="preserve"> in connection.</w:t></w:r>"#,
+            r#"</w:p></w:body>"#,
+        );
+        let edits = vec![DocxEdit {
+            find: "Anticipatory   BAIL".to_string(),
+            replace: "regular bail".to_string(),
+            format: None,
+        }];
+        let (result, changes) = patch_document_xml_tracked(xml, &edits);
+        assert!(!changes.is_empty(), "tolerant match must land the edit");
+        assert!(result.contains("regular"), "inserts the new word");
+        assert!(result.contains("anticipatory"), "deletes real doc text, not the find");
+    }
+
+    #[test]
+    fn insertion_via_anchor_is_minimal_not_whole_strike() {
+        // Appending a clause via find=<sentence> replace=<sentence + clause>
+        // must keep the sentence intact and insert ONLY the clause, never strike
+        // and re-insert the whole sentence.
+        let xml = concat!(
+            r#"<w:body><w:p>"#,
+            r#"<w:r><w:t xml:space="preserve">The contents are true and correct.</w:t></w:r>"#,
+            r#"</w:p></w:body>"#,
+        );
+        let edits = vec![DocxEdit {
+            find: "The contents are true and correct.".to_string(),
+            replace: "The contents are true and correct. Verified at New Delhi.".to_string(),
+            format: None,
+        }];
+        let (result, changes) = patch_document_xml_tracked(xml, &edits);
+        assert!(!changes.is_empty(), "insertion must land");
+        assert!(!result.contains("<w:del "), "must NOT strike the unchanged sentence");
+        assert!(result.contains("<w:ins "), "the clause is inserted");
+        assert!(result.contains("Verified at New Delhi."), "inserts the clause text");
+    }
+
+    #[test]
+    fn insertion_via_anchor_minimal_under_tolerant_match() {
+        // The model's find differs in case/whitespace; the tolerant matcher must
+        // still yield a clean insertion (no whole-sentence strike) by diffing the
+        // replace against the REAL matched span.
+        let xml = concat!(
+            r#"<w:body><w:p>"#,
+            r#"<w:r><w:t xml:space="preserve">The contents are true and correct.</w:t></w:r>"#,
+            r#"</w:p></w:body>"#,
+        );
+        let edits = vec![DocxEdit {
+            find: "the contents are TRUE  and correct.".to_string(),
+            replace: "The contents are true and correct. Verified at New Delhi.".to_string(),
+            format: None,
+        }];
+        let (result, changes) = patch_document_xml_tracked(xml, &edits);
+        assert!(!changes.is_empty(), "tolerant insertion must land");
+        assert!(!result.contains("<w:del "), "must NOT strike the unchanged sentence");
+        assert!(result.contains("Verified at New Delhi."), "inserts the clause");
+    }
+
+    #[test]
+    fn tolerant_span_matches_whole_words_not_substrings() {
+        // find_tolerant_span is word-aligned: "ground" must NOT match inside
+        // "background" — that anti-substring guarantee is what keeps tolerant
+        // matching from silently editing the wrong text.
+        assert!(find_tolerant_span("the background colour is blue", "ground").is_none());
+        // A real whole-word occurrence does match, on a word boundary.
+        let hit = find_tolerant_span("on the ground floor", "ground");
+        assert!(hit.is_some());
+        let (s, e) = hit.unwrap();
+        assert_eq!(&"on the ground floor"[s..e], "ground");
     }
 
     #[test]

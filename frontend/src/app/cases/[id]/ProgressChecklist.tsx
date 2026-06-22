@@ -25,10 +25,11 @@ const AGENT_ORDER = [
 ] as const;
 
 /** Per-agent cycling snippet row */
-function AgentSnippetRow({ agentName, status, error }: {
+function AgentSnippetRow({ agentName, status, error, thinking }: {
     agentName: string;
     status: string;
     error?: string;
+    thinking?: string;
 }) {
     const [snippet, setSnippet] = useState(() => getRandomSnippet());
 
@@ -39,6 +40,12 @@ function AgentSnippetRow({ agentName, status, error }: {
         }, 2500);
         return () => clearInterval(interval);
     }, [status]);
+
+    // Show the agent's real streamed reasoning; fall back to a rotating snippet
+    // only until the first token lands, so the row reflects what the agent is
+    // actually thinking rather than a canned line.
+    const live = (thinking ?? "").replace(/\s+/g, " ").trim();
+    const display = live.length > 0 ? live.slice(-90) : snippet;
 
     return (
         <div className="flex items-start gap-2 py-1">
@@ -60,7 +67,7 @@ function AgentSnippetRow({ agentName, status, error }: {
                 </span>
                 {status === "running" && (
                     <p className="text-[11px] text-gray-400 font-serif italic mt-0.5 truncate">
-                        {snippet}
+                        {display}
                     </p>
                 )}
                 {status === "error" && error && (
@@ -148,6 +155,7 @@ export function ProgressChecklist({
                             agentName={agentName}
                             status={status}
                             error={ap?.error}
+                            thinking={ap?.thinking}
                         />
                     );
                 })}

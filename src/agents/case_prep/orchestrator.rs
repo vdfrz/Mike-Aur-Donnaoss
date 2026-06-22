@@ -14,7 +14,7 @@ use crate::storage::make_storage;
 #[derive(Debug, Clone)]
 pub enum ProgressEvent {
     ExtractingDoc { filename: String, doc_index: usize, total_docs: usize },
-    ExtractedDoc { filename: String, doc_index: usize, total_docs: usize, page_count: usize, needed_ocr: bool },
+    ExtractedDoc { filename: String, doc_index: usize, total_docs: usize, page_count: usize, needed_ocr: bool, char_count: usize },
     Compressing { original_tokens: usize, target_tokens: usize },
     /// Compression failed; context was hard-truncated to the budget instead.
     /// Surfaced so the user knows document content was dropped, not condensed.
@@ -117,6 +117,7 @@ pub async fn analyze_case(
             .await
             .with_context(|| format!("reading {filename} from storage"))?;
         let (raw_text, page_count, needed_ocr) = extract_text_with_meta(file_type, &bytes);
+        let char_count = raw_text.chars().count();
         total_pages += page_count;
         if needed_ocr { any_ocr = true; }
         if let Some(tx) = &progress_tx {
@@ -126,6 +127,7 @@ pub async fn analyze_case(
                 total_docs: docs.len(),
                 page_count,
                 needed_ocr,
+                char_count,
             }).await;
         }
         if !raw_text.is_empty() {

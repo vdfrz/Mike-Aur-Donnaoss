@@ -20,6 +20,9 @@ import type {
 } from "../shared/types";
 import { useSidebar } from "@/app/contexts/SidebarContext";
 import { invalidateDocxBytes } from "@/app/hooks/useFetchDocxBytes";
+import ModelDataDisclosureGate, {
+    hasAcknowledgedModelDisclosure,
+} from "../shared/ModelDataDisclosureGate";
 
 interface Props {
     messages: MikeMessage[];
@@ -66,7 +69,14 @@ export function ChatView({
         () => new Set(),
     );
     const { setSidebarOpen } = useSidebar();
-    const [selectedModel] = useSelectedModel();
+    const [selectedModel, setSelectedModel] = useSelectedModel();
+    // Blocking PII-disclosure consent for the on-device fine-tune (open weights,
+    // trained on legal text). Must be acknowledged once per disclosure version
+    // before mike-legal can be used. Acknowledgment persists in localStorage.
+    const [disclosureAck, setDisclosureAck] = useState(false);
+    useEffect(() => {
+        if (hasAcknowledgedModelDisclosure()) setDisclosureAck(true);
+    }, []);
     // After several turns on the local fine-tune (mike-legal), nudge the user
     // toward a cloud model, which stays reliable past a few messages.
     const CLOUD_NUDGE_AFTER = 5;
@@ -676,6 +686,12 @@ export function ChatView({
 
     return (
         <div className="h-full w-full flex relative">
+            {selectedModel === "local:mike-legal" && !disclosureAck && (
+                <ModelDataDisclosureGate
+                    onAcknowledge={() => setDisclosureAck(true)}
+                    onUseCloud={() => setSelectedModel("local:deepseek-v4-flash")}
+                />
+            )}
             {/* Chat column */}
             <div className="flex flex-col h-full flex-1 relative">
                 {showCloudNudge && !cloudNudgeDismissed && (

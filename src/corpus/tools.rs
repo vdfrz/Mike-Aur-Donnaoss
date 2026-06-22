@@ -96,17 +96,30 @@ struct Filters {
     doc_type: Option<String>,
     case_type: Option<String>,
     section_role: Option<String>,
+    /// Restrict to reusable templates. Set when the model asks for
+    /// `doc_type = "template"`: see `parse` for why that maps here.
+    template_only: bool,
 }
 
 impl Filters {
     fn parse(args: &Value) -> Self {
+        // `doc_type = "template"` is special. The ingest pipeline flags a
+        // reusable skeleton via the separate `is_template` column and keeps
+        // its CONTENT doc_type (a template is still e.g. a "deed"); it never
+        // stores doc_type = "template". So the tool's advertised
+        // doc_type="template" filter — the natural choice when the lawyer says
+        // "use my templates" — would match zero rows as `f.doc_type =
+        // 'template'`. Translate it into an `is_template = 1` filter instead.
+        let doc_type = whitelist(args.get("doc_type").and_then(|v| v.as_str()), DOC_TYPES);
+        let template_only = doc_type.as_deref() == Some("template");
         Filters {
-            doc_type: whitelist(args.get("doc_type").and_then(|v| v.as_str()), DOC_TYPES),
+            doc_type: if template_only { None } else { doc_type },
             case_type: whitelist(args.get("case_type").and_then(|v| v.as_str()), CASE_TYPES),
             section_role: whitelist(
                 args.get("section_role").and_then(|v| v.as_str()),
                 SECTION_ROLES,
             ),
+            template_only,
         }
     }
 }
@@ -212,6 +225,9 @@ async fn bm25_candidates(
     }
     if filters.section_role.is_some() {
         sql.push_str(" AND c.section_role = ?5");
+    }
+    if filters.template_only {
+        sql.push_str(" AND f.is_template = 1");
     }
     sql.push_str(" ORDER BY score LIMIT ?6");
 
@@ -435,6 +451,9 @@ async fn fetch_hits_by_ids(
     }
     if filters.section_role.is_some() {
         sql.push_str(" AND c.section_role = ?");
+    }
+    if filters.template_only {
+        sql.push_str(" AND f.is_template = 1");
     }
 
     let mut q = sqlx::query_as::<_, HitRow>(&sql).bind(user_id);
@@ -794,5 +813,103 @@ mod tests {
             "the chunk whose vector matches the query ranks first"
         );
         assert_eq!(results[1]["chunk_id"].as_i64(), Some(id_b));
+    }
+
+    #[test]
+    fn template_doc_type_maps_to_is_template_filter() {
+        // doc_type="template" is translated to an is_template filter, not a
+        // doomed f.doc_type='template' match (templates carry a CONTENT
+        // doc_type + the separate is_template flag).
+        let f = Filters::parse(&json!({"query": "x", "doc_type": "template"}));
+        assert!(f.template_only, "template doc_type sets template_only");
+        assert_eq!(f.doc_type, None, "template is not also matched as a content doc_type");
+
+        // A real content doc_type still filters on doc_type, not is_template.
+        let f = Filters::parse(&json!({"doc_type": "petition"}));
+        assert!(!f.template_only);
+        assert_eq!(f.doc_type.as_deref(), Some("petition"));
+
+        // Capitalisation tolerated by whitelist().
+        assert!(Filters::parse(&json!({"doc_type": "TEMPLATE"})).template_only);
+
+        // No doc_type filter at all.
+        let f = Filters::parse(&json!({"query": "x"}));
+        assert!(!f.template_only);
+        assert_eq!(f.doc_type, None);
+    }
+
+    /// Regression for the firm-knowledge retrieval defect: a file uploaded as
+    /// a template (is_template = 1) carries a NULL/content doc_type, never
+    /// doc_type = "template". A search the model naturally issues —
+    /// doc_type = "template" — must still find it (via the is_template
+    /// mapping), while a genuine mismatched content doc_type filter must not.
+    #[cfg(feature = "rag")]
+    #[tokio::test]
+    async fn template_filter_finds_is_template_file_with_null_doc_type() {
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+        use std::str::FromStr;
+
+        crate::embeddings::register_sqlite_vec_auto_extension();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::from_str("sqlite::memory:")
+                    .unwrap()
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+        let user = "u1";
+        sqlx::query("INSERT INTO user_profiles (id, username, pin_hash) VALUES (?, ?, 'x')")
+            .bind(user)
+            .bind(user)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // The real ingest shape for an uploaded template that the tagger did
+        // not classify: doc_type NULL, is_template = 1, ready.
+        sqlx::query(
+            "INSERT INTO corpus_files (id, user_id, filename, file_type, sha256, is_template, status) \
+             VALUES ('f1', ?, 'Condonation Template.docx', 'docx', 'sha1', 1, 'ready')",
+        )
+        .bind(user)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO corpus_chunks (file_id, user_id, seq, heading, section_role, text) \
+             VALUES ('f1', ?, 0, 'APPLICATION', 'other', \
+                     'Application for condonation of delay in filing the appeal')",
+        )
+        .bind(user)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let count = |out: String| -> usize {
+            serde_json::from_str::<Value>(&out).unwrap()["count"]
+                .as_u64()
+                .unwrap() as usize
+        };
+
+        // doc_type="template" now finds the is_template file (the fix).
+        let out =
+            bm25_search_firm_corpus(&pool, user, &json!({"query":"condonation delay","doc_type":"template"}))
+                .await;
+        assert_eq!(count(out), 1, "doc_type=template must find an is_template file");
+
+        // A bare query still finds it (unchanged behaviour).
+        let out = bm25_search_firm_corpus(&pool, user, &json!({"query":"condonation delay"})).await;
+        assert_eq!(count(out), 1);
+
+        // A genuine content-type filter the file lacks still excludes it — the
+        // fix does not loosen real doc_type filtering.
+        let out =
+            bm25_search_firm_corpus(&pool, user, &json!({"query":"condonation delay","doc_type":"petition"}))
+                .await;
+        assert_eq!(count(out), 0, "a mismatched content doc_type still filters out");
     }
 }

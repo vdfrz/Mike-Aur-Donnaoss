@@ -1018,6 +1018,19 @@ export async function streamCaseChat(payload: {
     });
 }
 
+/**
+ * Restore a case's conversation after a reload. Returns the most recent
+ * case-scoped chat (its id, so new turns keep appending to it) and the prior
+ * messages in order. `chat_id` is null when the case has never been chatted.
+ */
+export async function getCaseChat(
+    caseId: string,
+): Promise<{ chat_id: string | null; messages: { role: string; content: string }[] }> {
+    return apiRequest<{ chat_id: string | null; messages: { role: string; content: string }[] }>(
+        `/cases/${caseId}/chat`,
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Personalization
 // ---------------------------------------------------------------------------

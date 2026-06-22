@@ -4,12 +4,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import {
+    AlertTriangle,
     ArrowLeft,
     ChevronDown,
     Download,
     Eye,
     EyeOff,
     FileText,
+    Info,
     Library,
     Loader2,
     Pencil,
@@ -32,6 +34,7 @@ import {
     analyzeCaseStream,
     generateCaseOutput,
     streamCaseChat,
+    getCaseChat,
     uploadStandaloneDocument,
     resolveCasePrecedents,
     type ResolvedPrecedent,
@@ -602,6 +605,10 @@ export default function CaseWorkspacePage() {
 
     // Interactive analysis state
     const [extractions, setExtractions] = useState<ExtractionProgress[]>([]);
+    // Filenames whose text extraction produced nothing (failed OCR / no text
+    // layer). Surfaced as a prominent banner so a photo/scan the agents never
+    // read is never silently skipped.
+    const [noTextDocs, setNoTextDocs] = useState<string[]>([]);
     const [analysisEstimate, setAnalysisEstimate] = useState<AnalysisEstimate | null>(null);
     const [feedItems, setFeedItems] = useState<FeedItem[]>([]);
     const [currentPhase, setCurrentPhase] = useState<AnalysisPhase | null>(null);
@@ -631,6 +638,10 @@ export default function CaseWorkspacePage() {
 
     // Chat
     const [chatMessages, setChatMessages] = useState<CaseChatMsg[]>([]);
+    // The backing chat row id. Threaded into every send so a reload resumes the
+    // same conversation instead of spawning a fresh chat; null = start a new one
+    // on the next send (also what "New conversation" resets it to).
+    const [caseChatId, setCaseChatId] = useState<string | null>(null);
     const [chatInput, setChatInput] = useState("");
     const [chatLoading, setChatLoading] = useState(false);
     const [selectedWorkflow, setSelectedWorkflow] = useState<{ id: string; title: string; prompt_md?: string | null } | null>(null);
@@ -661,6 +672,37 @@ export default function CaseWorkspacePage() {
     useEffect(() => {
         load();
     }, [load]);
+
+    // Restore the prior conversation on mount so a reload doesn't drop chat
+    // history. Assistant turns are persisted with their raw <CITATIONS> block,
+    // so we run them through the same extractor the live stream uses.
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            try {
+                const { chat_id, messages } = await getCaseChat(caseId);
+                if (cancelled || messages.length === 0) return;
+                const hydrated: CaseChatMsg[] = messages.map((m) => {
+                    if (m.role === "assistant") {
+                        const { cleaned, citations } = extractCaseChatCitations(m.content);
+                        return {
+                            role: "assistant",
+                            content: cleaned,
+                            citations: citations.length > 0 ? citations : undefined,
+                        };
+                    }
+                    return { role: m.role, content: m.content };
+                });
+                setChatMessages(hydrated);
+                setCaseChatId(chat_id);
+            } catch (e) {
+                console.error("[case-chat] history restore failed", e);
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [caseId]);
 
     // Scroll chat on new messages
     useEffect(() => {
@@ -866,6 +908,7 @@ export default function CaseWorkspacePage() {
         setAnalysisError(null);
         setAnalysisStage(null);
         setExtractions([]);
+        setNoTextDocs([]);
         setAnalysisEstimate(null);
         setFeedItems([]);
         setCurrentPhase(null);
@@ -876,6 +919,8 @@ export default function CaseWorkspacePage() {
         const controller = new AbortController();
         abortControllerRef.current = controller;
 
+        let streamErrored = false;
+        let receivedDone = false;
         try {
             const resp = await analyzeCaseStream(caseId, analysisRedactPii);
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -897,7 +942,7 @@ export default function CaseWorkspacePage() {
                     const trimmed = line.trim();
                     if (!trimmed || !trimmed.startsWith("data:")) continue;
                     const dataStr = trimmed.slice(5).trim();
-                    if (dataStr === "[DONE]") continue;
+                    if (dataStr === "[DONE]") { receivedDone = true; continue; }
                     try {
                         const data = JSON.parse(dataStr);
                         const now = Date.now();
@@ -936,6 +981,14 @@ export default function CaseWorkspacePage() {
                                 });
                                 return next;
                             });
+                            // Flag a doc that extracted to nothing (failed OCR /
+                            // no text layer). Guard on an explicit numeric 0 so an
+                            // older backend that omits char_count never false-flags.
+                            if (typeof data.char_count === "number" && data.char_count === 0) {
+                                setNoTextDocs((prev) =>
+                                    prev.includes(data.filename) ? prev : [...prev, data.filename],
+                                );
+                            }
                             setFeedItems((prev) => [...prev, {
                                 id: `extract-done-${data.doc_index}`,
                                 type: "extraction",
@@ -966,6 +1019,16 @@ export default function CaseWorkspacePage() {
                         if (data.type === "agent_status") {
                             if (data.status === "error" && data.error) {
                                 setAnalysisError(data.error);
+                                // An orchestrator-level error is catastrophic: the
+                                // backend still emits a terminal [DONE] after it, so
+                                // without this flag the finally would mark the run
+                                // "completed" alongside the error (a green stats bar
+                                // next to a red failure). Suppress completion. A
+                                // single failed agent (other agents still ran) is not
+                                // catastrophic and is left to complete partially.
+                                if (data.agent_name === "orchestrator") {
+                                    streamErrored = true;
+                                }
                             }
                             // Update phase based on agent name
                             if (data.status === "running") {
@@ -1119,11 +1182,32 @@ export default function CaseWorkspacePage() {
         } catch (e) {
             if (!controller.signal.aborted) {
                 console.error("[case-analysis] stream error", e);
+                streamErrored = true;
+                setAnalysisError(
+                    e instanceof Error
+                        ? `Analysis interrupted before it finished: ${e.message}`
+                        : "Analysis interrupted before it finished. The connection dropped and no completion was received.",
+                );
             }
         } finally {
             setAnalysisRunning(false);
             setAnalysisStage(null);
-            setAnalysisCompleted(true);
+            // Only mark the run complete when the stream actually finished, i.e.
+            // the terminal [DONE] marker arrived. A dropped connection, a mid-run
+            // error, or a stream that closed early WITHOUT [DONE] must surface as
+            // an error, not a false "completed" with however many findings
+            // happened to arrive before the connection died.
+            if (!controller.signal.aborted) {
+                if (receivedDone && !streamErrored) {
+                    setAnalysisCompleted(true);
+                } else if (!streamErrored) {
+                    setAnalysisError(
+                        "Analysis ended before it finished. The connection closed before a completion signal arrived; re-run to generate findings.",
+                    );
+                }
+                // if streamErrored, analysisError was already set (in the catch,
+                // or in the agent_status handler for an orchestrator error)
+            }
             abortControllerRef.current = null;
             await load();
         }
@@ -1181,6 +1265,7 @@ export default function CaseWorkspacePage() {
             const resp = await streamCaseChat({
                 caseId,
                 messages: [...chatMessages, userMsg],
+                chat_id: caseChatId ?? undefined,
                 model: resolveChatModel(profile?.llm ?? null),
                 signal: chatAbort.signal,
             });
@@ -1228,6 +1313,13 @@ export default function CaseWorkspacePage() {
                     try {
                         const data = JSON.parse(dataStr);
                         switch (data.type) {
+                            case "chat_id":
+                                // Emitted once when the backend creates a fresh
+                                // chat row; capture it so the rest of this
+                                // session (and the next reload) resume the same
+                                // conversation instead of forking a new one.
+                                if (typeof data.chatId === "string") setCaseChatId(data.chatId);
+                                break;
                             case "content_delta":
                                 assistantText += data.text ?? "";
                                 break;
@@ -1375,7 +1467,29 @@ export default function CaseWorkspacePage() {
     ];
 
     return (
-        <div className="flex h-full overflow-hidden">
+        <div className="relative flex h-full overflow-hidden">
+            {/* Advisory (Outputs tab): generation runs one at a time; rapid
+                repeat clicks overlap requests and muddle the result. Anchored to
+                the case workspace, not the viewport, so it tracks the nav sidebar
+                when it collapses; the left offset only clears the 256px case
+                sidebar. pointer-events-none so it never blocks the controls under
+                it. */}
+            {activeTab === "outputs" && (
+                <div className="pointer-events-none absolute bottom-4 left-[272px] z-40 flex max-w-[248px] items-start gap-2.5 rounded-[10px] border border-border bg-card/95 px-3.5 py-2.5 shadow-sm backdrop-blur-sm">
+                    <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                    <div className="min-w-0">
+                        <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                            One at a time
+                        </p>
+                        <p className="mt-0.5 text-[12px] leading-snug text-muted-foreground">
+                            Let each output finish before starting the next. Pressing the
+                            buttons in quick succession overlaps the requests and can muddle
+                            the result.
+                        </p>
+                    </div>
+                </div>
+            )}
+
             {/* Left sidebar — case metadata & docs */}
             <div className="w-64 shrink-0 border-r border-gray-200 flex flex-col overflow-y-auto bg-white">
                 {/* Back + Demo toggle */}
@@ -1680,6 +1794,37 @@ export default function CaseWorkspacePage() {
                     <ToolbarTabs tabs={tabs} active={activeTab} onChange={setActiveTab} />
                 </div>
 
+                {/* Documents that produced no readable text (failed OCR / no text
+                    layer). Surfaced prominently on every tab so the user knows the
+                    agents never saw this content, rather than it being skipped
+                    silently. Uses the design-system placeholder amber (#fdeede /
+                    #9a4a00). */}
+                {noTextDocs.length > 0 && (
+                    <div className="shrink-0 mx-6 mt-4 rounded-[10px] border border-[#f0d8a8] bg-[#fdeede] px-4 py-3">
+                        <div className="flex items-start gap-2.5">
+                            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-[#9a4a00]" />
+                            <div className="min-w-0">
+                                <p className="text-[13px] font-semibold text-[#9a4a00]">
+                                    {noTextDocs.length} document{noTextDocs.length > 1 ? "s" : ""} produced no readable text
+                                </p>
+                                <p className="mt-0.5 text-[12px] leading-snug text-[#9a4a00]">
+                                    The agents could not read {noTextDocs.length > 1 ? "these files" : "this file"} because no text was extracted. If {noTextDocs.length > 1 ? "they are" : "it is"} a photo or a scan, OCR may have failed. Re-upload a clearer copy or a searchable PDF, then run the analysis again.
+                                </p>
+                                <ul className="mt-1.5 flex flex-wrap gap-1.5">
+                                    {noTextDocs.map((fn) => (
+                                        <li
+                                            key={fn}
+                                            className="rounded-md border border-[#e6c896] bg-white/70 px-2 py-0.5 text-[11px] text-[#9a4a00]"
+                                        >
+                                            {fn}
+                                        </li>
+                                    ))}
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
                 {/* Tab content */}
                 <div className="flex-1 overflow-y-auto animate-[fadeIn_150ms_ease]" key={activeTab}>
                     {activeTab === "overview" && (
@@ -1799,6 +1944,10 @@ export default function CaseWorkspacePage() {
                             selectedWorkflow={selectedWorkflow}
                             onSelectWorkflow={(wf) => setSelectedWorkflow(wf)}
                             onClearWorkflow={() => setSelectedWorkflow(null)}
+                            onNewConversation={() => {
+                                setChatMessages([]);
+                                setCaseChatId(null);
+                            }}
                         />
                     )}
                     {activeTab === "registry" && (
@@ -2511,6 +2660,7 @@ function ChatTab({
     selectedWorkflow,
     onSelectWorkflow,
     onClearWorkflow,
+    onNewConversation,
 }: {
     messages: CaseChatMsg[];
     input: string;
@@ -2523,6 +2673,7 @@ function ChatTab({
     selectedWorkflow: { id: string; title: string; prompt_md?: string | null } | null;
     onSelectWorkflow: (wf: { id: string; title: string; prompt_md?: string | null }) => void;
     onClearWorkflow: () => void;
+    onNewConversation: () => void;
 }) {
     const tA = useTranslations("Assistant");
     const [workflowModalOpen, setWorkflowModalOpen] = useState(false);
@@ -2534,6 +2685,21 @@ function ChatTab({
 
     return (
         <div className="flex flex-col h-full bg-gradient-to-b from-white to-gray-50/40">
+            {/* Header — only once there's a conversation to clear. "New
+                conversation" starts a fresh chat (clears the restored history
+                and the backing chat id) without deleting the old one. */}
+            {messages.length > 0 && (
+                <div className="flex items-center justify-end border-b border-gray-100 bg-white/70 px-6 py-2 shrink-0">
+                    <button
+                        type="button"
+                        onClick={onNewConversation}
+                        className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-1 text-xs text-gray-600 transition-colors hover:border-gray-300 hover:bg-gray-50"
+                    >
+                        <Plus className="h-3.5 w-3.5" />
+                        New conversation
+                    </button>
+                </div>
+            )}
             {/* Messages */}
             {messages.length === 0 ? (
                 <div className="flex-1 flex flex-col items-center justify-center px-6 text-center">

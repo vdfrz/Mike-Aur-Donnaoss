@@ -206,6 +206,39 @@ async fn upsert_judgment(db: &SqlitePool, case_id: &str, u: &JudgmentUpsert) -> 
     Ok(())
 }
 
+/// Record a precedent the user resolved from a `precedent_finder` suggestion
+/// (via `kanoon_search` in `resolve_precedents`) as a *referred* judgment, so
+/// it shows up in "List of Cases Referred" even before the chat model actually
+/// cites it. The `precedent_finder` finding itself carries no concrete cases —
+/// only points of law and search queries — so this resolution step is the
+/// earliest point a real Kanoon `tid` exists to record. Non-fatal: logs and
+/// swallows errors so precedent resolution can never break.
+pub async fn record_resolved_precedent(
+    db: &SqlitePool,
+    case_id: &str,
+    tid: i64,
+    title: Option<String>,
+    court: Option<String>,
+    decision_date: Option<String>,
+    kanoon_url: Option<String>,
+) {
+    let upsert = JudgmentUpsert {
+        tid,
+        title,
+        court,
+        decision_date,
+        kanoon_url: kanoon_url
+            .filter(|s| !s.is_empty())
+            .or_else(|| Some(format!("https://indiankanoon.org/doc/{tid}/"))),
+        canonical_citation: None,
+        status: "referred",
+        source_tool: "precedent_finder",
+    };
+    if let Err(e) = upsert_judgment(db, case_id, &upsert).await {
+        tracing::warn!("[drafting::citations] record resolved precedent {tid} failed: {e}");
+    }
+}
+
 /// Upsert a statute section row. Same conflict semantics as judgments.
 async fn upsert_statute(
     db: &SqlitePool,

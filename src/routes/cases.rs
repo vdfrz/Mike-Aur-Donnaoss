@@ -40,7 +40,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/{id}/outputs/list-of-dates", post(generate_list_of_dates))
         .route("/{id}/outputs/annexure-index", post(generate_annexure_index))
         .route("/{id}/outputs", get(list_outputs))
-        .route("/{id}/chat", post(case_chat))
+        .route("/{id}/chat", post(case_chat).get(get_case_chat))
         // --- Drafting registry: parties ---
         .route("/{id}/parties", get(list_parties).post(create_party))
         .route("/{id}/parties/reorder", put(reorder_parties))
@@ -633,13 +633,14 @@ async fn run_case_analysis(
                     "doc_index": doc_index,
                     "total_docs": total_docs,
                 }),
-                ProgressEvent::ExtractedDoc { filename, doc_index, total_docs, page_count, needed_ocr } => json!({
+                ProgressEvent::ExtractedDoc { filename, doc_index, total_docs, page_count, needed_ocr, char_count } => json!({
                     "type": "extracted_doc",
                     "filename": filename,
                     "doc_index": doc_index,
                     "total_docs": total_docs,
                     "page_count": page_count,
                     "needed_ocr": needed_ocr,
+                    "char_count": char_count,
                 }),
                 ProgressEvent::Compressing { original_tokens, target_tokens } => json!({
                     "type": "compressing",
@@ -885,6 +886,25 @@ async fn resolve_precedents(
                     obj.insert("confidence".to_string(), json!(conf));
                     obj.insert("reason".to_string(), json!(reason));
                 }
+            }
+        }
+
+        // Persist each resolved case into the citation registry as a referred
+        // judgment so it surfaces under "List of Cases Referred" without waiting
+        // for the chat model to cite it. Deduped by tid (see citations module);
+        // non-fatal so a registry hiccup never breaks the resolve response.
+        for case in &cases {
+            if let Some(tid) = case.get("tid").and_then(|v| v.as_i64()) {
+                crate::drafting::citations::record_resolved_precedent(
+                    &state.db,
+                    &case_id,
+                    tid,
+                    case.get("title").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    case.get("court").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    case.get("decision_date").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    case.get("kanoon_url").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                )
+                .await;
             }
         }
 
@@ -1229,6 +1249,56 @@ async fn case_chat(
     }
 
     super::chat::stream_chat_root(state, auth, body, Some(case_ctx)).await
+}
+
+// ---------------------------------------------------------------------------
+// GET /cases/:id/chat — restore the case conversation after a reload.
+//
+// Case chat is backed by a `chats` row whose `case_id` is set; each turn is a
+// `messages` row. POST /chat without a chat_id starts a fresh chat, so on a
+// page reload the prior conversation would be lost unless we hand the frontend
+// back the most recent case chat to hydrate from. Returns the chat id (so the
+// frontend can keep appending to the same chat) and the messages in order.
+// Empty (`chat_id: null`) when the case has never been chatted.
+// ---------------------------------------------------------------------------
+
+async fn get_case_chat(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+    Path(case_id): Path<String>,
+) -> ApiResult {
+    verify_case_ownership(&state, &case_id, &auth.user_id).await?;
+
+    // Most recently active case chat. updated_at is bumped on every assistant
+    // turn (see chat::stream_chat_root), so DESC returns the live conversation.
+    let chat: Option<(String,)> = sqlx::query_as(
+        "SELECT id FROM chats WHERE case_id = ? AND user_id = ? \
+         ORDER BY updated_at DESC LIMIT 1",
+    )
+    .bind(&case_id)
+    .bind(&auth.user_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let Some((chat_id,)) = chat else {
+        return Ok(Json(json!({ "chat_id": Value::Null, "messages": [] })));
+    };
+
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT role, content FROM messages WHERE chat_id = ? ORDER BY created_at ASC",
+    )
+    .bind(&chat_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let messages: Vec<Value> = rows
+        .into_iter()
+        .map(|(role, content)| json!({ "role": role, "content": content }))
+        .collect();
+
+    Ok(Json(json!({ "chat_id": chat_id, "messages": messages })))
 }
 
 // ===========================================================================
