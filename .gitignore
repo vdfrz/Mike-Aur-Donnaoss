@@ -133,9 +133,9 @@ frontend/.next/
 frontend/node_modules/
 graphify-out/
 
-# Personal DB backups (never ship)
-*.db.empty-backup
-mike.db.empty-backup
+# Personal DB backups (never ship) - trailing * catches -shm / -wal sidecars
+*.db.empty-backup*
+mike.db.empty-backup*
 
 # WhatsApp session
 .wwebjs_auth/
