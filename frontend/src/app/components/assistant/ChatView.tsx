@@ -20,9 +20,7 @@ import type {
 } from "../shared/types";
 import { useSidebar } from "@/app/contexts/SidebarContext";
 import { invalidateDocxBytes } from "@/app/hooks/useFetchDocxBytes";
-import ModelDataDisclosureGate, {
-    hasAcknowledgedModelDisclosure,
-} from "../shared/ModelDataDisclosureGate";
+import ModelDataDisclosureGate from "../shared/ModelDataDisclosureGate";
 
 interface Props {
     messages: MikeMessage[];
@@ -71,12 +69,13 @@ export function ChatView({
     const { setSidebarOpen } = useSidebar();
     const [selectedModel, setSelectedModel] = useSelectedModel();
     // Blocking PII-disclosure consent for the on-device fine-tune (open weights,
-    // trained on legal text). Must be acknowledged once per disclosure version
-    // before mike-legal can be used. Acknowledgment persists in localStorage.
+    // trained on legal text). The disclosure pops EVERY time mike-legal is the
+    // selected model: reset the ack on each model change, so switching to (or
+    // re-selecting) mike-legal always re-shows it, not just once.
     const [disclosureAck, setDisclosureAck] = useState(false);
     useEffect(() => {
-        if (hasAcknowledgedModelDisclosure()) setDisclosureAck(true);
-    }, []);
+        setDisclosureAck(false);
+    }, [selectedModel]);
     // After several turns on the local fine-tune (mike-legal), nudge the user
     // toward a cloud model, which stays reliable past a few messages.
     const CLOUD_NUDGE_AFTER = 5;
