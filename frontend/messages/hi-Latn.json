@@ -254,7 +254,7 @@
   },
   "Sync": {
     "title": "Local documents",
-    "subtitle": "Local folder se documents index karo (subfolders bhi) taaki chat unhe context ke roop mein use kar sake. Files ko passages mein split karke multilingual-e5-base se embed kiya jaata hai. Supported: PDF (embedded text wali), DOCX (tracked-deletion / strike-through detection ke saath), RTF, XLSX, MD, TXT. Scanned documents welcome hain!",
+    "subtitle": "Local folder se documents index karo (subfolders bhi) taaki chat unhe context ke roop mein use kar sake. Files ko passages mein split karke multilingual-e5-base se embed kiya jaata hai. Supported: PDF (embedded text wali), DOCX (tracked-deletion / strike-through detection ke saath), RTF, XLSX, MD, TXT. Scanned PDFs aur images skip hoti hain.",
     "addFolder": "Folder add karo",
     "folderPath": "Folder path",
     "folderPathPlaceholder": "C:/Cases/2026 ya D:/Drive/Work",

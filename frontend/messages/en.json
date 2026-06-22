@@ -254,7 +254,7 @@
   },
   "Sync": {
     "title": "Local documents",
-    "subtitle": "Index documents from a local folder (subfolders included) so the chat can use them as context. Files are split into passages and embedded with multilingual-e5-base. Supported: PDF with embedded text, DOCX (with tracked-deletion / strike-through detection), RTF, XLSX, MD, TXT. Scanned documents are welcome!",
+    "subtitle": "Index documents from a local folder (subfolders included) so the chat can use them as context. Files are split into passages and embedded with multilingual-e5-base. Supported: PDF with embedded text, DOCX (with tracked-deletion / strike-through detection), RTF, XLSX, MD, TXT. Scanned PDFs and images are skipped.",
     "addFolder": "Add folder",
     "folderPath": "Folder path",
     "folderPathPlaceholder": "C:/Cases/2026 or D:/Drive/Work",
