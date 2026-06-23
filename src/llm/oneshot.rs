@@ -130,10 +130,22 @@ pub fn resolve_analysis_model(settings: &Option<LlmSettings>) -> (String, Option
         }
 
         if s.active_provider.as_deref() == Some("deepseek") {
-            if let Some(ref m) = s.local_model {
+            // Gate on the API key, not the model. The Models UI shows
+            // "deepseek-chat" as a placeholder but leaves `local_model` NULL
+            // unless the user edits that field — so a pasted key with the
+            // default model used to skip this branch, fall through to the
+            // keyless Gemini fallback below, and error on every analysis call.
+            // That failure surfaced as the harness's canned "Understood — I've
+            // noted your feedback." loop (offline_triage on a failed LLM call).
+            if s.local_api_key.as_deref().map(|k| !k.trim().is_empty()).unwrap_or(false) {
+                let m = s
+                    .local_model
+                    .clone()
+                    .filter(|x| !x.trim().is_empty())
+                    .unwrap_or_else(|| "deepseek-chat".to_string());
                 let cfg = LocalConfig {
                     base_url: "https://api.deepseek.com/v1".to_string(),
-                    api_key: s.local_api_key.clone().filter(|k| !k.trim().is_empty()),
+                    api_key: s.local_api_key.clone(),
                     model: m.clone(),
                 };
                 return (format!("local:{m}"), Some(cfg));

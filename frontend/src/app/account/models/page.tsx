@@ -214,7 +214,13 @@ export default function ModelsAndApiKeysPage() {
                     ? settings.geminiRegion
                     : null,
             local_base_url: settings.localBaseUrl || null,
-            local_model: settings.localModel || null,
+            // The DeepSeek model field shows "deepseek-chat" as a placeholder
+            // but keeps state empty until edited. Persist that effective value
+            // when DeepSeek is the active provider so the backend resolver
+            // (which keys off a non-null model) actually routes to DeepSeek.
+            local_model:
+                settings.localModel ||
+                (settings.activeProvider === "deepseek" ? "deepseek-chat" : null),
             active_provider: settings.activeProvider,
         };
 

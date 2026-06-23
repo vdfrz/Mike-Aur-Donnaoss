@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter, useParams } from "next/navigation";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ChatView } from "@/app/components/assistant/ChatView";
 import { useAssistantChat } from "@/app/hooks/useAssistantChat";
 import { useChatHistoryContext } from "@/app/contexts/ChatHistoryContext";
@@ -16,7 +16,13 @@ export default function AssistantChatPage() {
     const { setCurrentChatId, newChatMessages, setNewChatMessages } =
         useChatHistoryContext();
 
-    const initialMessages: MikeMessage[] = newChatMessages ?? [];
+    // Freeze the landing-page handoff ONCE. Reading newChatMessages on every
+    // render (and clearing it eagerly) let a re-render — or React StrictMode's
+    // dev double-mount — observe an empty handoff, fall through to getChat() on
+    // the just-created empty chat, and bounce home (router.replace) — orphaning
+    // a blank "Untitled chat" and dropping the typed message. Capturing it here
+    // and clearing only when we auto-send mirrors the working project-chat page.
+    const [initialMessages] = useState<MikeMessage[]>(newChatMessages ?? []);
     const { messages, isResponseLoading, handleChat, setMessages, cancel } =
         useAssistantChat({ initialMessages, chatId: id });
 
@@ -28,20 +34,15 @@ export default function AssistantChatPage() {
     }, [id, setCurrentChatId]);
 
     useEffect(() => {
-        if (initialMessages.length > 0) {
-            if (newChatMessages) setNewChatMessages(null);
-            return;
-        }
-        if (hasLoaded.current || messages.length > 0) return;
+        if (hasLoaded.current) return;
         hasLoaded.current = true;
-
         getChat(id)
             .then(({ messages: loaded }) => {
-                if (loaded.length > 0) {
-                    setMessages(loaded);
-                } else {
-                    router.replace("/assistant");
-                }
+                // A freshly created chat is legitimately empty until its first
+                // message streams in — don't treat empty-but-OK as "missing"
+                // and bounce away (that's what orphaned the blank chats). Only
+                // a real fetch error redirects.
+                if (loaded.length > 0) setMessages(loaded);
             })
             .catch(() => router.replace("/assistant"));
     }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -56,6 +57,7 @@ export default function AssistantChatPage() {
             messages.length === 1
         ) {
             hasAutoSent.current = true;
+            setNewChatMessages(null);
             void handleChat(newChatMessages[0]);
         }
     }, [newChatMessages, messages.length, isResponseLoading]); // eslint-disable-line react-hooks/exhaustive-deps
