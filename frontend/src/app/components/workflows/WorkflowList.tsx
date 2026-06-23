@@ -614,7 +614,7 @@ export function WorkflowList() {
                 onCreated={(wf) => {
                     setCustom((prev) => [wf, ...prev]);
                     setNewModalOpen(false);
-                    router.push(`/workflows/${wf.id}`);
+                    router.push(`/workflows/view?id=${wf.id}`);
                 }}
             />
         </div>

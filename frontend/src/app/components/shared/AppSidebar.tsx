@@ -85,11 +85,11 @@ export function AppSidebar({ isOpen, onToggle }: AppSidebarProps) {
             return;
         }
 
-        const projectChatMatch = pathname.match(
-            /^\/projects\/[^/]+\/assistant\/chat\/([^/]+)/,
-        );
-        if (projectChatMatch) {
-            setCurrentChatId(projectChatMatch[1]);
+        // Project assistant chat is now a static route with both ids in the
+        // query string (/projects/view/assistant/chat?id=<pid>&chatId=<cid>),
+        // so read the chat id from searchParams.
+        if (pathname === "/projects/view/assistant/chat") {
+            setCurrentChatId(searchParams.get("chatId"));
             return;
         }
 
@@ -255,7 +255,7 @@ export function AppSidebar({ isOpen, onToggle }: AppSidebarProps) {
                                             setCurrentChatId(chat.id);
                                             router.push(
                                                 chat.project_id
-                                                    ? `/projects/${chat.project_id}/assistant/chat/${chat.id}`
+                                                    ? `/projects/view/assistant/chat?id=${chat.project_id}&chatId=${chat.id}`
                                                     : `/assistant/chat?id=${chat.id}`,
                                             );
                                         }}

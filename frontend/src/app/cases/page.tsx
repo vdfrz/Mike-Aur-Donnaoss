@@ -61,7 +61,7 @@ export default function CasesPage() {
         setCreating(true);
         try {
             const c = await createCase({ title: "Untitled Case" });
-            router.push(`/cases/${c.id}`);
+            router.push(`/cases/view?id=${c.id}`);
         } catch {
             setCreating(false);
         }
@@ -136,11 +136,11 @@ export default function CasesPage() {
                                     key={c.id}
                                     role="button"
                                     tabIndex={0}
-                                    onClick={() => router.push(`/cases/${c.id}`)}
+                                    onClick={() => router.push(`/cases/view?id=${c.id}`)}
                                     onKeyDown={(e) => {
                                         if (e.key === "Enter" || e.key === " ") {
                                             e.preventDefault();
-                                            router.push(`/cases/${c.id}`);
+                                            router.push(`/cases/view?id=${c.id}`);
                                         }
                                     }}
                                     className="flex flex-col rounded-lg border border-gray-200 bg-white p-4 text-left hover:border-gray-300 hover:shadow-sm transition-all cursor-pointer"

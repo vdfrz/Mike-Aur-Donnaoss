@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import {
     AlertTriangle,
@@ -567,8 +567,10 @@ function resolveChatModel(llm: { activeProvider?: string | null; claudeModel?: s
 }
 
 export default function CaseWorkspacePage() {
-    const params = useParams();
-    const caseId = params.id as string;
+    // Static export can only prerender a single static page, so the case id
+    // travels in the query string (?id=<uuid>) instead of a dynamic path
+    // segment. useSearchParams() requires the Suspense boundary in page.tsx.
+    const caseId = useSearchParams().get("id") as string;
     const router = useRouter();
     const { profile } = useUserProfile();
     const tRaw = useTranslations("Cases");
@@ -669,9 +671,15 @@ export default function CaseWorkspacePage() {
         }
     }, [caseId]);
 
+    // Missing id (e.g. /cases/view with no query) — bounce to the list.
     useEffect(() => {
+        if (!caseId) router.replace("/cases");
+    }, [caseId, router]);
+
+    useEffect(() => {
+        if (!caseId) return;
         load();
-    }, [load]);
+    }, [load, caseId]);
 
     // Restore the prior conversation on mount so a reload doesn't drop chat
     // history. Assistant turns are persisted with their raw <CITATIONS> block,

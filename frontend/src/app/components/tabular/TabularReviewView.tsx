@@ -488,7 +488,7 @@ export function TRView({ reviewId, projectId }: Props) {
                                 <span className="text-gray-300">›</span>
                                 <button
                                     onClick={() =>
-                                        router.push(`/projects/${projectId}`)
+                                        router.push(`/projects/view?id=${projectId}`)
                                     }
                                     className="text-gray-500 hover:text-gray-700 transition-colors"
                                 >
@@ -509,7 +509,7 @@ export function TRView({ reviewId, projectId }: Props) {
                                 <button
                                     onClick={() =>
                                         router.push(
-                                            `/projects/${projectId}?tab=reviews`,
+                                            `/projects/view?id=${projectId}&tab=reviews`,
                                         )
                                     }
                                     className="text-gray-500 hover:text-gray-700 transition-colors"

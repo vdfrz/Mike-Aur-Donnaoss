@@ -380,7 +380,7 @@ export function DisplayWorkflowModal({ workflows, workflow, onClose }: Props) {
             handleClose();
             router.push(
                 projectId
-                    ? `/projects/${projectId}/assistant/chat/${chatId}`
+                    ? `/projects/view/assistant/chat?id=${projectId}&chatId=${chatId}`
                     : `/assistant/chat?id=${chatId}`,
             );
         } finally {
@@ -410,8 +410,8 @@ export function DisplayWorkflowModal({ workflows, workflow, onClose }: Props) {
             handleClose();
             router.push(
                 projectId
-                    ? `/projects/${projectId}/tabular-reviews/${review.id}`
-                    : `/tabular-reviews/${review.id}`,
+                    ? `/projects/view/tabular-reviews?id=${projectId}&reviewId=${review.id}`
+                    : `/tabular-reviews/view?id=${review.id}`,
             );
         } finally {
             setSaving(false);
@@ -556,7 +556,7 @@ export function DisplayWorkflowModal({ workflows, workflow, onClose }: Props) {
                             {wf.is_system ? (
                                 <button
                                     onClick={() => {
-                                        router.push(`/workflows/${wf.id}`);
+                                        router.push(`/workflows/view?id=${wf.id}`);
                                         handleClose();
                                     }}
                                     className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-500 hover:bg-gray-50 transition-colors"
@@ -566,7 +566,7 @@ export function DisplayWorkflowModal({ workflows, workflow, onClose }: Props) {
                             ) : (
                                 <button
                                     onClick={() => {
-                                        router.push(`/workflows/${wf.id}`);
+                                        router.push(`/workflows/view?id=${wf.id}`);
                                         handleClose();
                                     }}
                                     className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-500 hover:bg-gray-50 transition-colors"

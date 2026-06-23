@@ -145,8 +145,8 @@ export default function TabularReviewsPage() {
             });
             router.push(
                 projectId
-                    ? `/projects/${projectId}/tabular-reviews/${review.id}`
-                    : `/tabular-reviews/${review.id}`,
+                    ? `/projects/view/tabular-reviews?id=${projectId}&reviewId=${review.id}`
+                    : `/tabular-reviews/view?id=${review.id}`,
             );
         } finally {
             setCreating(false);
@@ -394,8 +394,8 @@ export default function TabularReviewsPage() {
                                         if (renamingId === review.id) return;
                                         router.push(
                                             review.project_id
-                                                ? `/projects/${review.project_id}/tabular-reviews/${review.id}`
-                                                : `/tabular-reviews/${review.id}`,
+                                                ? `/projects/view/tabular-reviews?id=${review.project_id}&reviewId=${review.id}`
+                                                : `/tabular-reviews/view?id=${review.id}`,
                                         );
                                     }}
                                     className="group flex items-center h-10 pr-8 border-b border-gray-50 hover:bg-gray-50 cursor-pointer transition-colors"

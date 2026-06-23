@@ -1138,7 +1138,7 @@ export function useAssistantChat({
                 setCurrentChatId(finalChatId);
                 router.replace(
                     projectId
-                        ? `/projects/${projectId}/assistant/chat/${finalChatId}`
+                        ? `/projects/view/assistant/chat?id=${projectId}&chatId=${finalChatId}`
                         : `/assistant/chat?id=${finalChatId}`,
                 );
             }

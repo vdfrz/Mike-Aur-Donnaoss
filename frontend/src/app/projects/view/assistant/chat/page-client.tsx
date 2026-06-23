@@ -321,7 +321,9 @@ export default function ProjectAssistantChatPage({ params }: Props) {
                 setChatOwnerId(chat.user_id ?? null);
                 if (loaded.length > 0) setMessages(loaded);
             })
-            .catch(() => router.replace(`/projects/${projectId}?tab=assistant`))
+            .catch(() =>
+                router.replace(`/projects/view?id=${projectId}&tab=assistant`),
+            )
             .finally(() => setChatLoaded(true));
     }, [chatId]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -545,7 +547,10 @@ export default function ProjectAssistantChatPage({ params }: Props) {
         setCreatingChat(true);
         try {
             const id = await saveChat(projectId);
-            if (id) router.push(`/projects/${projectId}/assistant/chat/${id}`);
+            if (id)
+                router.push(
+                    `/projects/view/assistant/chat?id=${projectId}&chatId=${id}`,
+                );
         } finally {
             setCreatingChat(false);
         }
@@ -559,7 +564,7 @@ export default function ProjectAssistantChatPage({ params }: Props) {
         setDeletingChat(true);
         try {
             await deleteChat(chatId);
-            router.push(`/projects/${projectId}?tab=assistant`);
+            router.push(`/projects/view?id=${projectId}&tab=assistant`);
         } finally {
             setDeletingChat(false);
         }
@@ -827,7 +832,7 @@ export default function ProjectAssistantChatPage({ params }: Props) {
                         <button
                             onClick={() =>
                                 router.push(
-                                    `/projects/${projectId}?tab=assistant`,
+                                    `/projects/view?id=${projectId}&tab=assistant`,
                                 )
                             }
                             className="text-gray-400 hover:text-gray-600 transition-colors shrink-0"
