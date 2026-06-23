@@ -143,27 +143,6 @@ pub async fn stream_chat(params: StreamParams) -> Result<BoxStream> {
     }
 }
 
-pub async fn complete_text(model: &str, system: Option<&str>, user: &str) -> Result<String> {
-    let params = StreamParams {
-        model: model.to_string(),
-        system_prompt: system.unwrap_or("").to_string(),
-        system_volatile: String::new(),
-        messages: vec![Message::user(user.to_string())],
-        tools: vec![],
-        max_iterations: 1,
-        enable_thinking: false,
-        local_config: None,
-        claude_api_key: None,
-        gemini_api_key: None,
-        gemini_region: None,
-    };
-    match provider_for_model(model) {
-        Provider::Claude => claude::complete(params).await,
-        Provider::OpenAI => local::complete(params).await,
-        Provider::Gemini => gemini::complete(params).await,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

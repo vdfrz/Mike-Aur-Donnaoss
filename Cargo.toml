@@ -65,7 +65,6 @@ libsqlite3-sys = { version = "0.30", optional = true, features = ["bundled"] }
 zerocopy = { version = "0.7", optional = true, features = ["derive"] }
 # Folder scan: depth-first traversal of the user-configured directory
 # tree, with `.gitignore`/`.mikesyncignore` honored.
-walkdir = { version = "2", optional = true }
 ignore  = { version = "0.4", optional = true }
 
 # ------------------------------------------------------------------
@@ -112,11 +111,6 @@ zip = "2"
 quick-xml = { version = "0.37", features = ["serialize"] }
 pulldown-cmark = { version = "0.12", default-features = false }
 similar = "2" # word-level diff for minimal tracked-change redlines
-# HTML scraping for the EUR-Lex adapter — strips the rendered legal-
-# content page down to the article body so we can chunk + embed it.
-# pure-Rust, ~1MB of compile-time cost; no native deps.
-scraper = "0.20"
-
 # ------------------------------------------------------------------
 # RTF — pure-Rust text extraction via rtf-parser (26k recent
 # downloads, no native deps). Used by the sync scanner + the
@@ -187,7 +181,6 @@ rag = [
     "dep:sqlite-vec",
     "dep:libsqlite3-sys",
     "dep:zerocopy",
-    "dep:walkdir",
     "dep:ignore",
 ]
 # Hardware-accelerated embedding inference via ONNX Runtime execution

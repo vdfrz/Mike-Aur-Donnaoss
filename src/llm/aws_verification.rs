@@ -579,15 +579,6 @@ mod parquet_index {
         Ok(best.map(|(_, m)| m))
     }
 
-    #[allow(dead_code)]
-    fn column_index(schema: &arrow_schema::SchemaRef, name: &str) -> Result<usize> {
-        schema
-            .fields()
-            .iter()
-            .position(|f| f.name().eq_ignore_ascii_case(name))
-            .ok_or_else(|| anyhow!("column `{name}` not present in parquet schema"))
-    }
-
     /// Like `column_index_any` but returns None instead of erroring when
     /// no candidate matches. Used for OPTIONAL columns (pdf link, citation)
     /// whose absence must not abort a verification.

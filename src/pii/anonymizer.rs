@@ -236,7 +236,7 @@ fn anchored_pattern(original: &str) -> String {
 /// leading/trailing word was dropped (e.g. "Court Rajesh Kumar" → the bytes
 /// covering only "Rajesh Kumar"). Returns `(start, end, cleaned_name)`.
 fn clean_name_spanned(raw: &str) -> Option<(usize, usize, String)> {
-    let words: Vec<(usize, &str)> = raw.split_whitespace_indices();
+    let words: Vec<(usize, &str)> = split_whitespace_indices(raw);
     let meaningful = words.iter().any(|(_, w)| !is_non_name(w));
     if !meaningful || raw.len() < 3 {
         return None;
@@ -264,18 +264,12 @@ fn clean_name_spanned(raw: &str) -> Option<(usize, usize, String)> {
     Some((byte_start, byte_end, cleaned))
 }
 
-/// `split_whitespace` that also yields each word's byte offset within `self`.
-trait SplitWhitespaceIndices {
-    fn split_whitespace_indices(&self) -> Vec<(usize, &str)>;
-}
-
-impl SplitWhitespaceIndices for str {
-    fn split_whitespace_indices(&self) -> Vec<(usize, &str)> {
-        let base = self.as_ptr() as usize;
-        self.split_whitespace()
-            .map(|w| (w.as_ptr() as usize - base, w))
-            .collect()
-    }
+/// `split_whitespace` that also yields each word's byte offset within `text`.
+fn split_whitespace_indices(text: &str) -> Vec<(usize, &str)> {
+    let base = text.as_ptr() as usize;
+    text.split_whitespace()
+        .map(|w| (w.as_ptr() as usize - base, w))
+        .collect()
 }
 
 fn collect_regex_spans(text: &str) -> Vec<Span> {

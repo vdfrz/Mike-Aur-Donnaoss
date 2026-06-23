@@ -30,21 +30,6 @@ export function isModelAvailable(modelId: string, apiKeys: ApiKeys): boolean {
     }
 }
 
-export function isProviderAvailable(
-    provider: ModelProvider,
-    apiKeys: ApiKeys,
-): boolean {
-    switch (provider) {
-        case "claude":
-            return !!apiKeys.claudeApiKey?.trim();
-        case "gemini":
-            return !!apiKeys.geminiApiKey?.trim();
-        case "openai":
-        case "local":
-            return true;
-    }
-}
-
 export function providerLabel(provider: ModelProvider): string {
     switch (provider) {
         case "claude":
