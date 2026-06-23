@@ -119,6 +119,26 @@ pub struct PageText {
 ///
 /// Requires `brew install tesseract` on macOS (installs libtesseract
 /// + libleptonica + tessdata at /opt/homebrew/share/tessdata/).
+/// Resolve the Tesseract `tessdata` directory once for the process lifetime.
+/// The Homebrew paths are static literals; a `TESSDATA_PREFIX` override is
+/// cached in a `OnceLock` so we never leak a fresh allocation per OCR call
+/// (matters now that bulk image ingest can OCR hundreds of files).
+#[cfg(feature = "tesseract")]
+fn tessdata_dir() -> Option<&'static str> {
+    use std::sync::OnceLock;
+    static DIR: OnceLock<Option<String>> = OnceLock::new();
+    DIR.get_or_init(|| {
+        if std::path::Path::new("/opt/homebrew/share/tessdata/").exists() {
+            Some("/opt/homebrew/share/tessdata/".to_string())
+        } else if std::path::Path::new("/usr/local/share/tessdata/").exists() {
+            Some("/usr/local/share/tessdata/".to_string())
+        } else {
+            std::env::var("TESSDATA_PREFIX").ok()
+        }
+    })
+    .as_deref()
+}
+
 #[cfg(all(feature = "pdf", feature = "tesseract"))]
 fn ocr_page(pdfium: &Pdfium, page: &PdfPage, page_index: usize) -> Result<String> {
     use anyhow::anyhow;
@@ -136,16 +156,9 @@ fn ocr_page(pdfium: &Pdfium, page: &PdfPage, page_index: usize) -> Result<String
         .write_to(&mut std::io::Cursor::new(&mut png_buf), image::ImageFormat::Png)
         .map_err(|e| anyhow!("encode PNG page {page_index}: {e}"))?;
 
-    // Probe Homebrew tessdata paths — Apple Silicon vs Intel.
-    let tessdata: Option<&str> = if std::path::Path::new("/opt/homebrew/share/tessdata/").exists() {
-        Some("/opt/homebrew/share/tessdata/")
-    } else if std::path::Path::new("/usr/local/share/tessdata/").exists() {
-        Some("/usr/local/share/tessdata/")
-    } else if let Ok(env) = std::env::var("TESSDATA_PREFIX") {
-        Some(Box::leak(env.into_boxed_str()) as &str)
-    } else {
-        None
-    };
+    // tessdata dir (cached once; no per-call leak). Apple Silicon vs Intel
+    // Homebrew paths, then a TESSDATA_PREFIX override.
+    let tessdata = tessdata_dir();
 
     // Indian case files are routinely a mix of English and Hindi
     // (Devanagari). Tesseract supports multi-language OCR via "lang1+lang2"
@@ -167,6 +180,45 @@ fn ocr_page(pdfium: &Pdfium, page: &PdfPage, page_index: usize) -> Result<String
         .map_err(|e| anyhow!("leptess ocr page {page_index}: {e}"))?;
 
     Ok(text.trim().to_string())
+}
+
+/// OCR a standalone scanned image (PNG/JPG/TIFF/BMP/…) to text.
+///
+/// Used by the firm-corpus ingest for image uploads, which have no text layer
+/// at all and must go straight through OCR. Hands the raw image bytes to
+/// leptonica (`set_image_from_mem` auto-detects the format), so it covers every
+/// format the system leptonica was built with, not just the `image`-crate
+/// decoders compiled in. Returns the recovered text trimmed; an empty string
+/// means OCR found nothing readable, which the caller flags rather than
+/// shipping as silently-empty success.
+///
+/// Requires the `tesseract` feature + `brew install tesseract`. Without it the
+/// fallback below returns an empty string, so an image upload is flagged as
+/// having no readable text instead of failing the build.
+#[cfg(feature = "tesseract")]
+pub fn ocr_image_bytes(bytes: &[u8]) -> Result<String> {
+    let tessdata = tessdata_dir();
+    let want_hindi = tessdata
+        .map(|d| std::path::Path::new(d).join("hin.traineddata").exists())
+        .unwrap_or(false);
+    let langs = if want_hindi { "eng+hin" } else { "eng" };
+
+    let mut lt = leptess::LepTess::new(tessdata, langs)
+        .or_else(|_| leptess::LepTess::new(tessdata, "eng"))
+        .map_err(|e| anyhow!("leptess init (langs={langs}): {e}"))?;
+    lt.set_image_from_mem(bytes)
+        .map_err(|e| anyhow!("leptess set_image from image bytes: {e}"))?;
+    let text = lt
+        .get_utf8_text()
+        .map_err(|e| anyhow!("leptess ocr image: {e}"))?;
+    Ok(text.trim().to_string())
+}
+
+/// Tesseract-less fallback: no OCR available, so an image yields no text and
+/// the corpus ingest flags it as "no readable text after OCR".
+#[cfg(not(feature = "tesseract"))]
+pub fn ocr_image_bytes(_bytes: &[u8]) -> Result<String> {
+    Ok(String::new())
 }
 
 /// Pass 1: native text extraction via pdfium content stream.

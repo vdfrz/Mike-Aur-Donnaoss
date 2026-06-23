@@ -82,11 +82,11 @@ pub async fn ingest_file(
     emit(progress, IngestEvent::Stage { file_id: file_id.to_string(), stage: "extracting".into() }).await;
 
     let synthetic_path = std::path::PathBuf::from(&filename);
-    let (text, skip_reason) = match safe_extract(&synthetic_path, &bytes) {
+    let (text, skip_reason, needed_ocr) = match safe_extract(&synthetic_path, &bytes) {
         Ok(v) => v,
         Err(e) => {
-            // Extraction itself errored (e.g. corrupt docx) — non-fatal:
-            // mark unsupported with the reason and return Ok.
+            // Extraction itself errored (e.g. corrupt docx, OCR init failure) —
+            // non-fatal: mark unsupported with the reason and return Ok.
             mark_unsupported(&state.db, file_id, &format!("{e}")).await?;
             emit(progress, IngestEvent::Error { file_id: file_id.to_string(), message: format!("{e}") }).await;
             return Ok(());
@@ -99,8 +99,15 @@ pub async fn ingest_file(
         return Ok(());
     }
     if text.trim().is_empty() {
-        mark_unsupported(&state.db, file_id, "extraction yielded no text").await?;
-        emit(progress, IngestEvent::Error { file_id: file_id.to_string(), message: "no text".into() }).await;
+        // A scan that OCR'd to nothing is flagged with the case-prep
+        // "no readable text" wording, never shipped as silently-empty.
+        let reason = if needed_ocr {
+            "no readable text after OCR"
+        } else {
+            "extraction yielded no text"
+        };
+        mark_unsupported(&state.db, file_id, reason).await?;
+        emit(progress, IngestEvent::Error { file_id: file_id.to_string(), message: reason.into() }).await;
         return Ok(());
     }
 
@@ -115,10 +122,15 @@ pub async fn ingest_file(
         return Ok(());
     }
 
-    // Replace any prior chunks for idempotent re-ingest, then insert.
+    // Replace any prior chunks for idempotent re-ingest, then insert. One
+    // transaction per file so N chunk inserts take the WAL write lock once,
+    // not N times — this is what keeps the bounded concurrent ingest pool from
+    // serialising on per-statement lock contention.
+    let chunk_count = chunks.len();
+    let mut tx = state.db.begin().await.context("begin chunk write")?;
     sqlx::query("DELETE FROM corpus_chunks WHERE file_id = ?")
         .bind(file_id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await
         .context("clear prior chunks")?;
 
@@ -134,18 +146,18 @@ pub async fn ingest_file(
         .bind(&c.section_role)
         .bind(c.page)
         .bind(&c.text)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await
         .context("insert corpus_chunk")?;
     }
 
-    let chunk_count = chunks.len();
     sqlx::query("UPDATE corpus_files SET chunk_count = ? WHERE id = ?")
         .bind(chunk_count as i64)
         .bind(file_id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await
         .context("update chunk_count")?;
+    tx.commit().await.context("commit chunk write")?;
 
     // 3b. Embed the freshly-stored chunks into the sqlite-vec store so
     //     search_firm_corpus can retrieve them semantically (hybrid with
@@ -279,14 +291,27 @@ pub async fn index_corpus_chunks(
     Ok(chunk_ids.len())
 }
 
-/// Thin wrapper over the shared per-format extractor so a malformed file
-/// surfaces as an `Err` we can degrade on (mark `unsupported`) rather than
-/// aborting the whole ingest.
+/// Extract text for one corpus file. Scanned images (PNG/JPG/TIFF/…) have no
+/// text layer, so they go straight through OCR; every other format uses the
+/// shared per-format dispatch (which OCRs scanned PDFs internally). Returns
+/// `(text, skip_reason, needed_ocr)`: `skip_reason = Some` means an unsupported
+/// format, and a malformed file surfaces as `Err` we can degrade on (mark
+/// `unsupported`) rather than aborting the whole batch.
 fn safe_extract(
     path: &std::path::Path,
     bytes: &[u8],
-) -> Result<(String, Option<String>)> {
-    crate::sync::scanner::extract_text_dispatch(path, bytes)
+) -> Result<(String, Option<String>, bool)> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if crate::corpus::is_image_ext(&ext) {
+        let text = crate::pdf::ocr_image_bytes(bytes)?;
+        return Ok((text, None, true));
+    }
+    let (text, skip) = crate::sync::scanner::extract_text_dispatch(path, bytes)?;
+    Ok((text, skip, false))
 }
 
 /// Light metadata produced by the tagging LLM call.

@@ -11,7 +11,7 @@
 //! stores them there.
 
 use axum::{
-    extract::{DefaultBodyLimit, Multipart, Path, State},
+    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
     http::StatusCode,
     response::{
         sse::{Event, KeepAlive, Sse},
@@ -20,6 +20,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use futures_util::{stream, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -27,6 +28,9 @@ use std::{convert::Infallible, sync::Arc};
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::corpus::ingest::{ingest_file, IngestEvent};
+use crate::corpus::{
+    upload_skip_reason, FIRM_SUPPORTED_EXTS, FIRM_UPLOAD_MAX_DOCS, FIRM_UPLOAD_MAX_FILE_BYTES,
+};
 use crate::{auth::middleware::AuthUser, storage::make_storage, AppState};
 
 type ApiResult = Result<Json<Value>, (StatusCode, Json<Value>)>;
@@ -38,12 +42,32 @@ fn err(status: StatusCode, msg: &str) -> (StatusCode, Json<Value>) {
 /// Cap on the joined chunk text fed to the template-cleanup LLM call.
 const TEMPLATE_TEXT_CAP: usize = 12_000;
 
+/// How many files ingest at once during a folder drop. Bounded so 1 vs 500
+/// degrades gracefully and the shared embedder is not stampeded.
+// ponytail: a fixed pool of 4; raise toward 8 only if ingest throughput on a
+// big folder becomes the bottleneck and the embedder can take the load.
+const FIRM_INGEST_CONCURRENCY: usize = 4;
+
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/limits", get(get_limits))
         .route("/files", get(list_files).post(upload_files))
         .route("/files/{id}", axum::routing::put(update_file).delete(delete_file))
+        .route("/batches/{batch_id}", axum::routing::delete(delete_batch))
         .route("/process", post(process_files))
         .layer(DefaultBodyLimit::max(50_usize * 1024 * 1024 * 1024))
+}
+
+// ---------------------------------------------------------------------------
+// GET /corpus/limits — the single source of truth for the upload caps, so the
+// browser preflight enforces the exact numbers the server does.
+// ---------------------------------------------------------------------------
+async fn get_limits(_auth: AuthUser) -> ApiResult {
+    Ok(Json(json!({
+        "max_docs": FIRM_UPLOAD_MAX_DOCS,
+        "max_file_bytes": FIRM_UPLOAD_MAX_FILE_BYTES,
+        "supported_exts": FIRM_SUPPORTED_EXTS,
+    })))
 }
 
 // ---------------------------------------------------------------------------
@@ -58,6 +82,11 @@ async fn upload_files(
     let storage = make_storage().map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
     let mut is_template = false;
+    // Folder-drop grouping: every file in one drop shares a batch_id and a
+    // human label (the dropped folder's name) so the UI can group, track and
+    // remove the whole batch. Single-file uploads leave these None.
+    let mut batch_id: Option<String> = None;
+    let mut batch_label: Option<String> = None;
     // Collected (filename, bytes) for every "file" part so we can apply the
     // is_template flag regardless of multipart field order.
     let mut files: Vec<(String, Vec<u8>)> = Vec::new();
@@ -90,6 +119,26 @@ async fn upload_files(
                     "1" | "true" | "yes"
                 );
             }
+            "batch_id" => {
+                let text = field
+                    .text()
+                    .await
+                    .map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
+                let text = text.trim();
+                if !text.is_empty() {
+                    batch_id = Some(text.to_string());
+                }
+            }
+            "batch_label" => {
+                let text = field
+                    .text()
+                    .await
+                    .map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
+                let text = text.trim();
+                if !text.is_empty() {
+                    batch_label = Some(text.to_string());
+                }
+            }
             _ => {}
         }
     }
@@ -100,8 +149,41 @@ async fn upload_files(
 
     let mut accepted: Vec<String> = Vec::new();
     let mut duplicates: Vec<String> = Vec::new();
+    let mut skipped: Vec<Value> = Vec::new();
+
+    // The 500-doc cap is per folder batch. Count what the batch already holds
+    // so a chunked upload (10 files per request) still enforces the limit
+    // across requests instead of resetting each time.
+    let mut batch_count: usize = if let Some(ref bid) = batch_id {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM corpus_files WHERE user_id = ? AND batch_id = ?",
+        )
+        .bind(&auth.user_id)
+        .bind(bid)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+        n as usize
+    } else {
+        0
+    };
 
     for (filename, data) in files {
+        // Server-side enforcement of the same type/size rule the browser
+        // preflight uses — defense in depth, since the client can be bypassed.
+        // Never a silent drop: every skip is reported with its reason.
+        let size = u64::try_from(data.len()).unwrap_or(u64::MAX);
+        if let Some(reason) = upload_skip_reason(&filename, size) {
+            skipped.push(json!({"filename": filename, "reason": reason}));
+            continue;
+        }
+
+        // Enforce the folder cap. Over the limit we report, never truncate.
+        if let Some(reason) = crate::corpus::batch_cap_skip(batch_id.is_some(), batch_count) {
+            skipped.push(json!({"filename": filename, "reason": reason}));
+            continue;
+        }
+
         // SHA-256 of the bytes (same hashing approach as the documents
         // upload cache path in routes/documents.rs).
         let sha256 = {
@@ -123,16 +205,8 @@ async fn upload_files(
             continue;
         }
 
-        let ext = filename
-            .rsplit('.')
-            .next()
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        let file_type = if ext.is_empty() {
-            "other".to_string()
-        } else {
-            ext
-        };
+        // upload_skip_reason already guaranteed a supported extension.
+        let file_type = crate::corpus::file_ext(&filename);
 
         let file_id = uuid::Uuid::new_v4().to_string();
         let storage_key = format!("corpus/{}/{}", auth.user_id, file_id);
@@ -142,8 +216,9 @@ async fn upload_files(
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
         sqlx::query(
-            "INSERT INTO corpus_files (id, user_id, filename, file_type, sha256, is_template, status) \
-             VALUES (?, ?, ?, ?, ?, ?, 'pending')",
+            "INSERT INTO corpus_files \
+                (id, user_id, filename, file_type, sha256, is_template, status, batch_id, batch_label) \
+             VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
         )
         .bind(&file_id)
         .bind(&auth.user_id)
@@ -151,16 +226,20 @@ async fn upload_files(
         .bind(&file_type)
         .bind(&sha256)
         .bind(i64::from(is_template))
+        .bind(&batch_id)
+        .bind(&batch_label)
         .execute(&state.db)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
         accepted.push(file_id);
+        batch_count += 1;
     }
 
     Ok(Json(json!({
         "accepted": accepted,
         "duplicates": duplicates,
+        "skipped": skipped,
     })))
 }
 
@@ -199,64 +278,19 @@ async fn run_process(
     file_ids: Vec<String>,
     tx: tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
 ) {
-    for file_id in &file_ids {
-        // Forward IngestEvents from the ingest pipeline to the SSE stream.
-        let (prog_tx, mut prog_rx) = tokio::sync::mpsc::channel::<IngestEvent>(64);
-        let sse_tx = tx.clone();
-        let forward = tokio::spawn(async move {
-            while let Some(ev) = prog_rx.recv().await {
-                let payload = match ev {
-                    IngestEvent::Stage { file_id, stage } => {
-                        json!({"type": "stage", "file_id": file_id, "stage": stage})
-                    }
-                    IngestEvent::Done { file_id, chunk_count, doc_type } => {
-                        json!({"type": "done", "file_id": file_id, "chunk_count": chunk_count, "doc_type": doc_type})
-                    }
-                    IngestEvent::Error { file_id, message } => {
-                        json!({"type": "error", "file_id": file_id, "message": message})
-                    }
-                };
-                let _ = sse_tx.send(Ok(Event::default().data(payload.to_string()))).await;
+    // Bounded worker pool: at most FIRM_INGEST_CONCURRENCY files ingest at
+    // once. One file failing is isolated inside process_one, so a corrupt or
+    // locked file never aborts the batch.
+    stream::iter(file_ids)
+        .for_each_concurrent(FIRM_INGEST_CONCURRENCY, |file_id| {
+            let state = state.clone();
+            let user_id = user_id.clone();
+            let tx = tx.clone();
+            async move {
+                process_one(&state, &user_id, &file_id, &tx).await;
             }
-        });
-
-        let result = ingest_file(&state, &user_id, file_id, Some(&prog_tx)).await;
-        // Drop the sender so the forwarder task can drain and exit.
-        drop(prog_tx);
-        let _ = forward.await;
-
-        if let Err(e) = result {
-            // Hard IO/DB failure — stamp the row failed and surface it.
-            let _ = sqlx::query("UPDATE corpus_files SET status = 'failed', error = ? WHERE id = ?")
-                .bind(e.to_string())
-                .bind(file_id)
-                .execute(&state.db)
-                .await;
-            let payload = json!({"type": "error", "file_id": file_id, "message": e.to_string()});
-            let _ = tx.send(Ok(Event::default().data(payload.to_string()))).await;
-            continue;
-        }
-
-        // Template cleanup: only for files that finished `ready` AND are
-        // flagged is_template. Non-fatal — log and continue on any failure.
-        let row: Option<(String, i64, Option<String>)> = sqlx::query_as(
-            "SELECT status, is_template, template_md FROM corpus_files WHERE id = ? AND user_id = ?",
-        )
-        .bind(file_id)
-        .bind(&user_id)
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten();
-
-        if let Some((status, is_template, template_md)) = row {
-            if status == "ready" && is_template == 1 && template_md.is_none() {
-                if let Err(e) = build_template(&state, &user_id, file_id).await {
-                    tracing::warn!("[corpus] template cleanup failed for {file_id}: {e}");
-                }
-            }
-        }
-    }
+        })
+        .await;
 
     // Terminal markers, matching the chat/analyze SSE convention.
     let _ = tx
@@ -265,33 +299,139 @@ async fn run_process(
     let _ = tx.send(Ok(Event::default().data("[DONE]"))).await;
 }
 
-// ---------------------------------------------------------------------------
-// GET /corpus/files — list the caller's corpus files, newest first.
-// ---------------------------------------------------------------------------
-async fn list_files(State(state): State<Arc<AppState>>, auth: AuthUser) -> ApiResult {
-    let rows: Vec<(
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        String,
-        i64,
-        i64,
-        String,
-    )> = sqlx::query_as(
-        "SELECT id, filename, doc_type, case_type, court, status, chunk_count, is_template, created_at \
-         FROM corpus_files WHERE user_id = ? ORDER BY created_at DESC",
+/// Ingest one file and (if it is a ready template) build its template. All
+/// failures are contained here so a sibling in the batch keeps going.
+async fn process_one(
+    state: &Arc<AppState>,
+    user_id: &str,
+    file_id: &str,
+    tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
+) {
+    // Forward IngestEvents from the ingest pipeline to the SSE stream.
+    let (prog_tx, mut prog_rx) = tokio::sync::mpsc::channel::<IngestEvent>(64);
+    let sse_tx = tx.clone();
+    let forward = tokio::spawn(async move {
+        while let Some(ev) = prog_rx.recv().await {
+            let payload = match ev {
+                IngestEvent::Stage { file_id, stage } => {
+                    json!({"type": "stage", "file_id": file_id, "stage": stage})
+                }
+                IngestEvent::Done { file_id, chunk_count, doc_type } => {
+                    json!({"type": "done", "file_id": file_id, "chunk_count": chunk_count, "doc_type": doc_type})
+                }
+                IngestEvent::Error { file_id, message } => {
+                    json!({"type": "error", "file_id": file_id, "message": message})
+                }
+            };
+            let _ = sse_tx.send(Ok(Event::default().data(payload.to_string()))).await;
+        }
+    });
+
+    let result = ingest_file(state, user_id, file_id, Some(&prog_tx)).await;
+    // Drop the sender so the forwarder task can drain and exit.
+    drop(prog_tx);
+    let _ = forward.await;
+
+    if let Err(e) = result {
+        // Hard IO/DB failure — stamp the row failed and surface it.
+        let _ = sqlx::query("UPDATE corpus_files SET status = 'failed', error = ? WHERE id = ?")
+            .bind(e.to_string())
+            .bind(file_id)
+            .execute(&state.db)
+            .await;
+        let payload = json!({"type": "error", "file_id": file_id, "message": e.to_string()});
+        let _ = tx.send(Ok(Event::default().data(payload.to_string()))).await;
+        return;
+    }
+
+    // Template cleanup: only for files that finished `ready` AND are
+    // flagged is_template. Non-fatal — log and continue on any failure.
+    let row: Option<(String, i64, Option<String>)> = sqlx::query_as(
+        "SELECT status, is_template, template_md FROM corpus_files WHERE id = ? AND user_id = ?",
     )
-    .bind(&auth.user_id)
-    .fetch_all(&state.db)
+    .bind(file_id)
+    .bind(user_id)
+    .fetch_optional(&state.db)
     .await
+    .ok()
+    .flatten();
+
+    if let Some((status, is_template, template_md)) = row {
+        if status == "ready" && is_template == 1 && template_md.is_none() {
+            if let Err(e) = build_template(state, user_id, file_id).await {
+                tracing::warn!("[corpus] template cleanup failed for {file_id}: {e}");
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GET /corpus/files[?batch_id=…] — list the caller's corpus files, newest
+// first. The optional batch_id filter backs the folder-upload progress poll.
+// ---------------------------------------------------------------------------
+#[derive(Deserialize)]
+struct ListQuery {
+    batch_id: Option<String>,
+}
+
+type FileRow = (
+    String,         // id
+    String,         // filename
+    Option<String>, // doc_type
+    Option<String>, // case_type
+    Option<String>, // court
+    String,         // status
+    i64,            // chunk_count
+    i64,            // is_template
+    String,         // created_at
+    Option<String>, // error
+    Option<String>, // batch_id
+    Option<String>, // batch_label
+);
+
+async fn list_files(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+    Query(q): Query<ListQuery>,
+) -> ApiResult {
+    const COLS: &str = "id, filename, doc_type, case_type, court, status, chunk_count, \
+         is_template, created_at, error, batch_id, batch_label";
+
+    let rows: Vec<FileRow> = if let Some(bid) = q.batch_id.as_ref() {
+        sqlx::query_as(&format!(
+            "SELECT {COLS} FROM corpus_files WHERE user_id = ? AND batch_id = ? ORDER BY created_at DESC"
+        ))
+        .bind(&auth.user_id)
+        .bind(bid)
+        .fetch_all(&state.db)
+        .await
+    } else {
+        sqlx::query_as(&format!(
+            "SELECT {COLS} FROM corpus_files WHERE user_id = ? ORDER BY created_at DESC"
+        ))
+        .bind(&auth.user_id)
+        .fetch_all(&state.db)
+        .await
+    }
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
     let files: Vec<Value> = rows
         .into_iter()
         .map(
-            |(id, filename, doc_type, case_type, court, status, chunk_count, is_template, created_at)| {
+            |(
+                id,
+                filename,
+                doc_type,
+                case_type,
+                court,
+                status,
+                chunk_count,
+                is_template,
+                created_at,
+                error,
+                batch_id,
+                batch_label,
+            )| {
                 json!({
                     "id": id,
                     "filename": filename,
@@ -302,6 +442,9 @@ async fn list_files(State(state): State<Arc<AppState>>, auth: AuthUser) -> ApiRe
                     "chunk_count": chunk_count,
                     "is_template": is_template != 0,
                     "created_at": created_at,
+                    "error": error,
+                    "batch_id": batch_id,
+                    "batch_label": batch_label,
                 })
             },
         )
@@ -381,8 +524,50 @@ async fn update_file(
 }
 
 // ---------------------------------------------------------------------------
-// DELETE /corpus/files/:id — drop the row (chunks cascade via FK), clean up
-// any derived workflow, and best-effort delete the stored object.
+// Purge one corpus file completely: derived workflow, embedding vectors, the
+// row (chunks + FTS cascade via FK), and the stored object. Shared by single-
+// file and whole-batch deletion so neither path leaves orphan chunks/vectors.
+// Caller is responsible for the ownership check.
+// ---------------------------------------------------------------------------
+async fn purge_corpus_file(
+    state: &Arc<AppState>,
+    user_id: &str,
+    id: &str,
+) -> Result<(), sqlx::Error> {
+    // Remove any workflow derived from this template.
+    let _ = sqlx::query("DELETE FROM workflows WHERE corpus_file_id = ? AND user_id = ?")
+        .bind(id)
+        .bind(user_id)
+        .execute(&state.db)
+        .await;
+
+    // Clear this file's embedding vectors. corpus_chunks_vec is a sqlite-vec
+    // virtual table, so the ON DELETE CASCADE from corpus_files (which cleans
+    // corpus_chunks + its FTS mirror) can't reach it — we delete by file_id
+    // explicitly, exactly as ingest does on re-ingest.
+    #[cfg(feature = "rag")]
+    let _ = sqlx::query("DELETE FROM corpus_chunks_vec WHERE file_id = ?")
+        .bind(id)
+        .execute(&state.db)
+        .await;
+
+    // Delete the row — corpus_chunks cascade via FK.
+    sqlx::query("DELETE FROM corpus_files WHERE id = ? AND user_id = ?")
+        .bind(id)
+        .bind(user_id)
+        .execute(&state.db)
+        .await?;
+
+    // Best-effort storage cleanup.
+    if let Ok(storage) = make_storage() {
+        let _ = storage.delete(&format!("corpus/{user_id}/{id}")).await;
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /corpus/files/:id — remove one file and everything derived from it.
 // ---------------------------------------------------------------------------
 async fn delete_file(
     State(state): State<Arc<AppState>>,
@@ -400,37 +585,47 @@ async fn delete_file(
         return Err(err(StatusCode::NOT_FOUND, "Corpus file not found"));
     }
 
-    // Remove any workflow derived from this template.
-    let _ = sqlx::query("DELETE FROM workflows WHERE corpus_file_id = ? AND user_id = ?")
-        .bind(&id)
-        .bind(&auth.user_id)
-        .execute(&state.db)
-        .await;
-
-    // Clear this file's embedding vectors. corpus_chunks_vec is a sqlite-vec
-    // virtual table, so the ON DELETE CASCADE from corpus_files (which cleans
-    // corpus_chunks + its FTS mirror) can't reach it — we delete by file_id
-    // explicitly, exactly as ingest does on re-ingest.
-    #[cfg(feature = "rag")]
-    let _ = sqlx::query("DELETE FROM corpus_chunks_vec WHERE file_id = ?")
-        .bind(&id)
-        .execute(&state.db)
-        .await;
-
-    // Delete the row — corpus_chunks cascade via FK.
-    sqlx::query("DELETE FROM corpus_files WHERE id = ? AND user_id = ?")
-        .bind(&id)
-        .bind(&auth.user_id)
-        .execute(&state.db)
+    purge_corpus_file(&state, &auth.user_id, &id)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
-    // Best-effort storage cleanup.
-    if let Ok(storage) = make_storage() {
-        let _ = storage.delete(&format!("corpus/{}/{}", auth.user_id, id)).await;
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /corpus/batches/:batch_id — remove a whole folder upload, including
+// every file's chunks and embedding vectors (no orphans left behind).
+// ---------------------------------------------------------------------------
+async fn delete_batch(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+    Path(batch_id): Path<String>,
+) -> ApiResult {
+    let ids: Vec<(String,)> =
+        sqlx::query_as("SELECT id FROM corpus_files WHERE user_id = ? AND batch_id = ?")
+            .bind(&auth.user_id)
+            .bind(&batch_id)
+            .fetch_all(&state.db)
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    // No rows for this (user, batch): unknown batch or not the caller's —
+    // 404, mirroring delete_file, so the client can tell it apart from a
+    // real deletion.
+    if ids.is_empty() {
+        return Err(err(StatusCode::NOT_FOUND, "Batch not found"));
     }
 
-    Ok(Json(json!({ "ok": true })))
+    let mut deleted = 0usize;
+    for (id,) in &ids {
+        // One file failing to purge does not abort the rest of the batch.
+        match purge_corpus_file(&state, &auth.user_id, id).await {
+            Ok(()) => deleted += 1,
+            Err(e) => tracing::warn!("[corpus] purge of {id} in batch {batch_id} failed: {e}"),
+        }
+    }
+
+    Ok(Json(json!({ "ok": true, "deleted": deleted })))
 }
 
 // ---------------------------------------------------------------------------

@@ -1252,19 +1252,36 @@ export interface CorpusFile {
     chunk_count: number;
     is_template: boolean;
     created_at: string;
+    error: string | null;
+    batch_id: string | null;
+    batch_label: string | null;
 }
 
-export async function listCorpusFiles(): Promise<{ files: CorpusFile[] }> {
-    return apiRequest(`/corpus/files`);
+export interface CorpusLimits {
+    max_docs: number;
+    max_file_bytes: number;
+    supported_exts: string[];
+}
+
+export async function getCorpusLimits(): Promise<CorpusLimits> {
+    return apiRequest("/corpus/limits");
+}
+
+export async function listCorpusFiles(batchId?: string): Promise<{ files: CorpusFile[] }> {
+    return apiRequest(`/corpus/files${batchId ? "?batch_id=" + encodeURIComponent(batchId) : ""}`);
 }
 
 export async function uploadCorpusFiles(
     files: File[],
     isTemplate = false,
-): Promise<{ accepted: string[]; duplicates: string[] }> {
+    batchId?: string,
+    batchLabel?: string,
+): Promise<{ accepted: string[]; duplicates: string[]; skipped: { filename: string; reason: string }[] }> {
     const form = new FormData();
     for (const f of files) form.append("file", f);
     if (isTemplate) form.append("is_template", "true");
+    if (batchId) form.append("batch_id", batchId);
+    if (batchLabel) form.append("batch_label", batchLabel);
     const response = await fetch(`${API_BASE}/corpus/files`, {
         method: "POST",
         headers: { ...getAuthHeader() },
@@ -1296,6 +1313,10 @@ export async function updateCorpusFile(
 
 export async function deleteCorpusFile(id: string): Promise<void> {
     await apiRequest(`/corpus/files/${id}`, { method: "DELETE" });
+}
+
+export async function deleteCorpusBatch(batchId: string): Promise<{ ok: boolean; deleted: number }> {
+    return apiRequest(`/corpus/batches/${encodeURIComponent(batchId)}`, { method: "DELETE" });
 }
 
 // ---- Statutes (Indian statute database) ----

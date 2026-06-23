@@ -22,15 +22,17 @@
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 use teloxide::{
+    net::Download,
     prelude::*,
     types::{
-        CallbackQuery, ChatAction, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, MessageId,
+        CallbackQuery, ChatAction, FileId, InlineKeyboardButton, InlineKeyboardMarkup, InputFile,
+        MessageId,
     },
     utils::command::BotCommands,
 };
@@ -57,6 +59,26 @@ const CLARIFY_WAIT: Duration = Duration::from_secs(170);
 /// hanging forever. It's an *idle* timeout — a normally-streaming answer resets
 /// it on every chunk — so it only trips on a genuine stall.
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Case Prep analysis runs several LLM agents in parallel and can stay quiet
+/// between findings, so it gets a longer idle window than a plain chat turn.
+const ANALYZE_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Most files a single `/analyze` run accepts. A realistic case bundle sent
+/// over Telegram is a handful of documents; this caps an accidental dump so the
+/// run (and the cloud-model bill) stays bounded. Over it → the user is told the
+/// limit and asked to /analyze or /reset, never silently truncated.
+const MAX_FILES: usize = 20;
+
+/// Per-file size ceiling. This is the Telegram Bot API's own `getFile` download
+/// limit (20 MB) — a bot literally cannot fetch a larger file — so it is the
+/// real ceiling, not an arbitrary round number. Over it → the file is rejected
+/// with its actual size, not dropped silently.
+const MAX_FILE_BYTES: u64 = 20 * 1024 * 1024;
+
+/// TL;DR length sent as each delivered .docx's caption (Telegram caps captions
+/// at 1024 chars; we stay well under). The full text ships inside the .docx.
+const TLDR_CHARS: usize = 600;
 
 /// One turn in a chat's conversation history, mirroring the `/chat/` message shape.
 #[derive(Clone)]
@@ -150,6 +172,29 @@ struct ActiveChats(Arc<Mutex<HashMap<ChatId, String>>>);
 #[derive(Clone, Default)]
 struct DocNames(Arc<Mutex<HashMap<ChatId, HashMap<String, String>>>>);
 
+/// One file the user has sent and that is waiting to be run through Case Prep.
+/// We hold only Telegram's `file_id` (and metadata) here — the bytes are fetched
+/// from Telegram lazily when `/analyze` actually runs, so a big buffer of staged
+/// files costs almost nothing.
+#[derive(Clone)]
+struct PendingFile {
+    file_id: FileId,
+    filename: String,
+    size: u64,
+}
+
+/// Per-chat queue of files staged by document/photo messages, drained by
+/// `/analyze`. Cleared by `/reset` (so a user can abandon a staged batch).
+#[derive(Clone, Default)]
+struct PendingFiles(Arc<Mutex<HashMap<ChatId, Vec<PendingFile>>>>);
+
+/// Chats with a Case Prep run currently in flight. Used to reject a *second*
+/// concurrent `/analyze` for the same chat without blocking plain chat messages
+/// or other chats — the run itself executes on a spawned task. A plain
+/// `std::sync::Mutex` so the insert/remove never crosses an `.await`.
+#[derive(Clone, Default)]
+struct AnalyzeJobs(Arc<StdMutex<HashSet<ChatId>>>);
+
 // ---------------------------------------------------------------------------
 // Clarifying-question model (mirrors the backend `ask_clarifying_questions`
 // tool schema and the `/chat/client-tool-result` contract).
@@ -241,6 +286,8 @@ enum Command {
     New,
     #[command(description = "list & download your documents")]
     Docs,
+    #[command(description = "run Case Prep on the files you've sent: analysis + brief, strategy memo, list of dates & annexure index as .docx")]
+    Analyze,
 }
 
 #[tokio::main]
@@ -284,7 +331,7 @@ async fn main() {
     }
     if let Err(e) = bot
         .set_my_short_description()
-        .short_description("Donna — your Mike aur Donna legal assistant on Telegram.")
+        .short_description("Donna, your Mike aur Donna legal assistant on Telegram.")
         .await
     {
         tracing::warn!("could not set the short description: {e}");
@@ -308,6 +355,8 @@ async fn main() {
     let tokens = Tokens::default();
     let active = ActiveChats::default();
     let docnames = DocNames::default();
+    let pending_files = PendingFiles::default();
+    let analyze_jobs = AnalyzeJobs::default();
 
     let handler = dptree::entry()
         .branch(
@@ -317,13 +366,23 @@ async fn main() {
                         .filter_command::<Command>()
                         .endpoint(handle_command),
                 )
+                // A document or photo (e.g. a scan) → stage it for /analyze.
+                // Checked before the plain-text fallback so file uploads aren't
+                // bounced as "text only".
+                .branch(
+                    dptree::filter(|m: Message| {
+                        m.document().is_some() || m.photo().is_some()
+                    })
+                    .endpoint(handle_document),
+                )
                 .branch(dptree::endpoint(handle_text)),
         )
         .branch(Update::filter_callback_query().endpoint(handle_callback));
 
     Dispatcher::builder(bot, handler)
         .dependencies(dptree::deps![
-            cfg, history, pending, warned, in_flight, tokens, active, docnames
+            cfg, history, pending, warned, in_flight, tokens, active, docnames,
+            pending_files, analyze_jobs
         ])
         // Process every update concurrently (not serialized per chat) so a
         // button tap can be handled *while* its `handle_text` is still parked
@@ -348,6 +407,8 @@ async fn handle_command(
     tokens: Tokens,
     active: ActiveChats,
     docnames: DocNames,
+    pending_files: PendingFiles,
+    analyze_jobs: AnalyzeJobs,
 ) -> ResponseResult<()> {
     match cmd {
         Command::Start => {
@@ -382,8 +443,15 @@ async fn handle_command(
         Command::Reset => {
             history.lock().await.remove(&msg.chat.id);
             warned.lock().await.remove(&msg.chat.id);
-            bot.send_message(msg.chat.id, "🧹 In-memory history cleared.")
-                .await?;
+            let staged = pending_files.0.lock().await.remove(&msg.chat.id);
+            let text = match staged {
+                Some(files) if !files.is_empty() => format!(
+                    "🧹 Cleared in-memory history and discarded {} staged file(s).",
+                    files.len()
+                ),
+                _ => "🧹 In-memory history cleared.".to_string(),
+            };
+            bot.send_message(msg.chat.id, text).await?;
         }
         Command::Cancel => {
             let entry = pending.lock().await.remove(&msg.chat.id);
@@ -428,6 +496,60 @@ async fn handle_command(
         Command::Docs => {
             let cfg2 = with_token(&cfg, resolve_token(&tokens, msg.chat.id, &cfg).await);
             cmd_docs(&bot, msg.chat.id, &cfg2, &docnames).await?;
+        }
+        Command::Analyze => {
+            let chat_id = msg.chat.id;
+            // Nothing staged → guide the user instead of running an empty case.
+            let count = pending_files
+                .0
+                .lock()
+                .await
+                .get(&chat_id)
+                .map_or(0, Vec::len);
+            if count == 0 {
+                bot.send_message(
+                    chat_id,
+                    "📎 Send me the case files first (as documents, or photos of a scan), \
+                     then run /analyze. I take .docx, .pdf and image scans.",
+                )
+                .await?;
+                return Ok(());
+            }
+            // One Case Prep run per chat at a time. `insert` returns false if a
+            // run is already claimed — reject without touching the staged files.
+            let claimed = analyze_jobs
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(chat_id);
+            if !claimed {
+                bot.send_message(
+                    chat_id,
+                    "⏳ A Case Prep run is already going for this chat. I'll finish it first.",
+                )
+                .await?;
+                return Ok(());
+            }
+            let files = pending_files
+                .0
+                .lock()
+                .await
+                .remove(&chat_id)
+                .unwrap_or_default();
+            let cfg2 = with_token(&cfg, resolve_token(&tokens, chat_id, &cfg).await);
+            let bot2 = bot.clone();
+            let jobs = analyze_jobs.clone();
+            // Spawn the run so the dispatcher stays free for other messages
+            // (and other chats). The slot is released when the job finishes.
+            tokio::spawn(async move {
+                run_analyze_job(&bot2, chat_id, &cfg2, files).await;
+                // Always release the slot, even if the mutex was poisoned — a
+                // panic elsewhere must not lock this chat out of /analyze forever.
+                jobs.0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&chat_id);
+            });
         }
     }
     Ok(())
@@ -1754,9 +1876,874 @@ fn split_for_telegram(text: &str) -> Vec<String> {
     chunks
 }
 
+// ===========================================================================
+// Case Prep over Telegram: stage files → /analyze → backend pipeline → outputs.
+// The bot never links the `mike` crate; it drives the documented HTTP contract
+// (POST /cases, POST /document, POST /cases/:id/analyze (SSE), the output
+// routes, GET /document/:id/docx) exactly as the laptop UI does.
+// ===========================================================================
+
+/// A document or photo message → stage the file for `/analyze`. We keep only
+/// Telegram's `file_id` here; the bytes are fetched when `/analyze` runs. Over
+/// the per-file size or per-run count cap, the file is rejected with a specific
+/// message rather than silently dropped or truncated.
+async fn handle_document(
+    bot: Bot,
+    msg: Message,
+    pending_files: PendingFiles,
+) -> ResponseResult<()> {
+    let chat_id = msg.chat.id;
+
+    let pf = if let Some(doc) = msg.document() {
+        let filename = doc.file_name.clone().unwrap_or_else(|| {
+            let ext = doc
+                .mime_type
+                .as_ref()
+                .map(|m| ext_for_mime(m.essence_str()))
+                .unwrap_or("bin");
+            format!("document.{ext}")
+        });
+        PendingFile {
+            file_id: doc.file.id.clone(),
+            filename,
+            size: doc.file.size as u64,
+        }
+    } else if let Some(sizes) = msg.photo() {
+        // Telegram sends several resolutions; the last is the largest.
+        let Some(p) = sizes.last() else {
+            return Ok(());
+        };
+        let n = pending_files.0.lock().await.get(&chat_id).map_or(0, Vec::len) + 1;
+        PendingFile {
+            file_id: p.file.id.clone(),
+            filename: format!("scan_{n}.jpg"),
+            size: p.file.size as u64,
+        }
+    } else {
+        return Ok(());
+    };
+
+    let current = pending_files.0.lock().await.get(&chat_id).map_or(0, Vec::len);
+    if let Some(reason) = reject_file(current, pf.size) {
+        bot.send_message(chat_id, reason).await?;
+        return Ok(());
+    }
+
+    let total = {
+        let mut map = pending_files.0.lock().await;
+        let v = map.entry(chat_id).or_default();
+        v.push(pf.clone());
+        v.len()
+    };
+    // A command typed as a file's caption isn't routed to filter_command (that
+    // only reads message text), so it would be silently lost — nudge the user.
+    let caption_hint = msg
+        .caption()
+        .map(str::trim)
+        .filter(|c| c.starts_with("/analyze"))
+        .map(|_| {
+            "\n\n(Heads up: I can't read a command typed as a file caption. \
+             Send /analyze as its own message.)"
+        })
+        .unwrap_or("");
+    bot.send_message(
+        chat_id,
+        format!(
+            "📎 Staged {} ({} file{} ready). Send more, or /analyze to run Case Prep. \
+             /reset to clear.{}",
+            pf.filename,
+            total,
+            if total == 1 { "" } else { "s" },
+            caption_hint
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Run the whole Case Prep flow for one chat, editing a single status message
+/// through each phase so the user always sees progress (never a silent wait).
+/// Any failure is surfaced as a real message — there is no path that leaves a
+/// dangling "typing…".
+async fn run_analyze_job(bot: &Bot, chat_id: ChatId, cfg: &BotConfig, files: Vec<PendingFile>) {
+    let status_id = match bot.send_message(chat_id, "🧷 Starting Case Prep…").await {
+        Ok(m) => m.id,
+        Err(e) => {
+            tracing::error!("analyze: could not send status message: {e}");
+            return;
+        }
+    };
+    let mut status = Status::new(status_id);
+    if let Err(e) = analyze_flow(bot, chat_id, cfg, files, &mut status).await {
+        let text = if e.to_string() == AUTH_ERR {
+            AUTH_ERR.to_string()
+        } else {
+            format!("⚠️ Case Prep couldn't finish: {e}")
+        };
+        status.force(bot, chat_id, text).await;
+    }
+}
+
+/// The Case Prep pipeline as a fallible sequence; `run_analyze_job` renders the
+/// `Err` to the user. Per-file/per-output failures are *reported inline* and the
+/// run continues, so one bad document never sinks the whole batch.
+async fn analyze_flow(
+    bot: &Bot,
+    chat_id: ChatId,
+    cfg: &BotConfig,
+    files: Vec<PendingFile>,
+    status: &mut Status,
+) -> Result<()> {
+    if files.is_empty() {
+        return Err(anyhow!("no files were staged"));
+    }
+    // Quick calls (create/upload/attach/generate/delete) get connect + total
+    // timeouts so a hung or unreachable backend surfaces as a visible error
+    // rather than parking the job (and the chat's slot) forever. The SSE analyze
+    // call manages its own idle timeout, so it uses a separate client without a
+    // total timeout (see run_analysis).
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(180))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    // 1) Pull the staged files down from Telegram.
+    status
+        .force(
+            bot,
+            chat_id,
+            format!("📥 Fetching {} file(s) from Telegram…", files.len()),
+        )
+        .await;
+    let mut downloaded: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut problems: Vec<String> = Vec::new();
+    for f in &files {
+        match download_telegram_file(bot, &f.file_id).await {
+            Ok(bytes) if !bytes.is_empty() => downloaded.push((f.filename.clone(), bytes)),
+            Ok(_) => problems.push(format!("{} (empty)", f.filename)),
+            Err(e) => {
+                tracing::error!("telegram download {}: {e:#}", f.filename);
+                problems.push(f.filename.clone());
+            }
+        }
+    }
+    if downloaded.is_empty() {
+        return Err(anyhow!("couldn't download any of your files from Telegram"));
+    }
+
+    // 2) Create a PTEST-scoped case (kept in the account so it can be reviewed
+    //    and deleted from the app; the title prefix marks it as a test artifact).
+    status
+        .force(bot, chat_id, "🗂 Creating a case…".to_string())
+        .await;
+    let title = case_title(downloaded.len());
+    let case_id = create_case(&client, cfg, &title).await?;
+
+    // 3) Upload each file and attach it to the case.
+    let mut doc_ids: Vec<String> = Vec::new();
+    let total = downloaded.len();
+    // Consume `downloaded` so each file body is moved into the upload, not cloned
+    // (a 20 MB file × up to 20 files would otherwise duplicate ~400 MB).
+    for (i, (name, bytes)) in downloaded.into_iter().enumerate() {
+        status
+            .set(
+                bot,
+                chat_id,
+                format!("📤 Uploading {name} ({}/{total})…", i + 1),
+                false,
+            )
+            .await;
+        match upload_document(&client, cfg, &name, bytes).await {
+            Ok(id) => doc_ids.push(id),
+            Err(e) => {
+                tracing::error!("upload {name}: {e:#}");
+                problems.push(name);
+            }
+        }
+    }
+    if doc_ids.is_empty() {
+        let _ = delete_case(&client, cfg, &case_id).await;
+        return Err(anyhow!("couldn't upload any of your files to Mike"));
+    }
+    // Attach failed after a case was created → don't orphan the case.
+    if let Err(e) = attach_documents(&client, cfg, &case_id, &doc_ids).await {
+        let _ = delete_case(&client, cfg, &case_id).await;
+        return Err(e);
+    }
+
+    // 4) Run the 7-agent analysis, reporting progress off the SSE stream.
+    status
+        .force(
+            bot,
+            chat_id,
+            format!(
+                "🔍 Analyzing {} document(s)… this can take a couple of minutes.",
+                doc_ids.len()
+            ),
+        )
+        .await;
+    let progress = run_analysis(cfg, &case_id, bot, chat_id, status).await?;
+
+    // Flag files with no readable text (e.g. a blank scan), but keep going if
+    // some documents did extract — one unreadable file shouldn't sink the run.
+    if !progress.unreadable.is_empty() {
+        let _ = bot
+            .send_message(
+                chat_id,
+                format!(
+                    "⚠️ {} file(s) had no readable text{} and were skipped: {}.",
+                    progress.unreadable.len(),
+                    if progress.ocr_used { " (even after OCR)" } else { "" },
+                    progress.unreadable.join(", ")
+                ),
+            )
+            .await;
+    }
+    if !problems.is_empty() {
+        let _ = bot
+            .send_message(chat_id, format!("⚠️ Couldn't process: {}.", problems.join(", ")))
+            .await;
+    }
+    if progress.unreadable.len() >= doc_ids.len() {
+        let _ = delete_case(&client, cfg, &case_id).await;
+        return Err(anyhow!(
+            "none of your files had readable text. Send text-based .docx/.pdf or a clearer scan"
+        ));
+    }
+    if !progress.agent_errors.is_empty() {
+        let _ = bot
+            .send_message(
+                chat_id,
+                format!(
+                    "⚠️ Some analysis agents reported errors: {}.",
+                    progress.agent_errors.join("; ")
+                ),
+            )
+            .await;
+    }
+
+    // 5) Generate each output and deliver it as a .docx with a short TL;DR.
+    status
+        .force(
+            bot,
+            chat_id,
+            "📝 Generating brief, strategy memo, list of dates & annexure index…".to_string(),
+        )
+        .await;
+    const OUTPUTS: [(&str, &str); 4] = [
+        ("brief", "Case Brief"),
+        ("strategy-memo", "Strategy Memo"),
+        ("list-of-dates", "List of Dates"),
+        ("annexure-index", "Annexure Index"),
+    ];
+    let mut delivered = 0usize;
+    for (slug, label) in OUTPUTS {
+        status
+            .set(bot, chat_id, format!("📝 Generating {label}…"), false)
+            .await;
+        match generate_output(&client, cfg, &case_id, slug).await {
+            Ok((content_md, docx_id)) => match fetch_document(cfg, &docx_id).await {
+                Ok(bytes) => {
+                    let fname = format!("{}.docx", label.replace(' ', "_"));
+                    let file = InputFile::memory(bytes).file_name(fname);
+                    let caption = tldr(&content_md, TLDR_CHARS);
+                    let req = bot.send_document(chat_id, file);
+                    let req = if caption.trim().is_empty() {
+                        req
+                    } else {
+                        req.caption(format!("📄 {label}\n\n{caption}"))
+                    };
+                    if let Err(e) = req.await {
+                        tracing::error!("send {label}: {e:#}");
+                        let _ = bot
+                            .send_message(
+                                chat_id,
+                                format!("⚠️ Generated the {label} but couldn't send the file."),
+                            )
+                            .await;
+                    } else {
+                        delivered += 1;
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("render {label}: {e:#}");
+                    let _ = bot
+                        .send_message(
+                            chat_id,
+                            format!("⚠️ Generated the {label} but couldn't render the .docx."),
+                        )
+                        .await;
+                }
+            },
+            Err(e) => {
+                tracing::error!("generate {label}: {e:#}");
+                let _ = bot
+                    .send_message(chat_id, format!("⚠️ Couldn't generate the {label}: {e}."))
+                    .await;
+            }
+        }
+    }
+
+    // 6) Close out with a real summary (no dangling status).
+    let summary = if delivered > 0 {
+        format!(
+            "✅ Case Prep done. Delivered {delivered} output(s) above.\n\
+             Case \"{title}\" is saved in your account; open the app to review or delete it."
+        )
+    } else {
+        format!(
+            "⚠️ Case Prep ran but produced no deliverable outputs. \
+             Case \"{title}\" is saved; open the app to inspect it."
+        )
+    };
+    status.force(bot, chat_id, summary).await;
+    Ok(())
+}
+
+/// Fetch a staged Telegram file's bytes via getFile + the file download stream.
+async fn download_telegram_file(bot: &Bot, file_id: &FileId) -> Result<Vec<u8>> {
+    let file = bot
+        .get_file(file_id.clone())
+        .await
+        .map_err(|e| anyhow!("getFile failed: {e}"))?;
+    let mut stream = bot.download_file_stream(&file.path);
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| anyhow!("download error: {e}"))?;
+        bytes.extend_from_slice(&chunk);
+        // Backstop the cap on the real byte count — Telegram reports size 0 for
+        // some photos, which would slip past the staging-time `reject_file`.
+        if bytes.len() as u64 > MAX_FILE_BYTES {
+            return Err(anyhow!(
+                "file exceeds the {} MB limit",
+                MAX_FILE_BYTES / (1024 * 1024)
+            ));
+        }
+    }
+    Ok(bytes)
+}
+
+/// Parse a backend JSON response, mapping 401 → AUTH_ERR and other non-2xx to a
+/// readable error (so the user sees a real message, not a raw status code).
+async fn json_or_err(resp: reqwest::Response, what: &str) -> Result<Value> {
+    let status = resp.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(anyhow!("{AUTH_ERR}"));
+    }
+    if !status.is_success() {
+        let detail = resp.text().await.unwrap_or_default();
+        return Err(anyhow!(
+            "{what}: backend returned {status} {}",
+            detail.chars().take(200).collect::<String>()
+        ));
+    }
+    resp.json::<Value>()
+        .await
+        .map_err(|e| anyhow!("{what}: bad response: {e}"))
+}
+
+/// `POST /cases` → the new case id.
+async fn create_case(client: &reqwest::Client, cfg: &BotConfig, title: &str) -> Result<String> {
+    let url = format!("{}/cases", cfg.api_url.trim_end_matches('/'));
+    let resp = client
+        .post(&url)
+        .header("authorization", format!("Bearer {}", cfg.session_token))
+        .json(&json!({ "title": title }))
+        .send()
+        .await
+        .map_err(|e| anyhow!("could not reach backend at {url}: {e}"))?;
+    let v = json_or_err(resp, "create case").await?;
+    v.get("id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("create case: no id in response"))
+}
+
+/// `POST /document` (multipart) → the new document id. The filename's extension
+/// lets the backend type the file and route scans/images through OCR.
+async fn upload_document(
+    client: &reqwest::Client,
+    cfg: &BotConfig,
+    filename: &str,
+    bytes: Vec<u8>,
+) -> Result<String> {
+    let url = format!("{}/document", cfg.api_url.trim_end_matches('/'));
+    let part = reqwest::multipart::Part::bytes(bytes).file_name(filename.to_string());
+    let form = reqwest::multipart::Form::new().part("file", part);
+    let resp = client
+        .post(&url)
+        .header("authorization", format!("Bearer {}", cfg.session_token))
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| anyhow!("could not reach backend at {url}: {e}"))?;
+    let v = json_or_err(resp, "upload").await?;
+    v.get("id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("upload: no document id in response"))
+}
+
+/// `POST /cases/:id/documents` — link uploaded documents to the case.
+async fn attach_documents(
+    client: &reqwest::Client,
+    cfg: &BotConfig,
+    case_id: &str,
+    doc_ids: &[String],
+) -> Result<()> {
+    let url = format!(
+        "{}/cases/{}/documents",
+        cfg.api_url.trim_end_matches('/'),
+        case_id
+    );
+    let resp = client
+        .post(&url)
+        .header("authorization", format!("Bearer {}", cfg.session_token))
+        .json(&json!({ "document_ids": doc_ids }))
+        .send()
+        .await
+        .map_err(|e| anyhow!("could not reach backend at {url}: {e}"))?;
+    json_or_err(resp, "attach").await?;
+    Ok(())
+}
+
+/// `POST /cases/:id/analyze` — consume the SSE stream to completion, surfacing
+/// progress through `status`, and return what we observed (unreadable files,
+/// agent errors, OCR usage).
+async fn run_analysis(
+    cfg: &BotConfig,
+    case_id: &str,
+    bot: &Bot,
+    chat_id: ChatId,
+    status: &mut Status,
+) -> Result<AnalyzeProgress> {
+    let url = format!(
+        "{}/cases/{}/analyze",
+        cfg.api_url.trim_end_matches('/'),
+        case_id
+    );
+    // No total timeout here — the analysis legitimately streams for minutes; the
+    // loop below enforces an *idle* timeout instead. A connect timeout still
+    // bounds an unreachable backend.
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    let resp = client
+        .post(&url)
+        .header("authorization", format!("Bearer {}", cfg.session_token))
+        .header("accept", "text/event-stream")
+        .json(&json!({ "redact_pii": false }))
+        .send()
+        .await
+        .map_err(|e| anyhow!("could not reach backend at {url}: {e}"))?;
+    let s = resp.status();
+    if s == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(anyhow!("{AUTH_ERR}"));
+    }
+    if !s.is_success() {
+        let detail = resp.text().await.unwrap_or_default();
+        return Err(anyhow!(
+            "analyze: backend returned {s} {}",
+            detail.chars().take(200).collect::<String>()
+        ));
+    }
+
+    let mut buf = String::new();
+    let mut prog = AnalyzeProgress::default();
+    let mut stream = resp.bytes_stream();
+    loop {
+        while let Some(pos) = buf.find("\n\n") {
+            let raw: String = buf.drain(..pos + 2).collect();
+            apply_analyze_event(&raw, &mut prog);
+        }
+        report_progress(bot, chat_id, status, &prog).await;
+        if prog.done {
+            break;
+        }
+        match tokio::time::timeout(ANALYZE_IDLE_TIMEOUT, stream.next()).await {
+            Err(_elapsed) => {
+                return Err(anyhow!(
+                    "analysis stalled (no update for {}s)",
+                    ANALYZE_IDLE_TIMEOUT.as_secs()
+                ));
+            }
+            Ok(Some(chunk)) => {
+                let chunk = chunk.map_err(|e| anyhow!("stream error: {e}"))?;
+                buf.push_str(&String::from_utf8_lossy(&chunk));
+            }
+            Ok(None) => break,
+        }
+    }
+    if !buf.trim().is_empty() {
+        apply_analyze_event(&buf, &mut prog);
+    }
+    if let Some(e) = prog.fatal_error.clone() {
+        return Err(anyhow!("{e}"));
+    }
+    // Stream closed without a terminal "done" → the backend dropped mid-analysis.
+    // Bail rather than generate outputs off an incomplete run.
+    if !prog.done {
+        return Err(anyhow!(
+            "analysis ended early; the connection closed before it finished"
+        ));
+    }
+    Ok(prog)
+}
+
+/// Build a human progress line from the current analysis state and (throttled)
+/// edit the status message in place.
+async fn report_progress(bot: &Bot, chat_id: ChatId, status: &mut Status, prog: &AnalyzeProgress) {
+    let text = if !prog.agents_seen.is_empty() {
+        let total = prog.agents_seen.len().max(prog.agents_done);
+        format!("🧠 Running analysis agents… {}/{} done", prog.agents_done, total)
+    } else if prog.extracted > 0 {
+        let total = if prog.total_docs == 0 {
+            prog.extracted
+        } else {
+            prog.total_docs
+        };
+        format!("🔍 Extracting text… {}/{} document(s)", prog.extracted, total)
+    } else if let Some(stage) = &prog.stage {
+        format!("🔍 {stage}")
+    } else {
+        return;
+    };
+    status.set(bot, chat_id, text, false).await;
+}
+
+/// `POST /cases/:id/outputs/:slug` → (markdown, docx document id). A 422 here
+/// means analysis produced no findings (surfaced to the user by the caller).
+async fn generate_output(
+    client: &reqwest::Client,
+    cfg: &BotConfig,
+    case_id: &str,
+    slug: &str,
+) -> Result<(String, String)> {
+    let url = format!(
+        "{}/cases/{}/outputs/{}",
+        cfg.api_url.trim_end_matches('/'),
+        case_id,
+        slug
+    );
+    let resp = client
+        .post(&url)
+        .header("authorization", format!("Bearer {}", cfg.session_token))
+        .json(&json!({ "redact_pii": false }))
+        .send()
+        .await
+        .map_err(|e| anyhow!("could not reach backend at {url}: {e}"))?;
+    let v = json_or_err(resp, slug).await?;
+    let content = v
+        .get("content_md")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let docx = v
+        .get("docx_document_id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("{slug}: response had no docx_document_id"))?;
+    Ok((content, docx))
+}
+
+/// `DELETE /cases/:id` — best-effort cleanup when a run aborts before producing
+/// anything; ignored on error (the PTEST- case is harmless and deletable later).
+async fn delete_case(client: &reqwest::Client, cfg: &BotConfig, case_id: &str) -> Result<()> {
+    let url = format!("{}/cases/{}", cfg.api_url.trim_end_matches('/'), case_id);
+    client
+        .delete(&url)
+        .header("authorization", format!("Bearer {}", cfg.session_token))
+        .send()
+        .await
+        .map_err(|e| anyhow!("delete case: {e}"))?;
+    Ok(())
+}
+
+/// What we learn from the analyze SSE stream.
+#[derive(Default)]
+struct AnalyzeProgress {
+    stage: Option<String>,
+    extracted: usize,
+    total_docs: usize,
+    /// Filenames whose extracted text was empty (char_count == 0).
+    unreadable: Vec<String>,
+    ocr_used: bool,
+    agents_seen: HashSet<String>,
+    agents_done: usize,
+    agent_errors: Vec<String>,
+    done: bool,
+    fatal_error: Option<String>,
+}
+
+/// One status message edited in place through the run.
+struct Status {
+    id: MessageId,
+    last: String,
+    last_edit: Instant,
+}
+
+impl Status {
+    fn new(id: MessageId) -> Self {
+        Status {
+            id,
+            last: String::new(),
+            last_edit: Instant::now(),
+        }
+    }
+
+    /// Edit the status, unless the text is unchanged. ponytail: a 1.5s throttle
+    /// dodges Telegram's ~1/s edit-rate limit when agent events arrive in a
+    /// burst; phase boundaries call `force` to always land. Edit errors are
+    /// cosmetic, so they're swallowed.
+    async fn set(&mut self, bot: &Bot, chat_id: ChatId, text: String, force: bool) {
+        if text == self.last {
+            return;
+        }
+        if !force && self.last_edit.elapsed() < Duration::from_millis(1500) {
+            return;
+        }
+        self.last = text.clone();
+        self.last_edit = Instant::now();
+        let _ = bot.edit_message_text(chat_id, self.id, text).await;
+    }
+
+    async fn force(&mut self, bot: &Bot, chat_id: ChatId, text: String) {
+        self.set(bot, chat_id, text, true).await;
+    }
+}
+
+/// Reject a staged file that breaks a cap, returning a message naming the
+/// offending value and the limit. `None` means the file is within limits.
+fn reject_file(current_count: usize, incoming_bytes: u64) -> Option<String> {
+    if incoming_bytes > MAX_FILE_BYTES {
+        return Some(format!(
+            "⚠️ That file is {:.1} MB, over the {} MB per-file limit (Telegram won't let a bot \
+             download anything larger). Skipped it.",
+            incoming_bytes as f64 / (1024.0 * 1024.0),
+            MAX_FILE_BYTES / (1024 * 1024),
+        ));
+    }
+    if current_count >= MAX_FILES {
+        return Some(format!(
+            "⚠️ You've already staged the maximum of {MAX_FILES} files for one Case Prep run. \
+             Run /analyze on these, or /reset to start over."
+        ));
+    }
+    None
+}
+
+/// PTEST-prefixed case title so the bot-created case is isolated and easy to
+/// find and delete; the prefix is what the test harness asserts on.
+fn case_title(file_count: usize) -> String {
+    format!(
+        "PTEST-Case Prep ({file_count} doc{})",
+        if file_count == 1 { "" } else { "s" }
+    )
+}
+
+/// A short, char-safe preview of an output's markdown for the .docx caption.
+fn tldr(content_md: &str, max: usize) -> String {
+    let trimmed = content_md.trim();
+    if trimmed.chars().count() <= max {
+        return trimmed.to_string();
+    }
+    let kept: String = trimmed.chars().take(max).collect();
+    format!("{kept}…")
+}
+
+/// Map a MIME essence to a file extension so an extension-less upload still
+/// types correctly on the backend. Unknown → "bin" (backend falls back to sniff).
+fn ext_for_mime(essence: &str) -> &'static str {
+    match essence {
+        "application/pdf" => "pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/tiff" => "tiff",
+        _ => "bin",
+    }
+}
+
+/// Extract the JSON payload from one SSE event block (`data: {…}` line). Skips
+/// the `[DONE]` sentinel and any non-JSON keepalive lines.
+fn sse_data_json(raw: &str) -> Option<Value> {
+    for line in raw.lines() {
+        let line = line.trim_start();
+        if let Some(rest) = line.strip_prefix("data:") {
+            let payload = rest.trim();
+            if payload.is_empty() || payload == "[DONE]" {
+                continue;
+            }
+            if let Ok(v) = serde_json::from_str::<Value>(payload) {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+/// Fold one analyze SSE event into the running `AnalyzeProgress`.
+fn apply_analyze_event(raw: &str, p: &mut AnalyzeProgress) {
+    let Some(v) = sse_data_json(raw) else {
+        return;
+    };
+    match v.get("type").and_then(Value::as_str) {
+        Some("stage") => {
+            if let Some(m) = v.get("message").and_then(Value::as_str) {
+                p.stage = Some(m.to_string());
+            }
+        }
+        Some("extracting_doc") => {
+            if let Some(t) = v.get("total_docs").and_then(Value::as_u64) {
+                p.total_docs = t as usize;
+            }
+        }
+        Some("extracted_doc") => {
+            p.extracted += 1;
+            if let Some(t) = v.get("total_docs").and_then(Value::as_u64) {
+                p.total_docs = t as usize;
+            }
+            if v.get("needed_ocr").and_then(Value::as_bool) == Some(true) {
+                p.ocr_used = true;
+            }
+            // char_count == 0 is the backend's "no readable text" signal (it
+            // stores an empty marker when extraction/OCR yields nothing).
+            let chars = v.get("char_count").and_then(Value::as_u64).unwrap_or(0);
+            if chars == 0 {
+                let name = v
+                    .get("filename")
+                    .and_then(Value::as_str)
+                    .unwrap_or("a file")
+                    .to_string();
+                p.unreadable.push(name);
+            }
+        }
+        Some("agent_status") => {
+            let name = v
+                .get("agent_name")
+                .and_then(Value::as_str)
+                .unwrap_or("agent")
+                .to_string();
+            let st = v.get("status").and_then(Value::as_str).unwrap_or("");
+            p.agents_seen.insert(name.clone());
+            match st {
+                "done" => p.agents_done += 1,
+                "error" => {
+                    let e = v.get("error").and_then(Value::as_str).unwrap_or("failed");
+                    p.agent_errors.push(format!("{name}: {e}"));
+                }
+                _ => {}
+            }
+        }
+        Some("done") => p.done = true,
+        Some("error") => {
+            let e = v
+                .get("message")
+                .and_then(Value::as_str)
+                .or_else(|| v.get("error").and_then(Value::as_str))
+                .unwrap_or("analysis failed");
+            p.fatal_error = Some(e.to_string());
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_oversize_file_with_its_size() {
+        let over = MAX_FILE_BYTES + 1;
+        let msg = reject_file(0, over).expect("oversize file must be rejected");
+        assert!(msg.contains("MB"), "message should name the size: {msg}");
+    }
+
+    #[test]
+    fn rejects_over_count_with_the_limit_number() {
+        let msg = reject_file(MAX_FILES, 1024).expect("over-count must be rejected");
+        assert!(
+            msg.contains(&MAX_FILES.to_string()),
+            "message should name the {MAX_FILES} limit: {msg}"
+        );
+    }
+
+    #[test]
+    fn accepts_file_within_limits() {
+        assert!(reject_file(0, 1024).is_none());
+        assert!(reject_file(MAX_FILES - 1, MAX_FILE_BYTES).is_none());
+    }
+
+    #[test]
+    fn case_title_is_ptest_scoped() {
+        assert!(case_title(3).starts_with("PTEST-"), "{}", case_title(3));
+        assert!(case_title(1).contains("1 doc"));
+        assert!(case_title(2).contains("2 docs"));
+    }
+
+    #[test]
+    fn tldr_truncates_long_text_and_keeps_short() {
+        let short = "A brief summary.";
+        assert_eq!(tldr(short, 600), short);
+        let long = "x".repeat(2000);
+        let out = tldr(&long, 600);
+        assert!(out.ends_with('…'));
+        assert_eq!(out.chars().count(), 601); // 600 kept + ellipsis
+    }
+
+    #[test]
+    fn flags_doc_with_no_readable_text() {
+        let mut p = AnalyzeProgress::default();
+        apply_analyze_event(
+            "data: {\"type\":\"extracted_doc\",\"filename\":\"blank_scan.png\",\"doc_index\":0,\"total_docs\":2,\"page_count\":1,\"needed_ocr\":true,\"char_count\":0}\n\n",
+            &mut p,
+        );
+        apply_analyze_event(
+            "data: {\"type\":\"extracted_doc\",\"filename\":\"petition.pdf\",\"doc_index\":1,\"total_docs\":2,\"page_count\":12,\"needed_ocr\":false,\"char_count\":8421}\n\n",
+            &mut p,
+        );
+        assert_eq!(p.extracted, 2);
+        assert_eq!(p.total_docs, 2);
+        assert!(p.ocr_used);
+        assert_eq!(p.unreadable, vec!["blank_scan.png".to_string()]);
+    }
+
+    #[test]
+    fn tracks_agents_and_terminal_events() {
+        let mut p = AnalyzeProgress::default();
+        for ev in [
+            "data: {\"type\":\"agent_status\",\"agent_name\":\"case_summary\",\"status\":\"running\"}\n\n",
+            "data: {\"type\":\"agent_status\",\"agent_name\":\"case_summary\",\"status\":\"done\"}\n\n",
+            "data: {\"type\":\"agent_status\",\"agent_name\":\"risk_assessor\",\"status\":\"error\",\"error\":\"timeout\"}\n\n",
+            "data: {\"type\":\"done\"}\n\n",
+        ] {
+            apply_analyze_event(ev, &mut p);
+        }
+        assert_eq!(p.agents_seen.len(), 2);
+        assert_eq!(p.agents_done, 1);
+        assert_eq!(p.agent_errors, vec!["risk_assessor: timeout".to_string()]);
+        assert!(p.done);
+        assert!(p.fatal_error.is_none());
+    }
+
+    #[test]
+    fn captures_fatal_analyze_error() {
+        let mut p = AnalyzeProgress::default();
+        apply_analyze_event(
+            "data: {\"type\":\"error\",\"message\":\"model unavailable\"}\n\n",
+            &mut p,
+        );
+        assert_eq!(p.fatal_error.as_deref(), Some("model unavailable"));
+    }
+
+    #[test]
+    fn sse_skips_done_sentinel_and_keepalives() {
+        assert!(sse_data_json("data: [DONE]\n\n").is_none());
+        assert!(sse_data_json(": keepalive\n\n").is_none());
+        assert!(sse_data_json("data: {\"type\":\"done\"}\n\n").is_some());
+    }
 
     #[test]
     fn accumulates_content_delta_in_order() {

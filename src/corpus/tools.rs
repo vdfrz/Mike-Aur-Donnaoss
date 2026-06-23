@@ -815,6 +815,68 @@ mod tests {
         assert_eq!(results[1]["chunk_id"].as_i64(), Some(id_b));
     }
 
+    /// A freshly-ingested chunk becomes retrievable exactly when its file
+    /// reaches `ready`: BM25 search returns the ready file's chunk and skips an
+    /// identical chunk whose file is still `pending`. This is why a folder
+    /// upload's docs surface in drafting only after ingest completes.
+    #[cfg(feature = "rag")]
+    #[tokio::test]
+    async fn search_returns_ready_chunk_and_hides_pending() {
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+        use std::str::FromStr;
+
+        crate::embeddings::register_sqlite_vec_auto_extension();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::from_str("sqlite::memory:")
+                    .unwrap()
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+        let user = "u1";
+        sqlx::query("INSERT INTO user_profiles (id, username, pin_hash) VALUES (?, ?, 'x')")
+            .bind(user)
+            .bind(user)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Same distinctive text in both files; only the status differs.
+        for (fid, status) in [("f-ready", "ready"), ("f-pending", "pending")] {
+            sqlx::query(
+                "INSERT INTO corpus_files (id, user_id, filename, file_type, sha256, status) \
+                 VALUES (?, ?, ?, 'txt', ?, ?)",
+            )
+            .bind(fid)
+            .bind(user)
+            .bind(format!("{fid}.txt"))
+            .bind(format!("sha-{fid}"))
+            .bind(status)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO corpus_chunks (file_id, user_id, seq, section_role, text) \
+                 VALUES (?, ?, 0, 'argument', 'A bespoke indemnity covenant for the lessor.')",
+            )
+            .bind(fid)
+            .bind(user)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let out = bm25_search_firm_corpus(&pool, user, &json!({ "query": "indemnity covenant" })).await;
+        let v: Value = serde_json::from_str(&out).unwrap();
+        let results = v["results"].as_array().expect("results array");
+        assert_eq!(results.len(), 1, "only the ready file's chunk is returned: {out}");
+        assert_eq!(results[0]["filename"].as_str(), Some("f-ready.txt"));
+    }
+
     #[test]
     fn template_doc_type_maps_to_is_template_filter() {
         // doc_type="template" is translated to an is_template filter, not a
