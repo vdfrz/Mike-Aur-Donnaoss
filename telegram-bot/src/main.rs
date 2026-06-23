@@ -80,6 +80,21 @@ const MAX_FILE_BYTES: u64 = 20 * 1024 * 1024;
 /// at 1024 chars; we stay well under). The full text ships inside the .docx.
 const TLDR_CHARS: usize = 600;
 
+/// Largest `.docx` the bot will accept for redlining. Mirrors the Telegram
+/// `getFile` ceiling (a bot cannot download anything larger), kept as a single
+/// source of truth so the gate and the post-download check agree.
+const MAX_DOC_BYTES: usize = 20 * 1024 * 1024;
+
+/// The Word `.docx` MIME type, used both to gate uploads and to label the
+/// multipart part we POST to the backend.
+const DOCX_MIME: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+
+/// Reply when the user sends a non-`.docx` document to redline. Caught bot-side
+/// so the user isn't bounced through an upload first (mirrors the backend
+/// `edit_document` guard in `builtin_tools.rs`).
+const DOCX_ONLY_MSG: &str =
+    "I can only redline Word `.docx` files for now — please re-send as `.docx`.";
+
 /// One turn in a chat's conversation history, mirroring the `/chat/` message shape.
 #[derive(Clone)]
 struct ChatMsg {
@@ -194,6 +209,29 @@ struct PendingFiles(Arc<Mutex<HashMap<ChatId, Vec<PendingFile>>>>);
 /// `std::sync::Mutex` so the insert/remove never crosses an `.await`.
 #[derive(Clone, Default)]
 struct AnalyzeJobs(Arc<StdMutex<HashSet<ChatId>>>);
+
+/// A document uploaded and risk-reviewed, parked until the user confirms with
+/// "yes" so we can apply the tracked changes. Keyed by chat. Cleared on /reset.
+struct RedlinePending {
+    /// Backend document id (carried as `files[].document_id` into the apply turn).
+    document_id: String,
+    /// Original upload name, used to label the redlined file we send back.
+    filename: String,
+    /// The turn-1 review text, replayed as history so the apply turn has context.
+    review: String,
+}
+
+/// Per-chat documents awaiting an "apply these changes?" confirmation.
+type Redlines = Arc<Mutex<HashMap<ChatId, RedlinePending>>>;
+
+/// Bundle of per-chat ephemeral flags cleared on /reset. Grouped into one
+/// injected dependency so `handle_command` stays under dptree's 12-argument
+/// injection ceiling (it would otherwise hit 13 args).
+#[derive(Clone, Default)]
+struct Ephemeral {
+    warned: Warned,
+    redlines: Redlines,
+}
 
 // ---------------------------------------------------------------------------
 // Clarifying-question model (mirrors the backend `ask_clarifying_questions`
@@ -350,13 +388,13 @@ async fn main() {
 
     let history: History = Arc::new(Mutex::new(HashMap::new()));
     let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
-    let warned: Warned = Arc::new(Mutex::new(HashSet::new()));
     let in_flight: InFlight = Arc::new(StdMutex::new(HashSet::new()));
     let tokens = Tokens::default();
     let active = ActiveChats::default();
     let docnames = DocNames::default();
     let pending_files = PendingFiles::default();
     let analyze_jobs = AnalyzeJobs::default();
+    let ephemeral = Ephemeral::default();
 
     let handler = dptree::entry()
         .branch(
@@ -381,8 +419,8 @@ async fn main() {
 
     Dispatcher::builder(bot, handler)
         .dependencies(dptree::deps![
-            cfg, history, pending, warned, in_flight, tokens, active, docnames,
-            pending_files, analyze_jobs
+            cfg, history, pending, in_flight, tokens, active, docnames,
+            pending_files, analyze_jobs, ephemeral
         ])
         // Process every update concurrently (not serialized per chat) so a
         // button tap can be handled *while* its `handle_text` is still parked
@@ -403,13 +441,15 @@ async fn handle_command(
     cfg: BotConfig,
     history: History,
     pending: Pending,
-    warned: Warned,
     tokens: Tokens,
     active: ActiveChats,
     docnames: DocNames,
     pending_files: PendingFiles,
     analyze_jobs: AnalyzeJobs,
+    ephemeral: Ephemeral,
 ) -> ResponseResult<()> {
+    let warned = &ephemeral.warned;
+    let redlines = &ephemeral.redlines;
     match cmd {
         Command::Start => {
             bot.send_message(
@@ -443,6 +483,7 @@ async fn handle_command(
         Command::Reset => {
             history.lock().await.remove(&msg.chat.id);
             warned.lock().await.remove(&msg.chat.id);
+            redlines.lock().await.remove(&msg.chat.id);
             let staged = pending_files.0.lock().await.remove(&msg.chat.id);
             let text = match staged {
                 Some(files) if !files.is_empty() => format!(
@@ -563,11 +604,13 @@ async fn handle_text(
     cfg: BotConfig,
     history: History,
     pending: Pending,
-    warned: Warned,
     in_flight: InFlight,
     tokens: Tokens,
     active: ActiveChats,
+    ephemeral: Ephemeral,
 ) -> ResponseResult<()> {
+    let warned = &ephemeral.warned;
+    let redlines = &ephemeral.redlines;
     let Some(user_text) = msg.text().map(str::to_string) else {
         bot.send_message(msg.chat.id, "I can only handle text messages for now.")
             .await?;
@@ -603,6 +646,17 @@ async fn handle_text(
     // call below — chat stream, clarify POST, document fetch — acts as that user.
     let cfg = with_token(&cfg, resolve_token(&tokens, msg.chat.id, &cfg).await);
 
+    // If a document is parked awaiting "apply these as tracked changes?", an
+    // affirmation runs the apply step instead of a normal chat turn. A
+    // non-affirmation leaves it parked, so a later "yes" still works and an
+    // ordinary question is answered normally.
+    if is_affirmative(&user_text) {
+        let parked = redlines.lock().await.remove(&msg.chat.id);
+        if let Some(rl) = parked {
+            return apply_redline(&bot, &msg, &cfg, &pending, rl).await;
+        }
+    }
+
     // The persisted thread this chat is attached to (if any), so the turn lands
     // in the same conversation as the laptop.
     let active_chat_id = active.0.lock().await.get(&msg.chat.id).cloned();
@@ -630,7 +684,8 @@ async fn handle_text(
         (turns.clone(), dropped)
     };
 
-    match call_chat(&bot, msg.chat.id, &cfg, &pending, &messages, active_chat_id.clone()).await {
+    match call_chat(&bot, msg.chat.id, &cfg, &pending, &messages, active_chat_id.clone(), None).await
+    {
         Ok(outcome) => {
             let ChatOutcome {
                 reply: model_reply,
@@ -1429,11 +1484,18 @@ async fn call_chat(
     pending: &Pending,
     messages: &[ChatMsg],
     active_chat_id: Option<String>,
+    attach_doc: Option<&str>,
 ) -> Result<ChatOutcome> {
-    let msg_json: Vec<Value> = messages
+    let mut msg_json: Vec<Value> = messages
         .iter()
         .map(|m| json!({ "role": m.role, "content": m.content }))
         .collect();
+    // Carry an uploaded document to the backend as `files[].document_id` on the
+    // last message — the backend collects file ids across all messages and maps
+    // them to chat-local labels (doc-0, …).
+    if let (Some(doc_id), Some(last)) = (attach_doc, msg_json.last_mut()) {
+        last["files"] = json!([{ "document_id": doc_id }]);
+    }
     let mut body = json!({ "messages": msg_json });
     if let Some(model) = &cfg.model {
         body["model"] = json!(model);
@@ -1842,6 +1904,311 @@ async fn fetch_document(cfg: &BotConfig, document_id: &str) -> Result<Vec<u8>> {
         .map_err(|e| anyhow!("could not read document bytes: {e}"))
 }
 
+// ---------------------------------------------------------------------------
+// Document redlining: receive a `.docx` (with an instruction caption) → rubric
+// risk-review → confirm "yes" → `edit_document` tracked changes → deliver the
+// redlined file back. Triggered from `handle_document` (the /analyze stager).
+// ---------------------------------------------------------------------------
+
+/// The routing decision for an incoming document, computed from plain values so
+/// it is unit-testable without teloxide or the network.
+#[derive(Debug, PartialEq)]
+enum DocGate {
+    /// A `.docx` with an instruction caption — run the redline flow.
+    Upload,
+    /// Wrong type or too large — reply with `msg` and stop.
+    Reject(String),
+    /// A `.docx` but no caption — ask the user what to review/change.
+    NeedCaption,
+}
+
+/// Gate an incoming document on (filename, mime, size, caption). Pure: no I/O.
+/// `.docx`-only (by extension, plus the docx MIME when Telegram provides one),
+/// under the size cap, and needs a caption (the instruction).
+fn gate_document(
+    file_name: Option<&str>,
+    mime: Option<&str>,
+    size: usize,
+    caption: Option<&str>,
+) -> DocGate {
+    let is_docx_name = file_name
+        .map(|n| n.to_ascii_lowercase().ends_with(".docx"))
+        .unwrap_or(false);
+    // When Telegram supplies a MIME, require the docx one; absence is allowed.
+    let mime_ok = mime.map(|m| m == DOCX_MIME).unwrap_or(true);
+    if !is_docx_name || !mime_ok {
+        return DocGate::Reject(DOCX_ONLY_MSG.to_string());
+    }
+    if size > MAX_DOC_BYTES {
+        return DocGate::Reject("That file is over the 20 MB limit.".to_string());
+    }
+    match caption {
+        Some(c) if !c.trim().is_empty() => DocGate::Upload,
+        _ => DocGate::NeedCaption,
+    }
+}
+
+/// Conservative "yes, apply it" detector for the redline confirm step. A plain
+/// follow-up question must NOT trigger an apply.
+fn is_affirmative(t: &str) -> bool {
+    let l = t.trim().to_lowercase();
+    matches!(
+        l.as_str(),
+        "yes" | "y" | "yep" | "yeah" | "yes please" | "ok" | "okay" | "apply" | "apply it"
+            | "go ahead" | "do it" | "sure"
+    ) || l.starts_with("yes")
+}
+
+/// Upload `.docx` bytes to the backend as multipart (`file` part + `cache=true`
+/// so `content_hash` is set and the chat-link survives) and return the new
+/// document id. (Separate from `upload_document`, which omits `cache` and is used
+/// by the /analyze pipeline.)
+async fn upload_doc(cfg: &BotConfig, bytes: Vec<u8>, filename: &str) -> Result<String> {
+    let part = reqwest::multipart::Part::bytes(bytes)
+        .file_name(filename.to_string())
+        .mime_str(DOCX_MIME)
+        .map_err(|e| anyhow!("bad multipart part: {e}"))?;
+    let form = reqwest::multipart::Form::new()
+        .part("file", part)
+        .text("cache", "true");
+    let url = format!("{}/document", cfg.api_url.trim_end_matches('/'));
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .header("authorization", format!("Bearer {}", cfg.session_token))
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| anyhow!("could not reach backend at {url}: {e}"))?;
+    let v = json_or_err(resp, "upload").await?;
+    v.get("id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("upload response missing id"))
+}
+
+/// Handle a `.docx` upload with an instruction caption: gate → download →
+/// upload → turn-1 rubric review → ask to confirm, parking the doc for "yes".
+async fn handle_redline_upload(
+    bot: &Bot,
+    msg: &Message,
+    cfg: &BotConfig,
+    pending: &Pending,
+    redlines: &Redlines,
+) -> ResponseResult<()> {
+    let chat_id = msg.chat.id;
+    let Some(doc) = msg.document() else {
+        return Ok(());
+    };
+
+    let mime_owned = doc.mime_type.as_ref().map(|m| m.essence_str().to_string());
+    match gate_document(
+        doc.file_name.as_deref(),
+        mime_owned.as_deref(),
+        doc.file.size as usize,
+        msg.caption(),
+    ) {
+        DocGate::Reject(m) => {
+            bot.send_message(chat_id, m).await?;
+            return Ok(());
+        }
+        DocGate::NeedCaption => {
+            bot.send_message(
+                chat_id,
+                "Send the `.docx` again with a caption telling me what to review or \
+                 change (e.g. 'risk-review this settlement').",
+            )
+            .await?;
+            return Ok(());
+        }
+        DocGate::Upload => {}
+    }
+
+    let file_id = doc.file.id.clone();
+    let filename = doc
+        .file_name
+        .clone()
+        .unwrap_or_else(|| "document.docx".to_string());
+    let caption = msg.caption().unwrap_or("").trim().to_string();
+
+    let _ = bot.send_chat_action(chat_id, ChatAction::Typing).await;
+    let status = bot
+        .send_message(chat_id, "📄 Got the file — running a risk review…")
+        .await
+        .ok()
+        .map(|m| m.id);
+
+    // Download from Telegram (re-check the real byte length against the cap).
+    let bytes = match download_telegram_file(bot, &file_id).await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!("doc download failed: {e:#}");
+            let t = "⚠️ Couldn't download that file from Telegram — please try again.";
+            send_or_edit(bot, chat_id, status, t).await?;
+            return Ok(());
+        }
+    };
+    if bytes.len() > MAX_DOC_BYTES {
+        send_or_edit(bot, chat_id, status, "That file is over the 20 MB limit.").await?;
+        return Ok(());
+    }
+
+    // Upload to the backend.
+    let document_id = match upload_doc(cfg, bytes, &filename).await {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::error!("upload failed: {e:#}");
+            send_or_edit(
+                bot,
+                chat_id,
+                status,
+                "⚠️ Couldn't upload that document to Mike — please try again.",
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+
+    // Turn 1 — review only, no edits yet.
+    let review_prompt = format!(
+        "Risk-review this uploaded document against the litigation risk rubric. \
+         Produce the risk table only — do NOT edit yet.\n\nUser instruction: {caption}"
+    );
+    let turns = vec![ChatMsg {
+        role: "user".to_string(),
+        content: review_prompt,
+    }];
+    let outcome = match call_chat(bot, chat_id, cfg, pending, &turns, None, Some(&document_id)).await
+    {
+        Ok(o) => o,
+        Err(e) => {
+            send_or_edit(bot, chat_id, status, &format!("⚠️ {e}")).await?;
+            return Ok(());
+        }
+    };
+
+    if let Some(id) = status {
+        let _ = bot.delete_message(chat_id, id).await;
+    }
+
+    let review = if outcome.reply.trim().is_empty() {
+        "(the backend returned an empty review)".to_string()
+    } else {
+        outcome.reply
+    };
+    for chunk in split_for_telegram(&review) {
+        bot.send_message(chat_id, chunk).await?;
+    }
+    bot.send_message(chat_id, "Apply these as tracked changes? Reply 'yes'.")
+        .await?;
+
+    redlines.lock().await.insert(
+        chat_id,
+        RedlinePending {
+            document_id,
+            filename,
+            review,
+        },
+    );
+    Ok(())
+}
+
+/// Turn 2 — the user confirmed: instruct `edit_document` to apply the proposed
+/// fixes as tracked changes, then deliver the redlined `.docx` back.
+async fn apply_redline(
+    bot: &Bot,
+    msg: &Message,
+    cfg: &BotConfig,
+    pending: &Pending,
+    rl: RedlinePending,
+) -> ResponseResult<()> {
+    let chat_id = msg.chat.id;
+    let _ = bot.send_chat_action(chat_id, ChatAction::Typing).await;
+    let status = bot
+        .send_message(chat_id, "✍️ Applying tracked changes…")
+        .await
+        .ok()
+        .map(|m| m.id);
+
+    let turns = vec![
+        ChatMsg {
+            role: "user".to_string(),
+            content: "Risk-review this uploaded document and propose tracked-change edits."
+                .to_string(),
+        },
+        ChatMsg {
+            role: "assistant".to_string(),
+            content: rl.review.clone(),
+        },
+        ChatMsg {
+            role: "user".to_string(),
+            content: "Apply your proposed fixes to the uploaded Word file as tracked changes \
+                      now using edit_document (doc_id \"doc-0\")."
+                .to_string(),
+        },
+    ];
+    let outcome =
+        match call_chat(bot, chat_id, cfg, pending, &turns, None, Some(&rl.document_id)).await {
+            Ok(o) => o,
+            Err(e) => {
+                send_or_edit(bot, chat_id, status, &format!("⚠️ {e}")).await?;
+                return Ok(());
+            }
+        };
+
+    if let Some(id) = status {
+        let _ = bot.delete_message(chat_id, id).await;
+    }
+
+    // Relay the model's reply — it surfaces any `edit_document` error
+    // (e.g. clause-not-found) in prose rather than dropping it silently.
+    let reply = if outcome.reply.trim().is_empty() {
+        "Done — here is the redlined document.".to_string()
+    } else {
+        outcome.reply
+    };
+    for chunk in split_for_telegram(&reply) {
+        bot.send_message(chat_id, chunk).await?;
+    }
+
+    // Deliver the edited file (edit_document updated its storage_path).
+    match fetch_document(cfg, &rl.document_id).await {
+        Ok(bytes) => {
+            let out_name = format!("redlined-{}", rl.filename);
+            let file = InputFile::memory(bytes).file_name(out_name);
+            bot.send_document(chat_id, file).await?;
+        }
+        Err(e) => {
+            tracing::error!("redlined fetch failed for {}: {e:#}", rl.document_id);
+            bot.send_message(
+                chat_id,
+                "⚠️ Applied the review, but couldn't fetch the edited file — please try again.",
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+/// Edit an existing status message in place, or send a fresh one if there isn't
+/// one — used so an error replaces the "running…" placeholder instead of
+/// leaving it dangling.
+async fn send_or_edit(
+    bot: &Bot,
+    chat_id: ChatId,
+    status: Option<MessageId>,
+    text: &str,
+) -> ResponseResult<()> {
+    match status {
+        Some(id) => {
+            let _ = bot.edit_message_text(chat_id, id, text).await;
+        }
+        None => {
+            bot.send_message(chat_id, text).await?;
+        }
+    }
+    Ok(())
+}
+
 /// Split a reply into <=4096-char chunks, preferring line boundaries so a long
 /// legal answer still sends instead of being rejected by Telegram.
 fn split_for_telegram(text: &str) -> Vec<String> {
@@ -1890,9 +2257,31 @@ fn split_for_telegram(text: &str) -> Vec<String> {
 async fn handle_document(
     bot: Bot,
     msg: Message,
+    cfg: BotConfig,
+    tokens: Tokens,
+    pending: Pending,
     pending_files: PendingFiles,
+    ephemeral: Ephemeral,
 ) -> ResponseResult<()> {
     let chat_id = msg.chat.id;
+
+    // A single `.docx` sent WITH an instruction caption = redline intent: run
+    // the redline review flow and stop. Caption-less docs, photos and PDFs fall
+    // through to the /analyze staging below, completely unchanged.
+    if let Some(doc) = msg.document() {
+        let is_docx = doc
+            .file_name
+            .as_deref()
+            .map(|n| n.to_ascii_lowercase().ends_with(".docx"))
+            .unwrap_or(false);
+        let has_caption = msg.caption().map(|c| !c.trim().is_empty()).unwrap_or(false);
+        if is_docx && has_caption {
+            // Authenticate as the logged-in user (per-chat token), so the
+            // upload, review turn and redlined-file fetch all act as that user.
+            let cfg = with_token(&cfg, resolve_token(&tokens, chat_id, &cfg).await);
+            return handle_redline_upload(&bot, &msg, &cfg, &pending, &ephemeral.redlines).await;
+        }
+    }
 
     let pf = if let Some(doc) = msg.document() {
         let filename = doc.file_name.clone().unwrap_or_else(|| {
@@ -2653,6 +3042,51 @@ fn apply_analyze_event(raw: &str, p: &mut AnalyzeProgress) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gate_docx_with_caption_uploads() {
+        assert_eq!(
+            gate_document(Some("Brief.docx"), Some(DOCX_MIME), 1024, Some("risk-review this")),
+            DocGate::Upload
+        );
+    }
+
+    #[test]
+    fn gate_pdf_rejected_with_docx_message() {
+        match gate_document(Some("scan.pdf"), Some("application/pdf"), 1024, Some("review")) {
+            DocGate::Reject(m) => assert!(m.to_lowercase().contains("docx")),
+            other => panic!("expected Reject, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gate_oversize_docx_rejected() {
+        match gate_document(Some("big.docx"), Some(DOCX_MIME), MAX_DOC_BYTES + 1, Some("review")) {
+            DocGate::Reject(m) => assert!(m.contains("20 MB")),
+            other => panic!("expected size Reject, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gate_docx_without_caption_needs_caption() {
+        assert_eq!(
+            gate_document(Some("brief.docx"), None, 1024, Some("   ")),
+            DocGate::NeedCaption
+        );
+        assert_eq!(
+            gate_document(Some("brief.docx"), None, 1024, None),
+            DocGate::NeedCaption
+        );
+    }
+
+    #[test]
+    fn affirmative_detects_yes_not_questions() {
+        assert!(is_affirmative("yes"));
+        assert!(is_affirmative("Yes, apply it"));
+        assert!(is_affirmative("  OK  "));
+        assert!(!is_affirmative("what risks did you find?"));
+        assert!(!is_affirmative("no, leave it"));
+    }
 
     #[test]
     fn rejects_oversize_file_with_its_size() {
