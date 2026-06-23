@@ -1,6 +1,7 @@
 "use client";
 
-import { useRouter, useParams } from "next/navigation";
+import { Suspense } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { ChatView } from "@/app/components/assistant/ChatView";
 import { useAssistantChat } from "@/app/hooks/useAssistantChat";
@@ -8,10 +9,12 @@ import { useChatHistoryContext } from "@/app/contexts/ChatHistoryContext";
 import { getChat } from "@/app/lib/mikeApi";
 import type { MikeMessage } from "@/app/components/shared/types";
 
-export default function AssistantChatPage() {
+function AssistantChatClient() {
     const router = useRouter();
-    const params = useParams();
-    const id = params.id as string;
+    // Static export can only prerender a single static page, so the chat id
+    // travels in the query string (?id=<uuid>) instead of a dynamic path
+    // segment. useSearchParams() requires the Suspense boundary below.
+    const id = useSearchParams().get("id");
 
     const { setCurrentChatId, newChatMessages, setNewChatMessages } =
         useChatHistoryContext();
@@ -24,16 +27,21 @@ export default function AssistantChatPage() {
     // and clearing only when we auto-send mirrors the working project-chat page.
     const [initialMessages] = useState<MikeMessage[]>(newChatMessages ?? []);
     const { messages, isResponseLoading, handleChat, setMessages, cancel } =
-        useAssistantChat({ initialMessages, chatId: id });
+        useAssistantChat({ initialMessages, chatId: id ?? undefined });
 
     const hasAutoSent = useRef(false);
     const hasLoaded = useRef(false);
 
     useEffect(() => {
+        if (!id) {
+            router.replace("/assistant");
+            return;
+        }
         setCurrentChatId(id);
-    }, [id, setCurrentChatId]);
+    }, [id, setCurrentChatId, router]);
 
     useEffect(() => {
+        if (!id) return;
         if (hasLoaded.current) return;
         hasLoaded.current = true;
         getChat(id)
@@ -62,6 +70,8 @@ export default function AssistantChatPage() {
         }
     }, [newChatMessages, messages.length, isResponseLoading]); // eslint-disable-line react-hooks/exhaustive-deps
 
+    if (!id) return null;
+
     return (
         <ChatView
             messages={messages}
@@ -70,5 +80,13 @@ export default function AssistantChatPage() {
             cancel={cancel}
             showOfflineToggle
         />
+    );
+}
+
+export default function Page() {
+    return (
+        <Suspense fallback={null}>
+            <AssistantChatClient />
+        </Suspense>
     );
 }

@@ -1136,10 +1136,11 @@ export function useAssistantChat({
                     );
                 }
                 setCurrentChatId(finalChatId);
-                const chatBasePath = projectId
-                    ? `/projects/${projectId}/assistant/chat`
-                    : `/assistant/chat`;
-                router.replace(`${chatBasePath}/${finalChatId}`);
+                router.replace(
+                    projectId
+                        ? `/projects/${projectId}/assistant/chat/${finalChatId}`
+                        : `/assistant/chat?id=${finalChatId}`,
+                );
             }
 
             await loadChats();

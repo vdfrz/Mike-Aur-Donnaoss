@@ -13,7 +13,7 @@ export default function AssistantPage() {
 
     async function handleInitialSubmit(message: MikeMessage) {
         const chatId = await handleNewChat(message);
-        if (chatId) router.push(`/assistant/chat/${chatId}`);
+        if (chatId) router.push(`/assistant/chat?id=${chatId}`);
     }
 
     if (messages.length === 0) {

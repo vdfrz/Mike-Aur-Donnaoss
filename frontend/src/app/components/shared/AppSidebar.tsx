@@ -17,7 +17,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { useUserProfile } from "@/contexts/UserProfileContext";
 import { useChatHistoryContext } from "@/app/contexts/ChatHistoryContext";
 import { useOfflineMode } from "@/app/hooks/useOfflineMode";
-import { useRouter, usePathname } from "next/navigation";
+import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { MikeIcon } from "@/components/chat/mike-icon";
 import { SidebarChatItem } from "@/app/components/shared/SidebarChatItem";
@@ -34,6 +34,7 @@ export function AppSidebar({ isOpen, onToggle }: AppSidebarProps) {
     const { chats, currentChatId, setCurrentChatId } = useChatHistoryContext();
     const router = useRouter();
     const pathname = usePathname();
+    const searchParams = useSearchParams();
     const tSidebar = useTranslations("Sidebar");
     const tCommon = useTranslations("Common");
     const { isOffline } = useOfflineMode();
@@ -77,9 +78,10 @@ export function AppSidebar({ isOpen, onToggle }: AppSidebarProps) {
     }, [isDropdownOpen]);
 
     useEffect(() => {
-        if (pathname.startsWith("/assistant/chat/")) {
-            const chatId = pathname.split("/").pop() ?? null;
-            setCurrentChatId(chatId);
+        // Assistant chat is now a static route with the id in the query string
+        // (/assistant/chat?id=<uuid>), so read it from searchParams.
+        if (pathname === "/assistant/chat") {
+            setCurrentChatId(searchParams.get("id"));
             return;
         }
 
@@ -94,7 +96,7 @@ export function AppSidebar({ isOpen, onToggle }: AppSidebarProps) {
         if (pathname === "/assistant") {
             setCurrentChatId(null);
         }
-    }, [pathname, setCurrentChatId]);
+    }, [pathname, searchParams, setCurrentChatId]);
 
     const getUserInitials = (identifier?: string) => {
         if (profile?.displayName)
@@ -254,7 +256,7 @@ export function AppSidebar({ isOpen, onToggle }: AppSidebarProps) {
                                             router.push(
                                                 chat.project_id
                                                     ? `/projects/${chat.project_id}/assistant/chat/${chat.id}`
-                                                    : `/assistant/chat/${chat.id}`,
+                                                    : `/assistant/chat?id=${chat.id}`,
                                             );
                                         }}
                                     />
