@@ -332,27 +332,27 @@ const CHAT_THINKING = [
     "Connecting the dots",
     "Drafting a reply",
 ];
-const OUTPUT_THINKING = [
-    "Reading the documents",
-    "Pulling out the details",
-    "Structuring the draft",
-    "Formatting the document",
-];
 
 /**
  * Three bouncing dots followed by a slowly-rotating status snippet.
  * Pure cosmetic — the snippets cycle on a timer, they don't track real
  * backend progress (the chat/generate calls are single round-trips).
  */
-function ThinkingDots({ snippets }: { snippets: string[] }) {
-    const [i, setI] = useState(0);
+function ThinkingDots({ snippets, quirky }: { snippets?: string[]; quirky?: boolean }) {
+    // quirky → draw from the big legal-flavoured snippet pool (getRandomSnippet),
+    // otherwise rotate the fixed `snippets` array in order.
+    const [text, setText] = useState(() => (quirky ? getRandomSnippet() : (snippets?.[0] ?? "")));
     useEffect(() => {
-        const h = setInterval(
-            () => setI((v) => (v + 1) % snippets.length),
-            1500,
-        );
+        const tick = quirky
+            ? () => setText(getRandomSnippet())
+            : () => setText((cur) => {
+                  const list = snippets ?? [];
+                  const next = (list.indexOf(cur) + 1) % list.length;
+                  return list[next] ?? cur;
+              });
+        const h = setInterval(tick, quirky ? 2500 : 1500);
         return () => clearInterval(h);
-    }, [snippets.length]);
+    }, [quirky, snippets]);
     return (
         <span className="inline-flex items-center gap-2 text-gray-400">
             <span className="inline-flex items-center gap-1">
@@ -360,7 +360,7 @@ function ThinkingDots({ snippets }: { snippets: string[] }) {
                 <span className="mike-dot" style={{ animationDelay: "180ms" }} />
                 <span className="mike-dot" style={{ animationDelay: "360ms" }} />
             </span>
-            <span className="text-xs italic">{snippets[i]}…</span>
+            <span className="text-xs italic">{text}…</span>
         </span>
     );
 }
@@ -2515,7 +2515,7 @@ function OutputsTab({
                         <div className="text-sm font-medium text-gray-800">
                             {outputActions.find((a) => a.type === generatingOutput)?.label}
                         </div>
-                        <ThinkingDots snippets={OUTPUT_THINKING} />
+                        <ThinkingDots quirky />
                     </div>
                 </div>
             )}
