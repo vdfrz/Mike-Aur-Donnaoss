@@ -57,7 +57,7 @@ cargo tauri build
 # 7. Done
 Write-Host ""
 Write-Host "==> Build complete. Your installer (.msi / .exe) is under:"
-Write-Host "    src-tauri\target\release\bundle\"
+Write-Host "    target\release\bundle\  (or src-tauri\target\release\bundle\)"
 Write-Host "    Run it to install Mike aur Donna, then search 'Mike' in the Start menu."
 Write-Host ""
 Write-Host "    Note: if the OCR build step fails, install Tesseract for Windows and"

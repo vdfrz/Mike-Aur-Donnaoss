@@ -89,8 +89,10 @@ cargo tauri build
 
 # 8. Install it -------------------------------------------------------------
 if [ "$OS" = "Darwin" ]; then
-  APP="$(/usr/bin/find src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.app' 2>/dev/null | head -n1)"
-  [ -n "$APP" ] || fail "Build finished but no .app was found under src-tauri/target/release/bundle/macos/"
+  # Tauri v2 writes the bundle to the workspace-root target/ when the crate is a
+  # workspace member, but to src-tauri/target/ otherwise — search both.
+  APP="$(/usr/bin/find target/release/bundle/macos src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.app' 2>/dev/null | head -n1)"
+  [ -n "$APP" ] || fail "Build finished but no .app was found under target/release/bundle/macos/ or src-tauri/target/release/bundle/macos/"
   note "Installing $(basename "$APP") to /Applications…"
   rm -rf "/Applications/$(basename "$APP")"
   cp -R "$APP" /Applications/
@@ -99,6 +101,6 @@ if [ "$OS" = "Darwin" ]; then
   echo "==> Done. Search \"Mike\" in Spotlight to open it any time."
 else
   echo ""
-  echo "==> Build complete. Your installer is under src-tauri/target/release/bundle/."
+  echo "==> Build complete. Your installer is under target/release/bundle/ (or src-tauri/target/release/bundle/)."
   echo "    Run it to install, then launch Mike from your applications menu."
 fi
