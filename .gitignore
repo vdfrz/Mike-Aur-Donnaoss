@@ -42,7 +42,11 @@ mikerust-data/
 .huggingface/
 .hf_cache/
 **/huggingface_hub/
-models/
+# Root-level ML weight cache only. Anchored with a leading slash so it does
+# NOT swallow source dirs named "models" (e.g. the frontend route
+# frontend/src/app/account/models/). Weight files are caught by the
+# extension rules below regardless of directory.
+/models/
 *.onnx
 *.safetensors
 *.gguf
