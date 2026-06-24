@@ -65,10 +65,15 @@ pub async fn exec_kanoon_search(state: &AppState, user_id: &str, arguments: &Val
         .and_then(|v| v.as_u64())
         .unwrap_or(5)
         .min(MAX_RESULTS_RETURNED as u64) as usize;
+    // Fragments (per-result paragraph fetches) are the slow part of a search —
+    // one /doc call per hit. Default OFF so the search returns fast (titles +
+    // snippets + URLs); the model pulls authoritative paragraphs on demand via
+    // kanoon_get_fragment for only the 2-3 cases it actually cites. The case
+    // "Run Analysis" path opts back in explicitly (cases.rs).
     let include_fragments = arguments
         .get("include_fragments")
         .and_then(|v| v.as_bool())
-        .unwrap_or(true);
+        .unwrap_or(false);
 
     let ik_key = match resolve_ik_key(state, user_id).await {
         Some(k) => k,
@@ -204,7 +209,7 @@ pub async fn exec_kanoon_search(state: &AppState, user_id: &str, arguments: &Val
         "result_count": results.len(),
         "results": results,
         "advisory": "Indian Kanoon results — fast, comprehensive coverage but NOT infallible. Case titles, snippets, and ranking can occasionally drift from the canonical court record. ALWAYS treat these as preliminary until verified. For the 2-3 cases you will actually cite in your final answer, call kanoon_verify_case(tid, title, court, decision_date) to cross-check against the canonical Indian-high-court-judgments AWS dataset. This takes ~3-5 seconds per case and surfaces the canonical PDF URL when found. Do not verify every result — only the ones you cite. If you can't verify (network, court not mapped, not in AWS corpus), still cite the case but flag it in your prose as 'unverified — please confirm before relying'.",
-        "instructions_for_model": "Each result has tid, title, court, decision_date, snippet, kanoon_url, relevance_score, optional relevant_paragraphs (authoritative judgment text when present). The `verification` field is { status: 'PENDING', note: 'call kanoon_verify_case(tid) to cross-check' } — verification is opt-in per case to keep search fast. Cite cases as Markdown links: [Case Title](kanoon_url). When the cited paragraph comes from relevant_paragraphs, quote it directly — it's authoritative Kanoon text. Don't cite cases that aren't in this result set."
+        "instructions_for_model": "Each result has tid, title, court, decision_date, snippet, kanoon_url, relevance_score. To keep search FAST, full paragraph text is NOT fetched here — the snippet is enough to judge relevance. For the 2-3 cases you will actually CITE, call kanoon_get_fragment(tid, query) to pull authoritative judgment paragraphs and quote them directly; do NOT quote 'judgment text' you didn't fetch. The `verification` field is { status: 'PENDING' } — optionally call kanoon_verify_case(tid, title, court) for cases you cite. Cite cases as Markdown links: [Case Title](kanoon_url). Don't cite cases that aren't in this result set."
     })
     .to_string()
 }

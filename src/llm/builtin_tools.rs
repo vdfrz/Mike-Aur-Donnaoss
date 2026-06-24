@@ -187,7 +187,7 @@ pub fn schemas() -> Vec<ToolSchema> {
         ),
         fun(
             KANOON_SEARCH,
-            "Search Indian case law on Indian Kanoon. Use this whenever the user asks a question that depends on Indian statutes, court rulings, or legal precedent. Returns matching judgments with the actual query-relevant paragraphs extracted from each case (not just a one-line headline), plus a clickable URL. Prefer narrow, well-formed queries with field operators (court, fromdate, todate, doctypes, cites) over bare keywords — these are dramatically more accurate than vague searches. Cite results as Markdown links: [Case Title](kanoon_url). If `relevant_paragraphs` is present, the text inside is authoritative judgment text — quote it directly when supporting a legal argument. IMPORTANT: call this tool with a focused query, not the user's entire question. Do not call more than 3 times per user turn; if you can't find what you need, tell the user.",
+            "Search Indian case law on Indian Kanoon. Use this whenever the user asks a question that depends on Indian statutes, court rulings, or legal precedent. Returns matching judgments (title, court, date, snippet, clickable URL) FAST — full paragraph text is NOT fetched here. For the 2-3 cases you will actually CITE, call kanoon_get_fragment(tid, query) to pull authoritative judgment paragraphs to quote. Prefer narrow, well-formed queries with field operators (court, fromdate, todate, doctypes, cites) over bare keywords. IMPORTANT — be economical so the user isn't left waiting: run ONE broad search that combines all the legal issues in the question into a single query (e.g. 'court martial bias proportionality non-speaking order defence witnesses'), NOT a separate search per issue. Call at most 3 times per turn, ideally once; if you can't find what you need, tell the user. Cite results as Markdown links: [Case Title](kanoon_url).",
             json!({
                 "type": "object",
                 "properties": {
@@ -221,13 +221,13 @@ pub fn schemas() -> Vec<ToolSchema> {
                     },
                     "max_results": {
                         "type": "integer",
-                        "description": "Number of results to return (1-10, default 5). Each result includes extracted relevant paragraphs.",
+                        "description": "Number of results to return (1-10, default 5).",
                         "minimum": 1,
                         "maximum": 10
                     },
                     "include_fragments": {
                         "type": "boolean",
-                        "description": "If true (default), fetch query-relevant paragraphs for each result so you can quote actual judgment text. Set false ONLY for fast title-level scans where you'll narrow down with a second call."
+                        "description": "Default FALSE — search returns fast (titles + snippets + URLs) and you pull paragraph text on demand with kanoon_get_fragment for the 2-3 cases you cite. Set true ONLY when you genuinely need query-relevant paragraphs for every result inline (slower: one extra fetch per result)."
                     }
                 },
                 "required": ["query"]
