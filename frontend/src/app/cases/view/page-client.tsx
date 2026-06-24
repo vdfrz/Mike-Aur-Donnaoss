@@ -552,7 +552,7 @@ function CaseChatBubble({ msg, blurNames, isStreaming = false }: {
 /** Resolve the model string to send for case chat based on user's LLM config.
  *  Mirrors the backend's resolve_analysis_model logic so the frontend can
  *  pass the right model without needing a backend recompile. */
-function resolveChatModel(llm: { activeProvider?: string | null; claudeModel?: string | null; claudeApiKey?: string | null; geminiApiKey?: string | null; openaiModel?: string | null; openaiApiKey?: string | null; localModel?: string | null } | null): string | undefined {
+function resolveChatModel(llm: { activeProvider?: string | null; claudeModel?: string | null; claudeApiKey?: string | null; geminiApiKey?: string | null; openaiModel?: string | null; openaiApiKey?: string | null; localModel?: string | null; localApiKey?: string | null } | null): string | undefined {
     if (!llm) return undefined;
     if (llm.activeProvider === "claude" && llm.claudeApiKey) {
         return llm.claudeModel || "claude-sonnet-4-6";
@@ -562,6 +562,12 @@ function resolveChatModel(llm: { activeProvider?: string | null; claudeModel?: s
     }
     if (llm.activeProvider === "openai" && llm.openaiApiKey && llm.openaiModel) {
         return `openai:${llm.openaiModel}`;
+    }
+    if (llm.activeProvider === "deepseek" && llm.localApiKey) {
+        return `local:${llm.localModel || "deepseek-chat"}`;
+    }
+    if (llm.activeProvider === "local" && llm.localModel) {
+        return `local:${llm.localModel}`;
     }
     return undefined; // let backend decide
 }

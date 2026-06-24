@@ -4911,7 +4911,17 @@ pub(crate) async fn stream_chat_root(
     // Resolve LLM config from the user's saved settings
     let user_settings = fetch_llm_settings(&state.db, &auth.user_id).await.ok();
     let raw_model = model_request
-        .or_else(|| user_settings.as_ref().and_then(|s| s.main_model.clone()))
+        .or_else(|| {
+            user_settings.as_ref().and_then(|s| {
+                match s.active_provider.as_deref() {
+                    Some("deepseek") => s.local_model.as_ref().map(|m| format!("local:{m}")),
+                    Some("gemini") => Some("gemini-2.0-flash".to_string()),
+                    Some("openai") => s.openai_model.as_ref().map(|m| format!("openai:{m}")),
+                    Some("local") => s.local_model.as_ref().map(|m| format!("local:{m}")),
+                    _ => s.main_model.clone(),
+                }
+            })
+        })
         .unwrap_or_else(|| "local:qwen2.5:3b".to_string());
 
     let local_config = if raw_model.starts_with("local:") || raw_model.starts_with("openai:") {
