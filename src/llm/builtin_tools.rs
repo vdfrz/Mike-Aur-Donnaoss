@@ -373,6 +373,7 @@ pub fn schemas() -> Vec<ToolSchema> {
 pub async fn dispatch(
     state: &AppState,
     user_id: &str,
+    chat_id: &str,
     doc_label_map: &HashMap<String, String>,
     case_id: Option<&str>,
     name: &str,
@@ -386,7 +387,7 @@ pub async fn dispatch(
         READ_DOCUMENT => exec_read_document(state, user_id, doc_label_map, arguments).await,
         FIND_IN_DOCUMENT => exec_find_in_document(state, user_id, doc_label_map, arguments).await,
         READ_WORKFLOW => exec_read_workflow(state, user_id, arguments).await,
-        DRAFT_DOCUMENT => exec_draft_document(state, user_id, doc_label_map, arguments).await,
+        DRAFT_DOCUMENT => exec_draft_document(state, user_id, chat_id, doc_label_map, arguments).await,
         RENDER_WORD => exec_render_word(state, user_id, doc_label_map, arguments).await,
         EDIT_DOCUMENT => exec_edit_document(state, user_id, doc_label_map, arguments).await,
         KANOON_SEARCH => crate::llm::kanoon_tool::exec_kanoon_search(state, user_id, arguments).await,
@@ -683,6 +684,7 @@ fn validate_legal_draft(body: &str) -> Vec<String> {
 async fn exec_draft_document(
     state: &AppState,
     user_id: &str,
+    chat_id: &str,
     doc_label_map: &HashMap<String, String>,
     arguments: &Value,
 ) -> String {
@@ -723,12 +725,17 @@ async fn exec_draft_document(
             }
             // Upsert: keep storage_path as-is (a previously-rendered .docx is now
             // stale, but render_word re-renders from markdown_source on demand).
+            // `chat_id = COALESCE(chat_id, ?)` links older NULL-chat drafts to
+            // this chat on their next edit so the cross-turn restore SELECT
+            // (which keys on documents.chat_id) can find them.
             if let Err(e) = sqlx::query(
-                "UPDATE documents SET filename = ?, markdown_source = ?, status = 'draft' \
+                "UPDATE documents SET filename = ?, markdown_source = ?, status = 'draft', \
+                 chat_id = COALESCE(chat_id, ?) \
                  WHERE id = ? AND user_id = ?",
             )
             .bind(&filename)
             .bind(&body)
+            .bind(chat_id)
             .bind(id)
             .bind(user_id)
             .execute(&state.db)
@@ -741,11 +748,12 @@ async fn exec_draft_document(
         None => {
             let new_id = uuid::Uuid::new_v4().to_string();
             if let Err(e) = sqlx::query(
-                "INSERT INTO documents (id, user_id, project_id, filename, file_type, size_bytes, storage_path, status, markdown_source) \
-                 VALUES (?, ?, NULL, ?, 'docx', 0, NULL, 'draft', ?)",
+                "INSERT INTO documents (id, user_id, project_id, chat_id, filename, file_type, size_bytes, storage_path, status, markdown_source) \
+                 VALUES (?, ?, NULL, ?, ?, 'docx', 0, NULL, 'draft', ?)",
             )
             .bind(&new_id)
             .bind(user_id)
+            .bind(chat_id)
             .bind(&filename)
             .bind(&body)
             .execute(&state.db)

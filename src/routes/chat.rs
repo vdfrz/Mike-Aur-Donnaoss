@@ -6217,6 +6217,7 @@ pub(crate) async fn stream_chat_root(
                             builtin_tools::dispatch(
                                 &state_clone,
                                 &auth.user_id,
+                                &chat_id_clone,
                                 &doc_label_map,
                                 case_id_for_citations.as_deref(),
                                 &call.name,
