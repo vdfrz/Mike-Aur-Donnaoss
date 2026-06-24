@@ -84,20 +84,43 @@ async fn chat(
     let mut message = message.trim().to_string();
 
     // Fold any readable attachment text into the message the model triages.
+    // Don't swallow extractor errors: a failed/empty extraction (e.g. a PDF
+    // that couldn't be parsed) must be surfaced, not silently dropped, or the
+    // user gets a misleading "attach a marked-up document" 400.
     let mut attach_count = 0usize;
+    let mut attach_failures: Vec<String> = Vec::new();
     for (fname, bytes) in &attachments {
-        if let Ok((text, _)) = crate::sync::scanner::extract_text_dispatch(Path::new(fname), bytes) {
-            if !text.trim().is_empty() {
-                attach_count += 1;
-                let snippet: String = text.trim().chars().take(MAX_ATTACHMENT_TEXT).collect();
-                message.push_str(&format!("\n\n--- ATTACHMENT: {fname} ---\n{snippet}"));
+        match crate::sync::scanner::extract_text_dispatch(Path::new(fname), bytes) {
+            Ok((text, skip_reason)) => {
+                if !text.trim().is_empty() {
+                    attach_count += 1;
+                    let snippet: String = text.trim().chars().take(MAX_ATTACHMENT_TEXT).collect();
+                    message.push_str(&format!("\n\n--- ATTACHMENT: {fname} ---\n{snippet}"));
+                } else {
+                    let reason =
+                        skip_reason.unwrap_or_else(|| "no readable text found".to_string());
+                    attach_failures.push(format!("{fname}: {reason}"));
+                }
             }
+            Err(e) => attach_failures.push(format!("{fname}: {e}")),
         }
     }
     if message.is_empty() && attach_count > 0 {
         message = "Apply the feedback in the attached document(s).".to_string();
     }
     if message.is_empty() {
+        // If the only input was attachments and none yielded usable text, tell
+        // the user *why* each failed instead of pretending nothing was attached.
+        if !attach_failures.is_empty() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "Couldn't read the attached document(s).",
+                    "details": attach_failures,
+                })),
+            )
+                .into_response();
+        }
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "Tell Mike what to change, or attach a marked-up document." })),

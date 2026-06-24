@@ -39,6 +39,21 @@ interface ServerChatDetailOut {
 const API_BASE =
     process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:3001";
 
+// Mirror apiRequest's 401 self-heal for streaming responses (which bypass
+// apiRequest): clear the stale token and bounce to /login so an expired
+// session mid-chat doesn't strand the UI with a raw "HTTP 401" and leave a
+// dead token that fails every later send. Returns the response unchanged so
+// callers can keep checking response.ok for non-401 errors.
+function handleStreamAuth(response: Response): Response {
+    if (response.status === 401 && typeof window !== "undefined") {
+        localStorage.removeItem("mike_auth_token");
+        localStorage.removeItem("mike_auth_user");
+        window.location.href = "/login";
+        throw new Error("Session expired");
+    }
+    return response;
+}
+
 function getAuthHeader(): Record<string, string> {
     const token =
         typeof window !== "undefined"
@@ -461,7 +476,7 @@ export async function streamChat(payload: {
 }): Promise<Response> {
     const { signal, ...body } = payload;
     const authHeaders = getAuthHeader();
-    return fetch(`${API_BASE}/chat`, {
+    const response = await fetch(`${API_BASE}/chat`, {
         method: "POST",
         headers: {
             "Content-Type": "application/json",
@@ -471,6 +486,7 @@ export async function streamChat(payload: {
         body: JSON.stringify(body),
         signal,
     });
+    return handleStreamAuth(response);
 }
 
 type StreamChatMessage = {
@@ -492,7 +508,7 @@ export async function streamProjectChat(payload: {
 }): Promise<Response> {
     const { projectId, signal, ...body } = payload;
     const authHeaders = getAuthHeader();
-    return fetch(`${API_BASE}/projects/${projectId}/chat`, {
+    const response = await fetch(`${API_BASE}/projects/${projectId}/chat`, {
         method: "POST",
         headers: {
             "Content-Type": "application/json",
@@ -502,6 +518,7 @@ export async function streamProjectChat(payload: {
         body: JSON.stringify(body),
         signal,
     });
+    return handleStreamAuth(response);
 }
 
 // ---------------------------------------------------------------------------

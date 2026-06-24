@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
 import ReactMarkdown from "react-markdown";
 import remarkMath from "remark-math";
@@ -122,6 +122,24 @@ export function DocPanel({
     const tDV = useTranslations("DocViewer");
     const useDocxView = isDocxFilename(filename);
 
+    // Bug #7: after an accept/reject the backend rewrites the docx bytes in
+    // place (same version path). The bytes cache is invalidated upstream, but
+    // the already-mounted DocxView won't refetch unless a prop changes. Bump
+    // this key on every resolve (panel buttons OR a resolve propagated from
+    // the inline EditCard/bulk bar via mode.edit.status) so DocxView re-runs
+    // its fetch and the open panel shows the post-resolve bytes immediately.
+    const [refetchKey, setRefetchKey] = useState(0);
+    const editStatus = mode.kind === "edit" ? mode.edit.status : null;
+    const prevEditStatusRef = useRef(editStatus);
+    useEffect(() => {
+        const prev = prevEditStatusRef.current;
+        prevEditStatusRef.current = editStatus;
+        // Only bump on a real pending -> resolved transition for this edit.
+        if (prev === "pending" && editStatus && editStatus !== "pending") {
+            setRefetchKey((k) => k + 1);
+        }
+    }, [editStatus]);
+
     const quotes: CitationQuote[] | undefined = useMemo(() => {
         if (mode.kind !== "citation") return undefined;
         return expandCitationToEntries(mode.citation);
@@ -235,6 +253,7 @@ export function DocPanel({
                     documentId={documentId}
                     versionId={versionId ?? undefined}
                     kbPath={kbPath ?? undefined}
+                    refetchKey={refetchKey}
                     quotes={quotes}
                     highlightEdit={highlightEdit}
                     warning={warning ?? null}

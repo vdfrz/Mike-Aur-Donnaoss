@@ -918,40 +918,38 @@ async fn exec_edit_document(
         .await;
 
     // Build annotations for the frontend
-    let annotations: Vec<Value> = result.changes.iter().enumerate().map(|(i, c)| {
+    let mut annotations: Vec<Value> = Vec::with_capacity(result.changes.len());
+    for (i, c) in result.changes.iter().enumerate() {
         let edit_id = uuid::Uuid::new_v4().to_string();
         let change_id = format!("change-{}", i);
 
-        // Store each edit record
-        let db = state.db.clone();
-        let edit_id_c = edit_id.clone();
-        let real_id_c = real_id.clone();
-        let version_id_c = version_id.clone();
-        let change_id_c = change_id.clone();
+        // Store each edit record inline (await + propagate) rather than in a
+        // detached spawn: a fire-and-forget insert can race the next reload or
+        // hit SQLITE_BUSY, leaving the version row present but the edit rows
+        // missing so the reload's INNER JOIN drops the doc_edited card.
         let del = c.del_w_id.clone().unwrap_or_default();
         let ins = c.ins_w_id.clone().unwrap_or_default();
-        let del_text = c.deleted_text.clone();
-        let ins_text = c.inserted_text.clone();
-        tokio::spawn(async move {
-            let _ = sqlx::query(
-                "INSERT OR IGNORE INTO document_edits \
-                 (id, document_id, version_id, change_id, del_w_id, ins_w_id, \
-                  deleted_text, inserted_text, status) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')"
-            )
-                .bind(&edit_id_c)
-                .bind(&real_id_c)
-                .bind(&version_id_c)
-                .bind(&change_id_c)
-                .bind(&del)
-                .bind(&ins)
-                .bind(&del_text)
-                .bind(&ins_text)
-                .execute(&db)
-                .await;
-        });
+        if let Err(e) = sqlx::query(
+            "INSERT OR IGNORE INTO document_edits \
+             (id, document_id, version_id, change_id, del_w_id, ins_w_id, \
+              deleted_text, inserted_text, status) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')"
+        )
+            .bind(&edit_id)
+            .bind(&real_id)
+            .bind(&version_id)
+            .bind(&change_id)
+            .bind(&del)
+            .bind(&ins)
+            .bind(&c.deleted_text)
+            .bind(&c.inserted_text)
+            .execute(&state.db)
+            .await
+        {
+            return json!({"error": format!("edit record write: {e}")}).to_string();
+        }
 
-        json!({
+        annotations.push(json!({
             "type": "edit_data",
             "kind": "edit",
             "edit_id": edit_id,
@@ -964,8 +962,8 @@ async fn exec_edit_document(
             "deleted_text": c.deleted_text,
             "inserted_text": c.inserted_text,
             "status": "pending",
-        })
-    }).collect();
+        }));
+    }
 
     let summary: Vec<Value> = edits
         .iter()

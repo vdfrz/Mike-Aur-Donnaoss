@@ -1106,6 +1106,25 @@ export function useAssistantChat({
             flushDrip();
             finalizeStreamingReasoning();
 
+            // Back-fill the assistant message's plain `content` from its
+            // content events. apiMessages maps `content` (not `events`), so
+            // without this the model sees blank prior assistant turns until a
+            // reload re-derives content from events (multi-turn context loss).
+            const assistantText = eventsRef.current
+                .filter((e): e is { type: "content"; text: string } => e.type === "content" && "text" in e)
+                .map((e) => e.text)
+                .join("");
+            if (assistantText) {
+                setMessages((prev) => {
+                    const updated = [...prev];
+                    const last = updated[updated.length - 1];
+                    if (last?.role === "assistant") {
+                        updated[updated.length - 1] = { ...last, content: assistantText };
+                    }
+                    return updated;
+                });
+            }
+
             // Collect reasoning text from events so it can be passed back
             // to DeepSeek on subsequent turns (required by their API).
             const reasoningParts = eventsRef.current
@@ -1161,6 +1180,9 @@ export function useAssistantChat({
         } catch (error: any) {
             if (error.name === "AbortError") {
                 flushDrip();
+                // Drop any "Thinking…"/"Running…" placeholder so an abort
+                // before any content doesn't strand it next to the cancel notice.
+                clearStreamingPlaceholders();
                 const cancelText = tAssistant("cancelledByUser");
                 setMessages((prev) => {
                     const last = prev[prev.length - 1];
@@ -1207,7 +1229,10 @@ export function useAssistantChat({
                     ];
                 });
             } else {
-                stopDrip();
+                // Reveal received-but-not-yet-dripped text (and finalize the
+                // last content event) before attaching the error, instead of
+                // discarding the buffered drip with a bare stopDrip().
+                flushDrip();
                 const errorMessage =
                     typeof error?.message === "string" && error.message
                         ? error.message

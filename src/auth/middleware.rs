@@ -25,6 +25,19 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
         // Bypass auth entirely when MIKE_BYPASS_AUTH=true (used by word-addin).
         // This is safe only on a local machine — do NOT set in production/Tauri builds.
         if std::env::var("MIKE_BYPASS_AUTH").as_deref() == Ok("true") {
+            // Ensure the synthetic "local-user" profile exists so owner-scoped
+            // reads return data and FK-bound inserts (which REFERENCE
+            // user_profiles(id)) don't 500. INSERT OR IGNORE is idempotent, so
+            // it's safe to run on every bypass request. pin_hash is a NOT NULL
+            // placeholder — the bypass path never authenticates with a PIN.
+            let _ = sqlx::query(
+                "INSERT OR IGNORE INTO user_profiles (id, username, pin_hash) VALUES (?, ?, ?)",
+            )
+            .bind("local-user")
+            .bind("local-user")
+            .bind("")
+            .execute(&state.db)
+            .await;
             return Ok(AuthUser {
                 user_id: "local-user".into(),
                 username: "local-user".into(),

@@ -42,6 +42,7 @@ import { ProjectExplorer } from "@/app/components/projects/ProjectExplorer";
 import { DocView } from "@/app/components/shared/DocView";
 import { OwnerOnlyModal } from "@/app/components/shared/OwnerOnlyModal";
 import { DocxView } from "@/app/components/shared/DocxView";
+import { invalidateDocxBytes } from "@/app/hooks/useFetchDocxBytes";
 import { MikeIcon } from "@/components/chat/mike-icon";
 import { useAuth } from "@/contexts/AuthContext";
 import { useUserProfile } from "@/contexts/UserProfileContext";
@@ -251,6 +252,15 @@ export default function ProjectAssistantChatPage({ params }: Props) {
     const hasLoaded = useRef(false);
     const hasAutoSent = useRef(false);
     const hasInitialScrolled = useRef(false);
+    // Bug #16: tracks whether a turn is already streaming/loading locally so
+    // the async getChat loader (resolving after the auto-send fires) doesn't
+    // clobber an in-progress streamed turn with the stale persisted history.
+    const turnInProgressRef = useRef(false);
+    useEffect(() => {
+        if (isResponseLoading || messages.length > initialMessages.length) {
+            turnInProgressRef.current = true;
+        }
+    }, [isResponseLoading, messages.length, initialMessages.length]);
 
     useEffect(() => {
         setSidebarOpen(false);
@@ -319,7 +329,11 @@ export default function ProjectAssistantChatPage({ params }: Props) {
             .then(({ chat, messages: loaded }) => {
                 setChatTitle(chat.title);
                 setChatOwnerId(chat.user_id ?? null);
-                if (loaded.length > 0) setMessages(loaded);
+                // Bug #16: skip the overwrite if a turn started streaming
+                // while this load was in flight — otherwise we'd replace the
+                // live streamed messages with the older persisted history.
+                if (loaded.length > 0 && !turnInProgressRef.current)
+                    setMessages(loaded);
             })
             .catch(() =>
                 router.replace(`/projects/view?id=${projectId}&tab=assistant`),
@@ -496,14 +510,27 @@ export default function ProjectAssistantChatPage({ params }: Props) {
         });
     };
 
-    const handleEditResolved = (_args: {
+    const handleEditResolved = (args: {
         editId: string;
         documentId: string;
         status: "accepted" | "rejected";
         versionId: string | null;
         downloadUrl: string | null;
     }) => {
-        void _args;
+        // Bug #7: accept/reject rewrites the docx bytes in place. Drop the
+        // cached bytes and bump the open tab's refetchKey so the mounted
+        // DocxView refetches the post-resolve file instead of staying on the
+        // stale redline markup until a tab switch/reload. Bump inside the
+        // functional updater so back-to-back resolves on the same doc each
+        // increment from the latest state (no stale-closure collision).
+        invalidateDocxBytes(args.documentId);
+        setTabs((prev) =>
+            prev.map((t) =>
+                t.documentId === args.documentId
+                    ? { ...t, refetchKey: (t.refetchKey ?? 0) + 1 }
+                    : t,
+            ),
+        );
     };
 
     const patchTab = (documentId: string, patch: Partial<DocTab>) => {
@@ -1034,6 +1061,7 @@ export default function ProjectAssistantChatPage({ params }: Props) {
                                 key={`${activeTab.documentId}-${activeTab.versionId ?? ""}`}
                                 documentId={activeTab.documentId}
                                 versionId={activeTab.versionId ?? undefined}
+                                refetchKey={activeTab.refetchKey}
                                 quotes={activeTab.quotes ?? undefined}
                                 onReady={() =>
                                     handleDocxReady(activeTab.documentId)

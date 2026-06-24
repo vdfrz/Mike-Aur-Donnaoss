@@ -22,8 +22,14 @@ function ProjectAssistantChatGate() {
     }, [id, chatId, router]);
 
     if (!id || !chatId) return null;
+    // Static query-param routing reuses this component instance when only the
+    // query changes; key by both ids to force a remount and reset mount-once
+    // load state when a different chat is selected.
     return (
-        <ProjectAssistantChatPage params={Promise.resolve({ id, chatId })} />
+        <ProjectAssistantChatPage
+            key={`${id}:${chatId}`}
+            params={Promise.resolve({ id, chatId })}
+        />
     );
 }
 

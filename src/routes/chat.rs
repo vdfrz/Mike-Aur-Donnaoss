@@ -7606,6 +7606,7 @@ async fn post_message(
                     .await;
             }
             Ok(mut stream) => {
+                let mut errored = false;
                 while let Some(event) = stream.next().await {
                     match event {
                         Ok(StreamEvent::ContentDelta(text)) => {
@@ -7640,7 +7641,17 @@ async fn post_message(
                                 .unwrap_or_default();
                             let _ = tx.send(Ok(Event::default().event("delta").data(data))).await;
                         }
-                        Ok(StreamEvent::Done) | Err(_) => break,
+                        Ok(StreamEvent::Done) => break,
+                        // A mid-stream provider Err must be surfaced as an `error`
+                        // event and must not let the truncated partial be persisted
+                        // as a finished turn — mirror stream_chat_root's split arm.
+                        Err(e) => {
+                            errored = true;
+                            let _ = tx
+                                .send(Ok(Event::default().event("error").data(e.to_string())))
+                                .await;
+                            break;
+                        }
                         _ => {}
                     }
                 }
@@ -7648,33 +7659,36 @@ async fn post_message(
                 // Persist assistant message. Final safety pass: restore any
                 // placeholder split across stream chunks before storing (the
                 // per-delta deanonymize above can miss a token split at a chunk
-                // boundary).
-                let asst_msg_id = uuid::Uuid::new_v4().to_string();
-                let persisted_content = if let Some(ref map) = pii_mapping {
-                    crate::pii::deanonymize(&full_response, map)
-                } else {
-                    full_response.clone()
-                };
-                let _ = sqlx::query(
-                    "INSERT INTO messages (id, chat_id, role, content) VALUES (?, ?, 'assistant', ?)",
-                )
-                .bind(&asst_msg_id)
-                .bind(&chat_id_clone)
-                .bind(&persisted_content)
-                .execute(&state_clone.db)
-                .await;
+                // boundary). Skip persistence + `done` when the stream errored
+                // mid-flight or produced nothing.
+                if !errored && !full_response.is_empty() {
+                    let asst_msg_id = uuid::Uuid::new_v4().to_string();
+                    let persisted_content = if let Some(ref map) = pii_mapping {
+                        crate::pii::deanonymize(&full_response, map)
+                    } else {
+                        full_response.clone()
+                    };
+                    let _ = sqlx::query(
+                        "INSERT INTO messages (id, chat_id, role, content) VALUES (?, ?, 'assistant', ?)",
+                    )
+                    .bind(&asst_msg_id)
+                    .bind(&chat_id_clone)
+                    .bind(&persisted_content)
+                    .execute(&state_clone.db)
+                    .await;
 
-                // Update chat timestamp
-                let _ = sqlx::query(
-                    "UPDATE chats SET updated_at = datetime('now') WHERE id = ?",
-                )
-                .bind(&chat_id_clone)
-                .execute(&state_clone.db)
-                .await;
+                    // Update chat timestamp
+                    let _ = sqlx::query(
+                        "UPDATE chats SET updated_at = datetime('now') WHERE id = ?",
+                    )
+                    .bind(&chat_id_clone)
+                    .execute(&state_clone.db)
+                    .await;
 
-                let done_data = serde_json::to_string(&json!({ "message_id": asst_msg_id }))
-                    .unwrap_or_default();
-                let _ = tx.send(Ok(Event::default().event("done").data(done_data))).await;
+                    let done_data = serde_json::to_string(&json!({ "message_id": asst_msg_id }))
+                        .unwrap_or_default();
+                    let _ = tx.send(Ok(Event::default().event("done").data(done_data))).await;
+                }
             }
         }
     });

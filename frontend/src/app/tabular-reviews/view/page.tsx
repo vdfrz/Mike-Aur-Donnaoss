@@ -15,7 +15,9 @@ function TabularReviewViewGate() {
     }, [id, router]);
 
     if (!id) return null;
-    return <ClientPage params={Promise.resolve({ id })} />;
+    // Static query-param routing reuses this component instance when only ?id
+    // changes; key by ?id to force a remount and reset mount-once load state.
+    return <ClientPage key={id} params={Promise.resolve({ id })} />;
 }
 
 export default function Page() {

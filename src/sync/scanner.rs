@@ -481,7 +481,16 @@ pub fn extract_text_dispatch(path: &Path, bytes: &[u8]) -> Result<(String, Optio
         }
         #[cfg(feature = "pdf")]
         "pdf" => {
-            let pages = crate::pdf::extract_text(path)?;
+            // Extract from the bytes we already hold, not by re-opening `path`
+            // on disk. This makes the dispatch work for in-memory uploads
+            // (e.g. "Mike listens" attachments) whose bytes were never written
+            // to disk — the previous path-based load looked up a bare filename
+            // in cwd and errored, silently dropping the attachment.
+            let label = path
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let pages = crate::pdf::extract_text_from_bytes(bytes, &label)?;
             // Concatenate pages with markers so retrieval can keep
             // some locality info when chunks straddle pages.
             let mut out = String::new();

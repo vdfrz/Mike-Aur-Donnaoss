@@ -50,7 +50,18 @@ function AssistantChatClient() {
                 // message streams in — don't treat empty-but-OK as "missing"
                 // and bounce away (that's what orphaned the blank chats). Only
                 // a real fetch error redirects.
-                if (loaded.length > 0) setMessages(loaded);
+                // Don't clobber an in-progress streamed turn: if the loader
+                // resolves after auto-send started, `loaded` is only the
+                // persisted user msg and would wipe the streaming assistant
+                // placeholder. Skip when a response is already streaming or an
+                // assistant turn already exists in memory.
+                setMessages((prev) => {
+                    const streaming =
+                        prev.some((m) => m.role === "assistant") ||
+                        isResponseLoading;
+                    if (streaming) return prev;
+                    return loaded.length > 0 ? loaded : prev;
+                });
             })
             .catch(() => router.replace("/assistant"));
     }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -83,10 +94,18 @@ function AssistantChatClient() {
     );
 }
 
+function KeyedAssistantChatClient() {
+    // Static query-param routing reuses this route's component instance when only
+    // ?id changes, so key by ?id to force a remount and reset mount-once load
+    // state when a different chat is selected.
+    const id = useSearchParams().get("id");
+    return <AssistantChatClient key={id ?? "none"} />;
+}
+
 export default function Page() {
     return (
         <Suspense fallback={null}>
-            <AssistantChatClient />
+            <KeyedAssistantChatClient />
         </Suspense>
     );
 }

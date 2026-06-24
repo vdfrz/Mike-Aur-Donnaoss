@@ -399,20 +399,25 @@ pub async fn evolve(db: &SqlitePool, user_id: &str, triage: &Triage) -> Result<E
         }
     }
 
-    // Bump the generation only when the harness actually changed.
-    let generation = current_generation(db, user_id).await;
+    // Bump the generation only when the harness actually changed. Increment
+    // atomically in one statement (generation + 1, returning the new value) so
+    // two simultaneous turns can't both read N and write N+1 — bug #14. The
+    // increment is also inherently non-regressing: it never overwrites a higher
+    // generation with a stale Rust-side read — bug #13.
     if !edits.is_empty() {
-        let next = generation + 1;
-        sqlx::query(
-            "INSERT INTO harness_state (user_id, generation, updated_at) VALUES (?, ?, datetime('now')) \
-             ON CONFLICT(user_id) DO UPDATE SET generation = excluded.generation, updated_at = excluded.updated_at",
+        let (next,): (i64,) = sqlx::query_as(
+            "INSERT INTO harness_state (user_id, generation, updated_at) VALUES (?, 1, datetime('now')) \
+             ON CONFLICT(user_id) DO UPDATE SET generation = harness_state.generation + 1, updated_at = datetime('now') \
+             RETURNING generation",
         )
         .bind(user_id)
-        .bind(next)
-        .execute(db)
+        .fetch_one(db)
         .await?;
         return Ok(EvolveResult { generation: next, edits });
     }
+    // Nothing changed: report the current generation. A transient read error
+    // surfaces (no longer silently collapsed to 0) — bug #13.
+    let generation = current_generation(db, user_id).await;
     Ok(EvolveResult { generation, edits })
 }
 
@@ -432,27 +437,45 @@ fn similar_rules(a: &str, b: &str) -> bool {
 }
 
 /// Find the active lesson whose rule best overlaps a retract description.
-/// Requires at least one shared significant (>3 char) word.
+/// Requires a strong overlap (≥2 shared significant words, or a majority of the
+/// description's words) so a single generic word can't deprecate an unrelated
+/// rule — bug #4 (over-eager retraction match).
 fn best_match(description: &str, active: &[(String, String)]) -> Option<(String, String)> {
-    let want: Vec<String> = significant_words(description);
+    // Dedupe the description's words so a repeated word can't inflate the
+    // shared-word count and out-score a candidate sharing more distinct words — bug #12.
+    let want: std::collections::HashSet<String> =
+        significant_words(description).into_iter().collect();
     if want.is_empty() {
         return None;
     }
     let mut best: Option<(usize, &(String, String))> = None;
     for cand in active {
-        let have = significant_words(&cand.1);
-        let shared = want.iter().filter(|w| have.contains(w)).count();
-        if shared >= 1 && best.map_or(true, |(b, _)| shared > b) {
+        let have: std::collections::HashSet<String> =
+            significant_words(&cand.1).into_iter().collect();
+        let shared = want.iter().filter(|w| have.contains(*w)).count();
+        // Require ≥2 shared words, or a majority of the description's words — a
+        // single shared generic word is not enough to retract a rule (bug #4).
+        let strong = shared >= 2 || (shared * 2 > want.len() && shared >= 1);
+        if strong && best.map_or(true, |(b, _)| shared > b) {
             best = Some((shared, cand));
         }
     }
     best.map(|(_, c)| (c.0.clone(), c.1.clone()))
 }
 
+/// Generic words that carry no rule-identifying signal; filtered so a retraction
+/// sharing only a stopword can't match an unrelated rule (bug #4).
+const STOPWORDS: &[&str] = &[
+    "every", "that", "with", "shall", "case", "this", "from", "into", "your",
+    "their", "have", "must", "always", "never", "when", "what", "which", "should",
+    "would", "about", "rule", "rules", "mike", "draft", "drafts", "document",
+    "documents", "legal", "writer",
+];
+
 fn significant_words(s: &str) -> Vec<String> {
     normalize_rule(s)
         .split(' ')
-        .filter(|w| w.len() > 3)
+        .filter(|w| w.len() > 3 && !STOPWORDS.contains(w))
         .map(String::from)
         .collect()
 }
@@ -460,14 +483,22 @@ fn significant_words(s: &str) -> Vec<String> {
 // ── Read helpers (store + prompt injection) ──────────────────────────────────
 
 pub async fn current_generation(db: &SqlitePool, user_id: &str) -> i64 {
-    sqlx::query_as::<_, (i64,)>("SELECT generation FROM harness_state WHERE user_id = ?")
+    // Distinguish a transient SELECT error from a genuine "no row": only the
+    // missing-row case is generation 0. An error is surfaced (logged) instead of
+    // being silently collapsed to 0 — bug #13. The write path no longer depends
+    // on this value, so a logged error here can't cause a regressing write.
+    match sqlx::query_as::<_, (i64,)>("SELECT generation FROM harness_state WHERE user_id = ?")
         .bind(user_id)
         .fetch_optional(db)
         .await
-        .ok()
-        .flatten()
-        .map(|(g,)| g)
-        .unwrap_or(0)
+    {
+        Ok(Some((g,))) => g,
+        Ok(None) => 0,
+        Err(e) => {
+            tracing::error!(error = %e, user_id, "failed to read harness generation");
+            0
+        }
+    }
 }
 
 /// Active lessons, ranked by effectiveness then reinforcement.

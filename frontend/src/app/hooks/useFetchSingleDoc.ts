@@ -124,7 +124,12 @@ export function useFetchSingleDoc(
                 if ((e as { name?: string })?.name === "AbortError") {
                     return;
                 }
-                if (!cancelled) setError("Failed to load document.");
+                // Surface the HTTP status (e.g. "HTTP 404/500") in the on-screen
+                // text — the .app has no devtools to inspect the thrown error.
+                if (!cancelled)
+                    setError(
+                        `Failed to load document — ${e instanceof Error ? e.message : "unknown"}.`,
+                    );
             } finally {
                 if (!cancelled) setLoading(false);
             }

@@ -51,9 +51,13 @@ impl SessionStore {
             return Ok(None);
         };
 
-        let expires_at = DateTime::parse_from_rfc3339(&exp_str)
-            .map(|d| d.with_timezone(&Utc))
-            .unwrap_or(Utc::now());
+        // Fail closed on a corrupt expires_at: an unparseable timestamp means
+        // we can't prove the token is still valid, so treat it as invalid/expired
+        // rather than defaulting to now() (which would make the token never expire).
+        let Ok(expires_at) = DateTime::parse_from_rfc3339(&exp_str).map(|d| d.with_timezone(&Utc))
+        else {
+            return Ok(None);
+        };
 
         if Utc::now() > expires_at {
             self.revoke(&tok).await?;

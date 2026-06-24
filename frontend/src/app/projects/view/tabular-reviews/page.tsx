@@ -22,7 +22,15 @@ function ProjectTabularReviewGate() {
     }, [id, reviewId, router]);
 
     if (!id || !reviewId) return null;
-    return <ClientPage params={Promise.resolve({ id, reviewId })} />;
+    // Static query-param routing reuses this component instance when only the
+    // query changes; key by both ids to force a remount and reset mount-once
+    // load state when a different review is selected.
+    return (
+        <ClientPage
+            key={`${id}:${reviewId}`}
+            params={Promise.resolve({ id, reviewId })}
+        />
+    );
 }
 
 export default function Page() {

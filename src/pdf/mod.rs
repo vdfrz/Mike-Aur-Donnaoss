@@ -233,16 +233,32 @@ pub fn extract_text(path: &Path) -> Result<Vec<PageText>> {
     let doc = pdfium
         .load_pdf_from_file(path, None)
         .map_err(|e| anyhow!("pdfium load error: {e}"))?;
+    let label = path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    extract_text_from_doc(&pdfium, &doc, &label)
+}
 
+/// Same as `extract_text`, but for a PDF held in memory (an uploaded file whose
+/// bytes were never written to disk). pdfium loads directly from the byte slice,
+/// so no temp file is needed. `label` is only used for log lines.
+#[cfg(feature = "pdf")]
+pub fn extract_text_from_bytes(bytes: &[u8], label: &str) -> Result<Vec<PageText>> {
+    let pdfium = load_pdfium()?;
+    let doc = pdfium
+        .load_pdf_from_byte_slice(bytes, None)
+        .map_err(|e| anyhow!("pdfium load error: {e}"))?;
+    extract_text_from_doc(&pdfium, &doc, label)
+}
+
+/// Shared per-page extraction (native text + OCR fallback) over an already-loaded
+/// document, so the path-based and bytes-based entry points run identical logic.
+#[cfg(feature = "pdf")]
+fn extract_text_from_doc(pdfium: &Pdfium, doc: &PdfDocument<'_>, label: &str) -> Result<Vec<PageText>> {
     let total = doc.pages().len() as usize;
     if total > 0 {
-        tracing::info!(
-            "[pdf] {}: extracting {} pages",
-            path.file_name()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_default(),
-            total
-        );
+        tracing::info!("[pdf] {}: extracting {} pages", label, total);
     }
 
     let mut pages = Vec::new();
@@ -253,7 +269,7 @@ pub fn extract_text(path: &Path) -> Result<Vec<PageText>> {
         let final_text = if needs_ocr {
             #[cfg(feature = "tesseract")]
             {
-                match ocr_page(&pdfium, &page, i) {
+                match ocr_page(pdfium, &page, i) {
                     Ok(ocr_text) if !ocr_text.is_empty() => {
                         tracing::info!(
                             "[pdf] page {}: OCR recovered {} chars",
@@ -293,14 +309,7 @@ pub fn extract_text(path: &Path) -> Result<Vec<PageText>> {
             needs_ocr: still_needs_ocr,
         });
         if total > 10 && (i + 1) % 10 == 0 {
-            tracing::info!(
-                "[pdf] {}: {}/{} pages",
-                path.file_name()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_default(),
-                i + 1,
-                total
-            );
+            tracing::info!("[pdf] {}: {}/{} pages", label, i + 1, total);
         }
     }
     Ok(pages)
