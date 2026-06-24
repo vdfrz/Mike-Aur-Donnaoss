@@ -866,26 +866,44 @@ fn pages_to_data_urls(pngs: Vec<Vec<u8>>) -> Vec<String> {
 /// Read attached documents from storage and extract their text and/or images.
 /// `vision_ok` lets scanned PDFs fall back to rendered page images.
 pub(crate) async fn load_attached_docs(
-    state: &AppState,
+    db: &sqlx::SqlitePool,
     user_id: &str,
     document_ids: &[String],
     vision_ok: bool,
 ) -> Vec<DocPayload> {
     let mut out = Vec::new();
     for doc_id in document_ids {
-        let row: Option<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
-            "SELECT filename, file_type, storage_path, extracted_text_path \
+        let row: Option<(String, String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT filename, file_type, storage_path, extracted_text_path, markdown_source \
              FROM documents WHERE id = ? AND user_id = ?",
         )
         .bind(doc_id)
         .bind(user_id)
-        .fetch_optional(&state.db)
+        .fetch_optional(db)
         .await
         .ok()
         .flatten();
 
-        let Some((filename, file_type, Some(storage_path), extracted_text_path)) = row
+        let Some((filename, file_type, storage_path, extracted_text_path, markdown_source)) = row
         else {
+            continue;
+        };
+
+        // Model-authored drafts keep their body in `markdown_source` (the source
+        // of truth; `storage_path` stays NULL until render_word writes a .docx).
+        // Surface that text directly so the model can SEE and revise its own
+        // draft on a later turn — otherwise the draft is invisible to the prompt
+        // and the model insists it never drafted anything when asked to edit it.
+        // Uploaded docs have a NULL markdown_source and fall through to storage.
+        if let Some(md) = markdown_source.as_ref().filter(|s| !s.trim().is_empty()) {
+            out.push(DocPayload {
+                filename: filename.clone(),
+                text: Some(md.clone()),
+                images: Vec::new(),
+            });
+            continue;
+        }
+        let Some(storage_path) = storage_path else {
             continue;
         };
 
@@ -4962,6 +4980,40 @@ pub(crate) async fn stream_chat_root(
         }
     }
 
+    // Surface the chat's existing draft so the model can see and revise it.
+    // `doc_ids` holds only the docs attached to THIS message, so a draft the
+    // model authored on an earlier turn is otherwise invisible to the prompt —
+    // and the model then insists it never drafted anything when asked to edit
+    // it. On an edit turn (and only when the user attached nothing of their
+    // own), look up the chat's latest draft — the builtin_tools chat_id link
+    // makes this reliable — and add it to the doc set BEFORE the docs are
+    // loaded, so its body flows into the system prompt as `doc-0`. This must
+    // run before `load_attached_docs` below; computing it after prompt assembly
+    // (the old position) only mapped the label and left the content invisible.
+    let active_doc_uuid: Option<String> = if doc_ids.is_empty() {
+        sqlx::query_as::<_, (String,)>(
+            "SELECT id FROM documents WHERE chat_id = ? AND user_id = ? \
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(&chat_id)
+        .bind(&auth.user_id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .map(|(id,)| id)
+    } else {
+        None
+    };
+    let edit_kind = detect_edit_kind(&last_user_query, active_doc_uuid.is_some());
+    if edit_kind != EditKind::None {
+        if let Some(ref uuid) = active_doc_uuid {
+            if !doc_ids.iter().any(|d| d == uuid) {
+                doc_ids.push(uuid.clone());
+            }
+        }
+    }
+
     // Discover MCP, load attached docs, retrieve KB chunks, and pull
     // a library inventory in parallel. The inventory is what tells the
     // model "the user has the GDPR and AI Act in their indexed library"
@@ -4974,7 +5026,7 @@ pub(crate) async fn stream_chat_root(
         .unwrap_or_default();
     let (attached_docs, mcp_servers, kb_chunks, library_inventory) = tokio::join!(
         async {
-            load_attached_docs(&state, &auth.user_id, &doc_ids, vision_ok).await
+            load_attached_docs(&state.db, &auth.user_id, &doc_ids, vision_ok).await
         },
         discover_mcp_for_user(&state, &auth.user_id),
         async {
@@ -5379,42 +5431,11 @@ pub(crate) async fn stream_chat_root(
         .map(|m| m.content.clone())
         .unwrap_or_else(|| last_user_query.clone());
 
-    // Restore the chat's active draft at the START of the turn, before any
-    // generation. A draft is created on an earlier request and `last_doc_uuid`
-    // is per-request, so a later edit turn ("change point 4") would otherwise
-    // have no target and the model just replies that it never drafted anything.
-    // Only when no docs are explicitly attached — an attached doc is named in
-    // the edit-intent check below, so it doesn't need this implicit restore.
-    let active_doc_uuid: Option<String> = if doc_label_map.is_empty() {
-        sqlx::query_as::<_, (String,)>(
-            "SELECT id FROM documents WHERE chat_id = ? AND user_id = ? \
-             ORDER BY created_at DESC LIMIT 1",
-        )
-        .bind(&chat_id)
-        .bind(&auth.user_id)
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten()
-        .map(|(id,)| id)
-    } else {
-        None
-    };
-
-    // `is_drafting_request` is computed once during prompt assembly (above) and
-    // reused here for the streaming hybrid-draft path.
-
-    let edit_kind = detect_edit_kind(&last_user_query, active_doc_uuid.is_some());
-
-    // An edit that targets the chat's existing draft: expose that draft as
-    // `doc-0` so the tracked-change path (and the edit_document tool) resolve a
-    // target. `last_doc_uuid` is deliberately left untouched — it carries
-    // "drafted this turn" semantics used for message-linking after generation.
-    if edit_kind != EditKind::None {
-        if let Some(ref uuid) = active_doc_uuid {
-            doc_label_map.insert("doc-0".to_string(), uuid.clone());
-        }
-    }
+    // `active_doc_uuid` and `edit_kind` are computed earlier (before the docs
+    // are loaded) so a restored draft flows into the system prompt as `doc-0`
+    // with its body — see the draft-restore block above. doc_label_map already
+    // maps `doc-0` to it via the `doc_ids` loop, and `last_doc_uuid` is left
+    // untouched (it carries "drafted this turn" semantics for message-linking).
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(64);
     let state_clone = state.clone();
@@ -6214,16 +6235,43 @@ pub(crate) async fn stream_chat_root(
 
                         let result = if builtin_tools::is_builtin(&call.name) {
                             tracing::info!("[chat] dispatching builtin tool: {}", call.name);
-                            builtin_tools::dispatch(
-                                &state_clone,
-                                &auth.user_id,
-                                &chat_id_clone,
-                                &doc_label_map,
-                                case_id_for_citations.as_deref(),
-                                &call.name,
-                                effective_input,
+                            // Bound builtin tools the same way client (180s) and
+                            // MCP tools are bounded. Without this the dispatch
+                            // could hang the SSE stream indefinitely if an
+                            // external call stalls (e.g. Indian Kanoon when the
+                            // account/key is mis-provisioned) — the user saw an
+                            // infinite spinner stuck on one step. On timeout,
+                            // hand the model an error result so it finishes the
+                            // turn instead of spinning forever.
+                            match tokio::time::timeout(
+                                std::time::Duration::from_secs(120),
+                                builtin_tools::dispatch(
+                                    &state_clone,
+                                    &auth.user_id,
+                                    &chat_id_clone,
+                                    &doc_label_map,
+                                    case_id_for_citations.as_deref(),
+                                    &call.name,
+                                    effective_input,
+                                ),
                             )
                             .await
+                            {
+                                Ok(r) => r,
+                                Err(_) => {
+                                    tracing::warn!(
+                                        "[chat] builtin tool '{}' timed out after 120s",
+                                        call.name
+                                    );
+                                    json!({
+                                        "error": format!(
+                                            "{} timed out after 120s — the external service did not respond. Tell the user the lookup failed and answer from what you already have.",
+                                            call.name
+                                        )
+                                    })
+                                    .to_string()
+                                }
+                            }
                         } else if builtin_tools::is_client_tool(&call.name) {
                             tracing::info!("[chat] dispatching client-side tool: {}", call.name);
                             let request_id = uuid::Uuid::new_v4().to_string();
@@ -8005,6 +8053,67 @@ fn truncate_on_char_boundary(text: &str, max: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{extract_citations_block, sanitise_annotations_quotes, strip_page_markers, clean_draft_text, extract_text_from_model_json, truncate_on_char_boundary, detect_edit_kind, EditKind};
+
+    /// A model-authored draft stores its body in `markdown_source` with a NULL
+    /// `storage_path` (no .docx is rendered until the user asks). Before the
+    /// fix, `load_attached_docs` matched only `Some(storage_path)` and silently
+    /// skipped such rows — so a later "delete clause 6" turn never put the draft
+    /// in the prompt and the model insisted it never drafted anything. This test
+    /// pins the draft down: it must come back as loadable text. An uploaded row
+    /// with neither a storage file nor markdown must still be skipped.
+    #[tokio::test]
+    async fn load_attached_docs_surfaces_markdown_draft() {
+        use sqlx::sqlite::SqlitePoolOptions;
+        let db = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        // Subset of the documents table touched by load_attached_docs.
+        sqlx::query(
+            "CREATE TABLE documents (id TEXT PRIMARY KEY, user_id TEXT, \
+             project_id TEXT, chat_id TEXT, filename TEXT, file_type TEXT, \
+             size_bytes INTEGER, storage_path TEXT, extracted_text_path TEXT, \
+             status TEXT, markdown_source TEXT, created_at TEXT DEFAULT (datetime('now')))",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        // A draft exactly as exec_draft_document writes it: NULL storage_path,
+        // body in markdown_source.
+        sqlx::query(
+            "INSERT INTO documents (id, user_id, chat_id, filename, file_type, \
+             size_bytes, storage_path, status, markdown_source) \
+             VALUES ('doc-1','user-1','chat-1','Bail Application.docx','docx',0,NULL,'draft',?)",
+        )
+        .bind("# Bail Application\n\n6. Clause six — the impugned condition.")
+        .execute(&db)
+        .await
+        .unwrap();
+        // An upload row with no storage file and no markdown — must be skipped.
+        sqlx::query(
+            "INSERT INTO documents (id, user_id, chat_id, filename, file_type, \
+             size_bytes, storage_path, status, markdown_source) \
+             VALUES ('doc-2','user-1','chat-1','empty.pdf','pdf',0,NULL,'pending',NULL)",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let out = super::load_attached_docs(
+            &db,
+            "user-1",
+            &["doc-1".to_string(), "doc-2".to_string()],
+            false,
+        )
+        .await;
+
+        assert_eq!(out.len(), 1, "draft loads, empty upload is skipped");
+        let text = out[0].text.as_deref().unwrap_or("");
+        assert!(text.contains("Clause six"), "draft body must reach the prompt: {text:?}");
+        assert_eq!(out[0].filename, "Bail Application.docx");
+    }
 
     #[test]
     fn reload_rebuilds_doc_edited_events_grouped_by_version_with_status() {

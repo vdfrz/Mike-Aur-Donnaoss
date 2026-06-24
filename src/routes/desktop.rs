@@ -43,10 +43,37 @@ async fn open_in_word(
     let (filename, storage_path) = match row {
         Some((f, Some(s))) => (f, s),
         Some((f, None)) => {
-            return Err(err(
-                StatusCode::BAD_REQUEST,
-                &format!("Document '{f}' has no local file (stored in S3/R2)"),
-            ));
+            // A model-authored draft has no rendered .docx yet — its body lives
+            // in markdown_source. Render it on demand (the same helper the
+            // render_word tool uses, which also sets storage_path) so "Open in
+            // Word" works instead of dead-ending. If there is genuinely nothing
+            // to render (an uploaded S3/R2 file with no markdown), the helper's
+            // message surfaces as a 400.
+            crate::routes::documents::render_document_to_docx(
+                &state,
+                &auth.user_id,
+                &body.document_id,
+            )
+            .await
+            .map_err(|e| err(StatusCode::BAD_REQUEST, &format!("Document '{f}': {e}")))?;
+            let rendered: Option<String> = sqlx::query_scalar::<_, Option<String>>(
+                "SELECT storage_path FROM documents WHERE id = ? AND user_id = ?",
+            )
+            .bind(&body.document_id)
+            .bind(&auth.user_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+            .flatten();
+            match rendered {
+                Some(s) => (f, s),
+                None => {
+                    return Err(err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "render produced no file",
+                    ))
+                }
+            }
         }
         None => return Err(err(StatusCode::NOT_FOUND, "Document not found")),
     };
