@@ -6235,16 +6235,17 @@ pub(crate) async fn stream_chat_root(
 
                         let result = if builtin_tools::is_builtin(&call.name) {
                             tracing::info!("[chat] dispatching builtin tool: {}", call.name);
-                            // Bound builtin tools the same way client (180s) and
-                            // MCP tools are bounded. Without this the dispatch
-                            // could hang the SSE stream indefinitely if an
-                            // external call stalls (e.g. Indian Kanoon when the
-                            // account/key is mis-provisioned) — the user saw an
-                            // infinite spinner stuck on one step. On timeout,
-                            // hand the model an error result so it finishes the
-                            // turn instead of spinning forever.
+                            // Bound builtin tools the same way client tools are
+                            // bounded (180s). Without this the dispatch could
+                            // hang the SSE stream indefinitely if an external
+                            // call stalls (e.g. a slow Indian Kanoon search) —
+                            // the user saw an infinite spinner stuck on one step
+                            // ("Working 170s elapsed"). 180s gives a slow-but-
+                            // working search room to finish; past that, hand the
+                            // model an error result so it finishes the turn
+                            // instead of spinning forever.
                             match tokio::time::timeout(
-                                std::time::Duration::from_secs(120),
+                                std::time::Duration::from_secs(180),
                                 builtin_tools::dispatch(
                                     &state_clone,
                                     &auth.user_id,
@@ -6260,12 +6261,12 @@ pub(crate) async fn stream_chat_root(
                                 Ok(r) => r,
                                 Err(_) => {
                                     tracing::warn!(
-                                        "[chat] builtin tool '{}' timed out after 120s",
+                                        "[chat] builtin tool '{}' timed out after 180s",
                                         call.name
                                     );
                                     json!({
                                         "error": format!(
-                                            "{} timed out after 120s — the external service did not respond. Tell the user the lookup failed and answer from what you already have.",
+                                            "{} timed out after 180s — the external service did not respond. Tell the user the lookup failed and answer from what you already have.",
                                             call.name
                                         )
                                     })
